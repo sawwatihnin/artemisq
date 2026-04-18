@@ -2963,8 +2963,10 @@ export default function App() {
         weather: weatherData ?? null,
         dsnVisibility: dsnVisibility ? {
           windows: dsnVisibility.windows.map((window) => ({
-            start: window.startTime,
-            end: window.endTime,
+            stationId: window.stationId,
+            stationName: window.stationName,
+            startTime: window.startTime,
+            endTime: window.endTime,
             durationMinutes: window.durationMinutes,
             maxElevationDeg: window.maxElevationDeg,
           })),
