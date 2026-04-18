@@ -148,6 +148,7 @@ interface SystemEphemerisFeed {
 }
 
 interface NearEarthRadiationFeed {
+  fetchedAt?: string;
   environment: {
     aggregateIndex: number;
     zones: Array<{ label: string; innerRadiusKm: number; outerRadiusKm: number; severity: number; color: string }>;
@@ -158,6 +159,34 @@ interface NearEarthRadiationFeed {
     stormLevel?: string;
     protonFlux10MeV?: number;
     electronFluxGeo?: number;
+    observedAt?: string | null;
+  };
+  donki?: {
+    eventCount?: number;
+    severeFlareCount?: number;
+    sepCount?: number;
+    radiationBoost?: number;
+    windowEnd?: string;
+  };
+  source: string;
+}
+
+interface RadiationIntersectionFeed {
+  assessment: {
+    totalTraversedDistanceKm: number;
+    totalWeightedExposureScore: number;
+    normalizedRiskIndex: number;
+    maxZoneSeverity: number;
+    crossings: number;
+    zoneIntersections: Array<{
+      label: string;
+      severity: number;
+      entered: boolean;
+      samplesInside: number;
+      peakRadiusKm: number;
+      traversedDistanceKm: number;
+      weightedExposureScore: number;
+    }>;
   };
   source: string;
 }
@@ -1464,6 +1493,7 @@ export default function App() {
   const [solarBodies, setSolarBodies] = useState<SolarBodiesFeed | null>(null);
   const [systemEphemeris, setSystemEphemeris] = useState<SystemEphemerisFeed | null>(null);
   const [nearEarthRadiation, setNearEarthRadiation] = useState<NearEarthRadiationFeed | null>(null);
+  const [radiationIntersection, setRadiationIntersection] = useState<RadiationIntersectionFeed | null>(null);
   const [gravityInfluence, setGravityInfluence] = useState<GravityInfluenceFeed | null>(null);
   const [eonetEvents, setEonetEvents] = useState<ExternalEventFeed | null>(null);
   const [celestrakTraffic, setCelestrakTraffic] = useState<ExternalConjunctionFeed | null>(null);
@@ -1552,7 +1582,7 @@ export default function App() {
         fetch('/api/space-weather').then((res) => res.json()),
         fetch('/api/bodies').then((res) => res.json()),
         fetch(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`).then((res) => res.json()),
-        fetch('/api/radiation/near-earth?days=7').then((res) => res.json()),
+        fetch('/api/radiation/live?days=7').then((res) => res.json()),
         fetch('/api/eonet/events?status=open&limit=4&days=14').then((res) => res.json()),
         fetch('/api/celestrak/conjunctions?group=STATIONS&limit=10').then((res) => res.json()),
         fetch('/api/telemetry/latest').then((res) => res.json()),
@@ -1645,7 +1675,11 @@ export default function App() {
           end: activeGraph.nodes[activeGraph.nodes.length - 1]?.id ?? preset.end,
           steps: Math.max(2, activeGraph.nodes.length),
           date: launchDate,
-          radiationIndex: Math.max(nasaWeather?.radiationIndex || 1.0, nearEarthRadiation?.environment?.aggregateIndex || 1.0),
+          radiationIndex: Math.max(
+            nasaWeather?.radiationIndex || 1.0,
+            nearEarthRadiation?.environment?.aggregateIndex || 1.0,
+            radiationIntersection?.assessment?.normalizedRiskIndex || 1.0,
+          ),
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
@@ -1941,6 +1975,36 @@ export default function App() {
     };
     analyzeGravity();
   }, [systemEphemeris, missionTrajectory, missionKmPerUnit]);
+
+  useEffect(() => {
+    const analyzeRadiationIntersection = async () => {
+      if (launchBodyId !== 'earth' || !missionTrajectory.length || !nearEarthRadiation?.environment?.zones?.length) {
+        setRadiationIntersection(null);
+        return;
+      }
+      try {
+        const response = await fetch('/api/radiation/intersections', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trajectory: missionTrajectory.map((point) => ({
+              time_s: point.time_s,
+              pos: [
+                point.pos[0] * missionKmPerUnit,
+                point.pos[1] * missionKmPerUnit,
+                point.pos[2] * missionKmPerUnit,
+              ],
+            })),
+          }),
+        });
+        const data = await response.json();
+        setRadiationIntersection(data);
+      } catch {
+        setRadiationIntersection(null);
+      }
+    };
+    analyzeRadiationIntersection();
+  }, [launchBodyId, missionTrajectory, missionKmPerUnit, nearEarthRadiation]);
   const missionStages = useMemo(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
     return derived.length
@@ -1975,8 +2039,17 @@ export default function App() {
       <div className="relative z-10 mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-4">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
           <div>
-            <h1 className="text-xl font-bold uppercase tracking-[0.28em]">ARTEMIS-Q</h1>
-            <p className="text-sm text-slate-400">Physics-informed mission analysis with explicit provenance and STL-driven ascent optimization.</p>
+            <div className="flex items-center gap-3">
+              <img
+                src="/logo.png"
+                alt="ARTEMIS-Q logo"
+                className="h-12 w-12 rounded-lg border border-slate-700 bg-slate-950/70 object-contain p-1 shadow-[0_8px_30px_rgba(0,0,0,0.35)]"
+              />
+              <div>
+                <h1 className="text-xl font-bold uppercase tracking-[0.28em]">ARTEMIS-Q</h1>
+                <p className="text-sm text-slate-400">Physics-informed mission analysis with explicit provenance and STL-driven ascent optimization.</p>
+              </div>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {(['mission', 'physics', 'vehicle', 'quantum'] as const).map((tab) => (
@@ -2665,9 +2738,38 @@ export default function App() {
                       })()}
                       <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
                         <p>{nearEarthRadiation?.environment?.source ?? 'Radiation environment unavailable.'}</p>
+                        {nearEarthRadiation?.goes?.observedAt ? (
+                          <p className="mt-1">GOES observed: {new Date(nearEarthRadiation.goes.observedAt).toLocaleString()}</p>
+                        ) : null}
+                        {nearEarthRadiation?.donki?.windowEnd ? (
+                          <p className="mt-1">DONKI window end: {new Date(nearEarthRadiation.donki.windowEnd).toLocaleDateString()}</p>
+                        ) : null}
                         {nearEarthRadiation?.environment?.notes?.slice(0, 2).map((note, index) => (
                           <p key={index} className="mt-1">{note}</p>
                         ))}
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                        {radiationIntersection?.assessment ? (
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <MetricBadge label="Belt Risk" value={radiationIntersection.assessment.normalizedRiskIndex.toFixed(2)} unit="index" />
+                              <MetricBadge label="Crossings" value={radiationIntersection.assessment.crossings.toFixed(0)} unit="zones" />
+                              <MetricBadge label="In-Zone Path" value={radiationIntersection.assessment.totalTraversedDistanceKm.toFixed(0)} unit="km" />
+                              <MetricBadge label="Peak Severity" value={radiationIntersection.assessment.maxZoneSeverity.toFixed(2)} unit="level" />
+                            </div>
+                            <div className="space-y-1 text-xs text-slate-400">
+                              {radiationIntersection.assessment.zoneIntersections.filter((item) => item.entered).length ? radiationIntersection.assessment.zoneIntersections.filter((item) => item.entered).map((item) => (
+                                <p key={item.label}>
+                                  {item.label}: {item.traversedDistanceKm.toFixed(0)} km in-zone, exposure score {item.weightedExposureScore.toFixed(0)}
+                                </p>
+                              )) : (
+                                <p>No modeled Van Allen belt penetration was detected on the current trajectory.</p>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-sm text-slate-400">Trajectory intersection scoring is available when the active path is Earth-centered.</p>
+                        )}
                       </div>
                     </div>
                   </DashboardCard>

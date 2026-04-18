@@ -63,7 +63,6 @@ export function assessTrajectoryRadiationIntersections(
     };
   }
 
-  let totalTraversedDistanceKm = 0;
   let totalWeightedExposureScore = 0;
   let crossings = 0;
 
@@ -89,7 +88,6 @@ export function assessTrajectoryRadiationIntersections(
       }
       if (i > 0) {
         const segDistance = distanceKm(trajectory[i - 1], point);
-        totalTraversedDistanceKm += zone === environment.zones[0] ? segDistance : 0;
         const prevInside = isInsideZone(radiusKm(trajectory[i - 1]), zone);
         if (inside || prevInside) {
           traversedDistanceKm += segDistance;
@@ -111,6 +109,7 @@ export function assessTrajectoryRadiationIntersections(
       weightedExposureScore,
     };
   });
+  const totalTraversedDistanceKm = zoneIntersections.reduce((sum, item) => sum + item.traversedDistanceKm, 0);
 
   const maxZoneSeverity = zoneIntersections.reduce((max, item) => Math.max(max, item.entered ? item.severity : 0), 0);
   const normalizedRiskIndex = clamp(

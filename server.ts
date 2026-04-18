@@ -20,6 +20,8 @@ import {
 } from "./src/lib/horizons.ts";
 import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
 import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
+import { getLatestRadiationSnapshot, getRadiationSnapshotHistory, ingestLiveRadiationSnapshot } from "./src/lib/radiationIngest.ts";
+import { assessTrajectoryRadiationIntersections } from "./src/lib/radiationIntersection.ts";
 import { buildNearEarthRadiationEnvironment } from "./src/lib/radiationModel.ts";
 import { fetchSolarBodies, fetchSolarBody, fetchSolarSkyPositions, mergeCelestialFallback } from "./src/lib/solarSystem.ts";
 import { fetchGoesRadiationSummary } from "./src/lib/swpcGoes.ts";
@@ -310,6 +312,49 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Near-Earth radiation fetch failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.get("/api/radiation/live", async (req, res) => {
+    try {
+      const snapshot = await ingestLiveRadiationSnapshot(Number(req.query.days ?? 7));
+      res.json(snapshot);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Live radiation ingest failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.get("/api/radiation/live/latest", (_req, res) => {
+    res.json({
+      snapshot: getLatestRadiationSnapshot(),
+      source: 'LIVE · NOAA SWPC GOES + NASA CCMC DONKI Ingest',
+    });
+  });
+
+  app.get("/api/radiation/live/history", (req, res) => {
+    res.json({
+      snapshots: getRadiationSnapshotHistory(Number(req.query.limit ?? 12)),
+      source: 'LIVE · NOAA SWPC GOES + NASA CCMC DONKI Ingest',
+    });
+  });
+
+  app.post("/api/radiation/intersections", async (req, res) => {
+    try {
+      const trajectory = Array.isArray(req.body?.trajectory) ? req.body.trajectory : [];
+      if (!trajectory.length) {
+        return res.status(400).json({ error: 'trajectory is required' });
+      }
+
+      const days = Number(req.body?.days ?? req.query.days ?? 7);
+      const snapshot = getLatestRadiationSnapshot() ?? await ingestLiveRadiationSnapshot(days);
+      const assessment = assessTrajectoryRadiationIntersections(trajectory, snapshot.environment);
+      res.json({
+        assessment,
+        snapshot,
+        source: `${snapshot.source} + modeled trajectory intersection scoring`,
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Radiation intersection assessment failed', source: 'UPSTREAM ERROR' });
     }
   });
 
