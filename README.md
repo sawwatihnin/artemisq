@@ -52,7 +52,10 @@ The current codebase is aimed at fast, physically credible analysis in real time
 - Exposes:
   - layer-wise `gamma` / `beta`
   - expected energy
+  - layer entropy and participation ratio
   - final basis-state probability distribution
+  - qubit occupation probabilities
+  - nearest-neighbor `ZZ` correlations
   - deterministic shot-style counts sampled from the final probability mass
   - circuit visualization for the synthesized cost and mixer layers
 - Keeps the classical simulated annealer as the main route search engine and uses simulated QAOA for quantum-side diagnostics and comparison.
@@ -127,6 +130,9 @@ The quantum layer is implemented as a simulated backend, not a placeholder anima
   `exp(-i * beta * X)`
 - Performs a small grid search over `gamma` and `beta` per layer.
 - Computes the final expectation value from the statevector probabilities.
+- Tracks per-layer entropy and participation ratio to show how concentrated or spread the simulated wavefunction is.
+- Computes qubit marginals `P(|1>)` for each reduced qubit.
+- Computes nearest-neighbor `⟨ZiZj⟩` correlations from the final state distribution.
 - Converts final probabilities into deterministic shot-like counts for UI display.
 
 ### What it does not do
@@ -148,6 +154,11 @@ The quantum layer is implemented as a simulated backend, not a placeholder anima
 - `Approx Ratio`: final simulated QAOA energy divided by the best feasible basis energy in the reduced model
 - `Optimal Mass`: probability mass assigned to the best feasible basis state
 - `Expected Saving`: simulated QAOA energy improvement relative to the naive route baseline
+- `Entropy`: Shannon entropy of the final basis-state distribution
+- `Participation Ratio`: effective number of basis states carrying meaningful probability mass
+- `Avg Weight`: expected Hamming weight of sampled reduced-basis states
+- `Qubit Marginals`: probability that each reduced qubit is measured as `1`
+- `ZZ Correlations`: nearest-neighbor computational-basis correlations across reduced qubits
 - `Shots`: deterministic sample counts derived from the final statevector distribution for visualization only
 
 ## Setup

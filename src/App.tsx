@@ -1842,6 +1842,69 @@ function ConjunctionPanel({
   );
 }
 
+function GroundRangeOverlay({ analysis }: { analysis: GroundConstraintFeed['analysis'] | null }) {
+  if (!analysis) {
+    return <p className="text-sm text-slate-400">Ground-range exclusions appear once launch-site and range constraints are solved.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+        <svg viewBox="0 0 240 240" className="h-52 w-full">
+          <circle cx="120" cy="120" r="14" fill="#38bdf8" opacity="0.9" />
+          {analysis.keepOutZones.map((zone, index) => {
+            const r = 22 + index * 24;
+            const start = (zone.azimuthCenterDeg - zone.azimuthHalfWidthDeg - 90) * (Math.PI / 180);
+            const end = (zone.azimuthCenterDeg + zone.azimuthHalfWidthDeg - 90) * (Math.PI / 180);
+            const x1 = 120 + r * Math.cos(start);
+            const y1 = 120 + r * Math.sin(start);
+            const x2 = 120 + r * Math.cos(end);
+            const y2 = 120 + r * Math.sin(end);
+            const largeArc = zone.azimuthHalfWidthDeg * 2 > 180 ? 1 : 0;
+            return (
+              <path
+                key={zone.label}
+                d={`M 120 120 L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`}
+                fill={index % 2 === 0 ? 'rgba(239,68,68,0.22)' : 'rgba(245,158,11,0.18)'}
+                stroke={index % 2 === 0 ? '#ef4444' : '#f59e0b'}
+                strokeWidth="1.2"
+              />
+            );
+          })}
+          {analysis.recoveryCorridors.map((corridor, index) => {
+            const angle = (corridor.headingDeg - 90) * (Math.PI / 180);
+            const x2 = 120 + 90 * Math.cos(angle);
+            const y2 = 120 + 90 * Math.sin(angle);
+            const offset = 6 + index * 4;
+            return (
+              <line
+                key={corridor.label}
+                x1={120}
+                y1={120}
+                x2={x2 + offset}
+                y2={y2 + offset}
+                stroke={index === 0 ? '#22c55e' : '#60a5fa'}
+                strokeWidth="4"
+                strokeLinecap="round"
+                opacity="0.85"
+              />
+            );
+          })}
+          <circle cx="120" cy="120" r="96" fill="none" stroke="#1e293b" strokeDasharray="4 5" />
+        </svg>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {analysis.keepOutZones.map((zone) => (
+          <div key={zone.label} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-300">
+            <p className="text-slate-100">{zone.label}</p>
+            <p className="mt-1 text-slate-400">R {zone.radiusKm.toFixed(0)} km | az {zone.azimuthCenterDeg.toFixed(0)}° ± {zone.azimuthHalfWidthDeg.toFixed(0)}°</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
   const [missionType, setMissionType] = useState<MissionType>('lunar');
@@ -1962,13 +2025,22 @@ export default function App() {
   const currentDose = vanAllenDose(altitude, keplerEl.i);
   const localGravity = getDateAdjustedLocalGravity(launchBody, launchLatitude, launchLongitude, launchAltitudeKm, new Date(launchDate));
   const targetBody = CELESTIAL_BODY_MAP[targetPlanet] ?? CELESTIAL_BODY_MAP.moon;
+  useEffect(() => {
+    if (!launchSites?.sites?.length) return;
+    const best = [...launchSites.sites].sort((a, b) => {
+      const da = Math.hypot(a.lat - launchLatitude, a.lon - launchLongitude);
+      const db = Math.hypot(b.lat - launchLatitude, b.lon - launchLongitude);
+      return da - db;
+    })[0];
+    if (best?.id) setSelectedLaunchSiteId(best.id);
+  }, [launchSites, launchLatitude, launchLongitude]);
 
   useEffect(() => {
     const fetchAll = async () => {
       const isEarth = launchBodyId === 'earth';
       const weatherUrl = `/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
       const openMeteoUrl = `/api/openmeteo/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
-      const [wxResult, openMeteoResult, spaceResult, solarBodiesResult, ephemerisResult, radiationResult, eonetResult, trafficResult, telemetryResult, wgcResult] = await Promise.allSettled([
+      const [wxResult, openMeteoResult, spaceResult, solarBodiesResult, ephemerisResult, radiationResult, eonetResult, trafficResult, telemetryResult, wgcResult, launchSitesResult] = await Promise.allSettled([
         isEarth ? fetch(weatherUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
         isEarth ? fetch(openMeteoUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
         fetch('/api/space-weather').then((res) => res.json()),
@@ -1979,6 +2051,7 @@ export default function App() {
         fetch('/api/celestrak/conjunctions?group=STATIONS&limit=10').then((res) => res.json()),
         fetch('/api/telemetry/latest').then((res) => res.json()),
         fetch('/api/webgeocalc/metadata').then((res) => res.json()),
+        fetch('/api/ground/launch-sites').then((res) => res.json()),
       ]);
 
       const wx = wxResult.status === 'fulfilled' ? wxResult.value : { source: 'UNAVAILABLE' };
@@ -1991,6 +2064,7 @@ export default function App() {
       const traffic = trafficResult.status === 'fulfilled' ? trafficResult.value : null;
       const telemetry = telemetryResult.status === 'fulfilled' ? telemetryResult.value : null;
       const wgc = wgcResult.status === 'fulfilled' ? wgcResult.value : null;
+      const sites = launchSitesResult.status === 'fulfilled' ? launchSitesResult.value : null;
 
       setWeatherData(wx);
       setOpenMeteoWeather(openMeteo);
@@ -2002,6 +2076,7 @@ export default function App() {
       setCelestrakTraffic(traffic);
       setTelemetryFeed(telemetry);
       setWebGeoCalcMeta(wgc);
+      setLaunchSites(sites);
       if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
 
       addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
@@ -2438,6 +2513,360 @@ export default function App() {
     };
     analyzeCislunarOps();
   }, [missionTrajectory, missionKmPerUnit, launchDate, launchBodyId, targetPlanet, launchLatitude, launchLongitude, shieldingMassKg]);
+
+  useEffect(() => {
+    const analyzeTrajectoryDesign = async () => {
+      if (!missionTrajectory.length) {
+        setTrajectoryDesign(null);
+        return;
+      }
+      try {
+        const response = await fetch('/api/trajectory/design', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            launchDate,
+            launchBodyId,
+            targetBodyId: targetPlanet,
+            departureAltitudeKm: Math.max(launchAltitudeKm, 180),
+            arrivalAltitudeKm: targetPlanet === 'moon' ? 100 : 250,
+            weatherWindKmh: weatherData?.wind_speed ?? 15,
+            precipitationMm: weatherData?.precipitation ?? 0,
+            radiationIndex: Math.max(nasaWeather?.radiationIndex ?? 1, nearEarthRadiation?.environment?.aggregateIndex ?? 1),
+            dsnCoverage: clamp((dsnVisibility?.windows?.reduce((sum, item) => sum + item.durationMinutes, 0) ?? 0) / (72 * 60), 0, 1),
+            currentPhaseAngleDeg: 0,
+            targetPhaseAngleDeg: targetPlanet === 'moon' ? 35 : targetPlanet === 'mars' ? 44 : 25,
+            crewed: missionType !== 'rover',
+          }),
+        });
+        const data = await response.json();
+        setTrajectoryDesign(response.ok ? data : null);
+      } catch {
+        setTrajectoryDesign(null);
+      }
+    };
+    analyzeTrajectoryDesign();
+  }, [missionTrajectory, launchDate, launchBodyId, targetPlanet, launchAltitudeKm, weatherData, nasaWeather, nearEarthRadiation, dsnVisibility, missionType]);
+
+  useEffect(() => {
+    const analyzeGround = async () => {
+      try {
+        const response = await fetch('/api/ground/constraints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            launchSiteId: selectedLaunchSiteId,
+            vehicleName: launchBodyId === 'earth' ? (missionType === 'lunar' ? 'Artemis' : 'Falcon 9') : 'Deep Space Vehicle',
+            launchAzimuthDeg: targetPlanet === 'moon' ? 72 : targetPlanet === 'mars' ? 95 : 110,
+            missionType,
+            launchDate,
+          }),
+        });
+        const data = await response.json();
+        setGroundConstraints(response.ok ? data : null);
+      } catch {
+        setGroundConstraints(null);
+      }
+    };
+    analyzeGround();
+  }, [selectedLaunchSiteId, launchBodyId, missionType, targetPlanet, launchDate]);
+
+  useEffect(() => {
+    const analyzeSurface = async () => {
+      try {
+        const response = await fetch('/api/surface/environment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bodyId: targetPlanet,
+            latitudeDeg: targetPlanet === 'moon' ? -89.5 : 4.5,
+            longitudeDeg: 0,
+            altitudeKm: 0,
+            dateIso: `${launchDate}T12:00:00Z`,
+          }),
+        });
+        const data = await response.json();
+        setSurfaceEnvironment(response.ok ? data : null);
+      } catch {
+        setSurfaceEnvironment(null);
+      }
+    };
+    analyzeSurface();
+  }, [targetPlanet, launchDate]);
+
+  useEffect(() => {
+    const analyzeLaunchCommit = async () => {
+      if (launchBodyId !== 'earth') {
+        setLaunchConstraintAnalysis(null);
+        return;
+      }
+      try {
+        const response = await fetch('/api/launch/constraints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat: launchLatitude,
+            lon: launchLongitude,
+            maxQAltitudeKm: simResult?.best.maxQAltitudeKm ?? 11,
+            atmosphereScaleHeightKm: launchBody.atmosphereScaleHeightKm ?? 8.5,
+          }),
+        });
+        const data = await response.json();
+        setLaunchConstraintAnalysis(response.ok ? data : null);
+      } catch {
+        setLaunchConstraintAnalysis(null);
+      }
+    };
+    analyzeLaunchCommit();
+  }, [launchBodyId, launchLatitude, launchLongitude, simResult?.best.maxQAltitudeKm, launchBody.atmosphereScaleHeightKm]);
+
+  useEffect(() => {
+    const analyzeConsumablesAndConsole = async () => {
+      if (!missionTrajectory.length) {
+        setConsumablesAnalysis(null);
+        setOpsConsole(null);
+        return;
+      }
+      try {
+        const missionDurationHours = Math.max(24, (missionTrajectory[missionTrajectory.length - 1]?.time_s ?? 0) / 3600 || (trajectoryDesign?.abortBranches?.[0]?.timeToRecoveryDays ?? 1) * 24);
+        const consumablesResponse = await fetch('/api/consumables/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            durationHours: missionDurationHours,
+            initial: {
+              powerKWh: 320,
+              thermalMarginC: 22,
+              commMinutes: dsnVisibility?.windows?.reduce((sum, item) => sum + item.durationMinutes, 0) ?? 360,
+              propellantKg: optResult?.fuelMass_kg ?? spacecraftMass * 0.62,
+              crewHours: 0,
+              oxygenKg: 180,
+              waterKg: 260,
+            },
+            powerDrawKw: 4.8,
+            powerGenerationKw: 6.2,
+            thermalLoadCPerHour: 0.9,
+            thermalRejectionCPerHour: 1.1,
+            commMinutesPerHour: 8,
+            propellantFlowKgPerHour: Math.max(0.2, (trajectoryDesign?.reservePolicy?.reserveDeltaVKmS ?? 0.4) * 8),
+            crewCount: 4,
+          }),
+        });
+        const consumablesData = await consumablesResponse.json();
+        setConsumablesAnalysis(consumablesResponse.ok ? consumablesData : null);
+
+        const consoleResponse = await fetch('/api/ops/console', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            anomalies: gravityInfluence?.assessments?.filter((item) => item.willInfluence).map((item) => ({
+              anomalyType: `${item.bodyName.toUpperCase()}_GRAVITY`,
+              severity: item.influenceRatio > 0.8 ? 'HIGH' : 'MODERATE',
+              confidence: item.influenceRatio,
+            })) ?? [],
+            goNoGoRules: cislunarOps?.analysis.goNoGo.rules ?? [],
+            consumablesDepletions: consumablesData?.analysis?.depleted ?? [],
+            telemetryFrame: telemetryFeed?.frame
+              ? {
+                  commStatus: telemetryFeed.frame.subsystemFlags?.[0] ?? 'OK',
+                  radiationLevel: telemetryFeed.frame.radiationDoseRate,
+                  thermalMarginC: 10,
+                }
+              : null,
+          }),
+        });
+        const consoleData = await consoleResponse.json();
+        setOpsConsole(consoleResponse.ok ? consoleData : null);
+      } catch {
+        setConsumablesAnalysis(null);
+        setOpsConsole(null);
+      }
+    };
+    analyzeConsumablesAndConsole();
+  }, [missionTrajectory, trajectoryDesign, dsnVisibility, optResult, spacecraftMass, gravityInfluence, cislunarOps, telemetryFeed]);
+
+  useEffect(() => {
+    const solveTimeline = async () => {
+      try {
+        const response = await fetch('/api/timeline/solve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tasks: timelineTasks }),
+        });
+        const data = await response.json();
+        setTimelineSolution(response.ok ? data : null);
+      } catch {
+        setTimelineSolution(null);
+      }
+    };
+    solveTimeline();
+  }, [timelineTasks]);
+
+  useEffect(() => {
+    const analyzeVehicle = async () => {
+      try {
+        const response = await fetch('/api/vehicle/multistage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stages: stageConfigs,
+            payloadMassKg: Math.max(1000, spacecraftMass * 0.18),
+            entryVelocityKmS: missionType === 'lunar' ? 11.1 : 7.8,
+            noseRadiusM: Math.max(0.8, Math.cbrt((stlAnalysis?.volume ?? 6) / Math.PI)),
+            stlAnalysis,
+          }),
+        });
+        const data = await response.json();
+        setMultistageAssessment(response.ok ? data : null);
+      } catch {
+        setMultistageAssessment(null);
+      }
+    };
+    analyzeVehicle();
+  }, [stageConfigs, spacecraftMass, missionType, stlAnalysis]);
+
+  const runSgp4Analysis = useCallback(async () => {
+    const records = parseTleText(tleInputText);
+    if (!records.length) {
+      setSgp4Propagation(null);
+      setSgp4Conjunctions(null);
+      setSgp4Residuals(null);
+      addLog('No valid TLE records found for SGP4 analysis');
+      return;
+    }
+    try {
+      const [propagationResponse, conjunctionResponse] = await Promise.all([
+        fetch('/api/sgp4/propagate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records, epoch: `${launchDate}T12:00:00Z` }),
+        }),
+        fetch('/api/sgp4/conjunctions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records, startTime: `${launchDate}T00:00:00Z`, horizonMinutes: 24 * 60, stepSeconds: 120 }),
+        }),
+      ]);
+      const propagationData = await propagationResponse.json();
+      const conjunctionData = await conjunctionResponse.json();
+      setSgp4Propagation(propagationResponse.ok ? propagationData : null);
+      setSgp4Conjunctions(conjunctionResponse.ok ? conjunctionData : null);
+
+      const observed = parseObservedStateText(observedStateText);
+      if (observed.length && propagationData?.states?.length) {
+        const residualResponse = await fetch('/api/sgp4/residuals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ predicted: propagationData.states, observed }),
+        });
+        const residualData = await residualResponse.json();
+        setSgp4Residuals(residualResponse.ok ? residualData : null);
+      } else {
+        setSgp4Residuals(null);
+      }
+      addLog(`SGP4 screening complete for ${records.length} records`);
+    } catch {
+      setSgp4Propagation(null);
+      setSgp4Conjunctions(null);
+      setSgp4Residuals(null);
+      addLog('SGP4 analysis failed');
+    }
+  }, [tleInputText, observedStateText, launchDate, addLog]);
+
+  const exportCcsdsProducts = useCallback(async () => {
+    try {
+      const points = missionTrajectory.map((point) => ({
+        time_s: point.time_s,
+        pos: [
+          point.pos[0] * missionKmPerUnit,
+          point.pos[1] * missionKmPerUnit,
+          point.pos[2] * missionKmPerUnit,
+        ],
+        vel: point.vel ?? [0, 0, 0],
+      }));
+      const [oemResponse, opmResponse] = await Promise.all([
+        fetch('/api/ccsds/oem', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ points, metadata: { objectName: 'ARTEMIS-Q Trajectory', objectId: `${launchBodyId.toUpperCase()}-${targetPlanet.toUpperCase()}` } }),
+        }),
+        fetch('/api/ccsds/opm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            state: keplerian2ECI(keplerEl),
+            epochIso: `${launchDate}T12:00:00Z`,
+            metadata: { objectName: 'ARTEMIS-Q State', objectId: `${launchBodyId.toUpperCase()}-STATE` },
+          }),
+        }),
+      ]);
+      const [oemText, opmText] = await Promise.all([oemResponse.text(), opmResponse.text()]);
+      setOemPreview(oemText);
+      setOpmPreview(opmText);
+      addLog('CCSDS OEM/OPM products generated');
+    } catch {
+      addLog('CCSDS export failed');
+    }
+  }, [missionTrajectory, missionKmPerUnit, launchBodyId, targetPlanet, keplerEl, launchDate, addLog]);
+
+  const importCcsdsProduct = useCallback(async () => {
+    if (!ccsdsImportText.trim()) {
+      setCcsdsImportResult(null);
+      return;
+    }
+    try {
+      const response = await fetch('/api/ccsds/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: ccsdsImportText }),
+      });
+      const data = await response.json();
+      setCcsdsImportResult(response.ok ? data : null);
+      addLog(`Imported ${data?.points?.length ?? 0} CCSDS ephemeris samples`);
+    } catch {
+      setCcsdsImportResult(null);
+      addLog('CCSDS import failed');
+    }
+  }, [ccsdsImportText, addLog]);
+
+  const compareCurrentBaseline = useCallback(async () => {
+    try {
+      const response = await fetch('/api/baselines/compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          before: importedMissionConfig ?? {},
+          after: {
+            launchBodyId,
+            targetBodyId: targetPlanet,
+            launchDate,
+            missionType,
+            fuelType,
+            launchLatitude,
+            launchLongitude,
+            launchAltitudeKm,
+            spacecraftMass,
+            spacecraftThrust,
+            keplerEl,
+            policyProfile,
+            shieldingMassKg,
+          },
+        }),
+      });
+      const data = await response.json();
+      setBaselineComparison(response.ok ? data : null);
+      addLog(`Baseline comparison generated: ${data?.comparison?.changedValues?.length ?? 0} changed fields`);
+    } catch {
+      setBaselineComparison(null);
+      addLog('Baseline comparison failed');
+    }
+  }, [importedMissionConfig, launchBodyId, targetPlanet, launchDate, missionType, fuelType, launchLatitude, launchLongitude, launchAltitudeKm, spacecraftMass, spacecraftThrust, keplerEl, policyProfile, shieldingMassKg, addLog]);
+  useEffect(() => {
+    if (importedMissionConfig?.tleObjects?.length) {
+      const lines = importedMissionConfig.tleObjects.flatMap((item) => [item.name, item.tle1, item.tle2]).join('\n');
+      setTleInputText(lines);
+    }
+  }, [importedMissionConfig]);
   const missionStages = useMemo(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
     return derived.length
@@ -3070,6 +3499,14 @@ export default function App() {
                           <option value="DELAYED_LAUNCH">Delayed Launch</option>
                         </select>
                       </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Launch Site
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={selectedLaunchSiteId} onChange={(event) => setSelectedLaunchSiteId(event.target.value)}>
+                          {(launchSites?.sites ?? []).map((site) => (
+                            <option key={site.id} value={site.id}>{site.name}</option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-400">
                         <div className="mb-1 flex items-center justify-between">
                           <span>Shielding Mass</span>
@@ -3097,6 +3534,12 @@ export default function App() {
                       </button>
                       <button className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm font-semibold text-emerald-200" onClick={exportMissionReport}>
                         Export Mission Report
+                      </button>
+                      <button className="rounded-lg border border-violet-400/30 bg-violet-400/10 px-4 py-3 text-sm font-semibold text-violet-200" onClick={exportCcsdsProducts}>
+                        Generate OEM / OPM
+                      </button>
+                      <button className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-200" onClick={compareCurrentBaseline}>
+                        Compare Baselines
                       </button>
                     </div>
                   </DashboardCard>
@@ -3273,6 +3716,186 @@ export default function App() {
                     )}
                   </DashboardCard>
 
+                  <DashboardCard title="Trajectory Design" icon={ChevronRight} provenance={trajectoryDesign?.source?.startsWith('LIVE') ? 'live-api' : 'formula'}>
+                    {trajectoryDesign ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Lambert" value={trajectoryDesign.lambert.solved ? 'SOLVED' : 'REVIEW'} unit={`${trajectoryDesign.lambert.iterations} iter`} tone={trajectoryDesign.lambert.solved ? 'good' : 'warn'} />
+                          <MetricBadge label="C3" value={trajectoryDesign.lambert.c3Km2S2.toFixed(2)} unit="km²/s²" />
+                          <MetricBadge label="Total Δv" value={trajectoryDesign.patchedConic.totalDeltaVKmS.toFixed(2)} unit="km/s" tone="good" />
+                          <MetricBadge label="Reserve" value={trajectoryDesign.reservePolicy.propellantReservePct.toFixed(1)} unit="% reserve" tone="warn" />
+                          <MetricBadge label="Best Phasing" value={trajectoryDesign.phasing.bestDelayHours.toFixed(0)} unit="h delay" />
+                          <MetricBadge label="Phase Residual" value={trajectoryDesign.phasing.residualDeg.toFixed(1)} unit="deg" tone={trajectoryDesign.phasing.residualDeg < 5 ? 'good' : 'warn'} />
+                        </div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          <p>{trajectoryDesign.reservePolicy.rationale}</p>
+                          <div className="mt-2 space-y-1">
+                            {trajectoryDesign.gravityAssistSequences.slice(0, 3).map((item) => (
+                              <p key={item.sequence.join('-')}>
+                                {item.sequence.join(' → ')} | gain {item.estimatedDeltaVGainKmS.toFixed(2)} km/s | score {item.score.toFixed(2)}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {trajectoryDesign.abortBranches.map((branch) => (
+                            <div key={branch.label} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-300">
+                              <div className="flex items-center justify-between">
+                                <span>{branch.label}</span>
+                                <span className="text-sky-200">{branch.branchType}</span>
+                              </div>
+                              <p className="mt-1 text-slate-400">Δv {branch.deltaVKmS.toFixed(2)} km/s | recovery {branch.timeToRecoveryDays.toFixed(1)} d | risk x{branch.riskModifier.toFixed(2)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Trajectory-design outputs appear once the active mission geometry is available.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Timeline Editor" icon={Gauge} provenance={timelineSolution ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      {timelineTasks.map((task, index) => (
+                        <div key={task.id} className="grid grid-cols-[1.3fr_0.6fr_0.7fr] gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Task
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.name} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Duration
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.durationHours} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, durationHours: +event.target.value } : item))} />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Resource
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.resource ?? ''} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, resource: event.target.value } : item))} />
+                          </label>
+                        </div>
+                      ))}
+                      {timelineSolution?.timeline ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="mb-2 grid grid-cols-2 gap-2">
+                            <MetricBadge label="Total Duration" value={timelineSolution.timeline.totalDurationHours.toFixed(1)} unit="h" />
+                            <MetricBadge label="Violations" value={String(timelineSolution.timeline.violations.length)} tone={timelineSolution.timeline.violations.length ? 'warn' : 'good'} />
+                          </div>
+                          <div className="space-y-2 text-xs text-slate-300">
+                            {timelineSolution.timeline.tasks.map((task) => (
+                              <div key={task.id} className="rounded border border-slate-800 bg-black/20 px-3 py-2">
+                                <div className="flex items-center justify-between">
+                                  <span>{task.name}</span>
+                                  <span className={task.critical ? 'text-amber-200' : 'text-slate-400'}>{formatHour(task.scheduledStartHour)} → {formatHour(task.scheduledFinishHour)}</span>
+                                </div>
+                                <p className="mt-1 text-slate-500">Slack {task.slackHours.toFixed(1)} h {task.critical ? '| critical path' : ''}</p>
+                              </div>
+                            ))}
+                            {timelineSolution.timeline.violations.map((violation) => (
+                              <p key={violation} className="text-rose-300">{violation}</p>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Ground Range & Recovery" icon={Globe} provenance={groundConstraints?.source?.startsWith('FORMULA') ? 'formula' : 'preset'}>
+                    {groundConstraints?.analysis ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Range" value={groundConstraints.analysis.rangeGo ? 'GO' : 'NO-GO'} unit={groundConstraints.analysis.launchSite.name} tone={groundConstraints.analysis.rangeGo ? 'good' : 'bad'} />
+                          <MetricBadge label="Pads" value={String(groundConstraints.analysis.padStatus.filter((pad) => pad.available).length)} unit="available" tone={groundConstraints.analysis.padStatus.some((pad) => pad.available) ? 'good' : 'bad'} />
+                          <MetricBadge label="Corridors" value={String(groundConstraints.analysis.recoveryCorridors.length)} unit="recovery lanes" />
+                          <MetricBadge label="Exclusions" value={String(groundConstraints.analysis.airspaceMaritimeExclusions.length)} unit="active zones" />
+                        </div>
+                        <GroundRangeOverlay analysis={groundConstraints.analysis} />
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          <p>{groundConstraints.analysis.rationale}</p>
+                          <div className="mt-2 space-y-1">
+                            {groundConstraints.analysis.padStatus.map((pad) => (
+                              <p key={pad.padId}>{pad.padId.toUpperCase()}: <span className={pad.available ? 'text-emerald-300' : 'text-rose-300'}>{pad.available ? 'available' : 'blocked'}</span> ({pad.rationale})</p>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Ground-range scheduling and exclusion geometry appear after launch-site analysis resolves.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Consumables, Surface & Console" icon={AlertTriangle} provenance={opsConsole?.source?.startsWith('FORMULA') ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      {consumablesAnalysis?.analysis ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Power" value={consumablesAnalysis.analysis.finalState.powerKWh.toFixed(1)} unit="kWh final" tone={consumablesAnalysis.analysis.finalState.powerKWh > 50 ? 'good' : 'warn'} />
+                          <MetricBadge label="Propellant" value={consumablesAnalysis.analysis.finalState.propellantKg.toFixed(0)} unit="kg final" tone={consumablesAnalysis.analysis.finalState.propellantKg > 1000 ? 'good' : 'warn'} />
+                          <MetricBadge label="Oxygen" value={consumablesAnalysis.analysis.finalState.oxygenKg.toFixed(1)} unit="kg final" tone={consumablesAnalysis.analysis.finalState.oxygenKg > 20 ? 'good' : 'warn'} />
+                          <MetricBadge label="Water" value={consumablesAnalysis.analysis.finalState.waterKg.toFixed(1)} unit="kg final" tone={consumablesAnalysis.analysis.finalState.waterKg > 20 ? 'good' : 'warn'} />
+                        </div>
+                      ) : null}
+                      {surfaceEnvironment ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Surface Temp" value={surfaceEnvironment.estimatedSurfaceTempC.toFixed(1)} unit="°C" tone={Math.abs(surfaceEnvironment.estimatedSurfaceTempC) < 80 ? 'good' : 'warn'} />
+                          <MetricBadge label="Solar Elevation" value={surfaceEnvironment.solarElevationDeg.toFixed(1)} unit="deg" />
+                          <MetricBadge label="Local Gravity" value={surfaceEnvironment.localGravityMs2.toFixed(2)} unit="m/s²" />
+                          <MetricBadge label="Dust Risk" value={surfaceEnvironment.dustOrRegolithRisk} unit={surfaceEnvironment.bodyId} tone={surfaceEnvironment.dustOrRegolithRisk === 'LOW' ? 'good' : 'warn'} />
+                        </div>
+                      ) : null}
+                      {opsConsole?.console ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-sm text-slate-100">Mission Status Console</p>
+                            <StatusPill value={opsConsole.console.status} tone={opsConsole.console.status === 'NOMINAL' ? 'good' : opsConsole.console.status === 'WATCH' ? 'warn' : 'bad'} />
+                          </div>
+                          <div className="space-y-2 text-xs text-slate-300">
+                            {opsConsole.console.alarms.length ? opsConsole.console.alarms.slice(0, 6).map((alarm) => (
+                              <div key={`${alarm.title}-${alarm.detail}`} className="rounded border border-slate-800 bg-black/20 px-3 py-2">
+                                <div className="flex items-center justify-between">
+                                  <span>{alarm.title}</span>
+                                  <StatusPill value={alarm.severity} tone={alarm.severity === 'INFO' ? 'default' : alarm.severity === 'WATCH' ? 'warn' : 'bad'} />
+                                </div>
+                                <p className="mt-1 text-slate-500">{alarm.detail}</p>
+                              </div>
+                            )) : <p className="text-slate-500">No active alarms.</p>}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="CCSDS & Baselines" icon={Atom} provenance={baselineComparison ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                        Import OEM / OPM-like text
+                        <textarea className="mt-1 h-28 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100" value={ccsdsImportText} onChange={(event) => setCcsdsImportText(event.target.value)} placeholder="Paste CCSDS OEM/OPM text here..." />
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-200" onClick={importCcsdsProduct}>Import CCSDS</button>
+                        <button className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-200" onClick={exportCcsdsProducts}>Refresh OEM / OPM</button>
+                      </div>
+                      {ccsdsImportResult ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Imported Points" value={String(ccsdsImportResult.points.length)} unit="ephemeris rows" />
+                          <MetricBadge label="Metadata Keys" value={String(Object.keys(ccsdsImportResult.metadata).length)} unit="parsed" />
+                        </div>
+                      ) : null}
+                      {baselineComparison ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+                          <p>Before {baselineComparison.beforeVersion.versionHash} → After {baselineComparison.afterVersion.versionHash}</p>
+                          <div className="mt-2 space-y-1 text-slate-500">
+                            {baselineComparison.comparison.changedValues.slice(0, 5).map((item) => (
+                              <p key={item.path}>{item.path}: {item.before} → {item.after}</p>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {(oemPreview || opmPreview) ? (
+                        <div className="grid gap-2 lg:grid-cols-2">
+                          <pre className="max-h-32 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-[10px] text-slate-400">{oemPreview.slice(0, 900)}</pre>
+                          <pre className="max-h-32 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-[10px] text-slate-400">{opmPreview.slice(0, 900)}</pre>
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+
                   <DashboardCard title="Provenance Audit" icon={ShieldAlert}>
                     <SourceStatus
                       weatherData={weatherData}
@@ -3322,6 +3945,67 @@ export default function App() {
 
                   <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : celestrakTraffic?.source?.startsWith('LIVE') ? 'live-api' : 'preset'}>
                     <ConjunctionPanel importedNodes={importedGraph?.nodes ?? []} externalThreats={celestrakTraffic?.conjunctions ?? []} />
+                  </DashboardCard>
+
+                  <DashboardCard title="SGP4 Orbital Ops" icon={Rocket} provenance={sgp4Propagation?.source?.startsWith('FORMULA') ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                        TLE Records
+                        <textarea className="mt-1 h-36 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100" value={tleInputText} onChange={(event) => setTleInputText(event.target.value)} />
+                      </label>
+                      <button className="w-full rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200" onClick={() => void runSgp4Analysis()}>
+                        Run SGP4 Propagation & TCA
+                      </button>
+                      {sgp4Propagation ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Objects" value={String(sgp4Propagation.states.length)} unit="propagated" />
+                          <MetricBadge label="Conjunctions" value={String(sgp4Conjunctions?.conjunctions.length ?? 0)} unit="screened" tone={(sgp4Conjunctions?.conjunctions.length ?? 0) > 0 ? 'warn' : 'good'} />
+                        </div>
+                      ) : null}
+                      {sgp4Conjunctions?.conjunctions?.slice(0, 4).map((item) => (
+                        <div key={`${item.objectA}-${item.objectB}`} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-300">
+                          <div className="flex items-center justify-between">
+                            <span>{item.objectA} vs {item.objectB}</span>
+                            <span className="text-sky-200">{item.closestApproachKm.toFixed(2)} km</span>
+                          </div>
+                          <p className="mt-1 text-slate-500">{new Date(item.tcaIso).toLocaleString()} | rel vel {item.relativeVelocityKmS.toFixed(2)} km/s | P {item.collisionProbability.toExponential(2)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Navigation Residuals & Launch Commit" icon={AlertTriangle} provenance={launchConstraintAnalysis ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                        Observed State JSON
+                        <textarea className="mt-1 h-28 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100" value={observedStateText} onChange={(event) => setObservedStateText(event.target.value)} placeholder='[{"id":"iss","positionKm":[...],"velocityKmS":[...]}]' />
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {launchConstraintAnalysis?.analysis ? (
+                          <>
+                            <MetricBadge label="Launch Commit" value={launchConstraintAnalysis.analysis.goForLaunch ? 'GO' : 'HOLD'} unit="weather / atmosphere" tone={launchConstraintAnalysis.analysis.goForLaunch ? 'good' : 'bad'} />
+                            <MetricBadge label="ρ @ Max-Q" value={launchConstraintAnalysis.analysis.densityAtMaxQKgM3.toExponential(2)} unit="kg/m³" />
+                            <MetricBadge label="Wind Score" value={launchConstraintAnalysis.analysis.windConstraintScore.toFixed(2)} unit="normalized" tone={launchConstraintAnalysis.analysis.windConstraintScore < 1 ? 'good' : 'warn'} />
+                            <MetricBadge label="Upper Atmos" value={launchConstraintAnalysis.analysis.upperAtmospherePenalty.toFixed(2)} unit="penalty" tone="warn" />
+                          </>
+                        ) : null}
+                      </div>
+                      {sgp4Residuals?.residuals?.length ? (
+                        <div className="space-y-2">
+                          {sgp4Residuals.residuals.slice(0, 4).map((item) => (
+                            <div key={item.id} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-300">
+                              <div className="flex items-center justify-between">
+                                <span>{item.id}</span>
+                                <span className="text-sky-200">{item.positionResidualKm.toFixed(3)} km</span>
+                              </div>
+                              <p className="mt-1 text-slate-500">Velocity residual {item.velocityResidualKmS.toFixed(5)} km/s</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-400">Paste observed states and rerun SGP4 to compute orbit-determination residuals.</p>
+                      )}
+                    </div>
                   </DashboardCard>
 
                   <DashboardCard title="Fuel Calculator" icon={Rocket} provenance="formula">
@@ -3429,6 +4113,48 @@ export default function App() {
                     )}
                   </DashboardCard>
 
+                  <DashboardCard title="Multi-Stage Vehicle" icon={Gauge} provenance={multistageAssessment ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      {stageConfigs.map((stage, index) => (
+                        <div key={stage.name} className="grid grid-cols-2 gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            {stage.name} Dry
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={stage.dryMassKg} onChange={(event) => setStageConfigs((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, dryMassKg: +event.target.value } : item))} />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Propellant
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={stage.propellantMassKg} onChange={(event) => setStageConfigs((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, propellantMassKg: +event.target.value } : item))} />
+                          </label>
+                        </div>
+                      ))}
+                      {multistageAssessment ? (
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-2 gap-2">
+                            <MetricBadge label="Total Δv" value={multistageAssessment.totalDeltaVKmS.toFixed(2)} unit="km/s" tone="good" />
+                            <MetricBadge label="TPS Peak" value={multistageAssessment.tpsPeakHeatFluxKwM2.toFixed(2)} unit="kW/m²" tone="warn" />
+                            <MetricBadge label="Structural Index" value={multistageAssessment.structuralIndex.toFixed(2)} unit="mesh-coupled" />
+                            <MetricBadge label="Stages" value={String(multistageAssessment.stageAnalyses.length)} unit="active stack" />
+                          </div>
+                          <div className="space-y-2">
+                            {multistageAssessment.stageAnalyses.map((stage) => (
+                              <div key={stage.stageName} className="rounded-lg border border-slate-800 bg-black/20 px-3 py-2 text-xs text-slate-300">
+                                <div className="flex items-center justify-between">
+                                  <span>{stage.stageName}</span>
+                                  <span className="text-sky-200">{stage.deltaVKmS.toFixed(2)} km/s</span>
+                                </div>
+                                <p className="mt-1 text-slate-500">
+                                  burn {stage.burnTimeS.toFixed(0)} s | T/Wsl {stage.thrustToWeightSl.toFixed(2)} | CG shift {stage.cgShiftMeters.toFixed(2)} m | engine-out {stage.engineOutDeltaVKmS.toFixed(2)} km/s
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-400">Stage-by-stage mass, separation, engine-out, CG, and TPS estimates update automatically from the current vehicle stack.</p>
+                      )}
+                    </div>
+                  </DashboardCard>
+
 
                   <DashboardCard title="Best Flight Path" icon={Gauge} provenance={simResult ? 'formula' : 'preset'}>
                     {simResult ? (
@@ -3523,6 +4249,10 @@ export default function App() {
                           <MetricBadge label="Optimal Mass" value={`${(optResult.qaoa.qaoaMatchPct ?? 0).toFixed(1)}%`} unit="probability mass" tone="good" />
                           <MetricBadge label="SA Improvement" value={`${(optResult.qaoa.classicalSAImprovement_pct ?? optResult.qaoa.quantumAdvantage_pct).toFixed(1)}%`} unit="vs baseline" />
                           <MetricBadge label="Shots" value={String(optResult.qaoa.simulation?.shots ?? '--')} unit="deterministic sample" />
+                          <MetricBadge label="Entropy" value={optResult.qaoa.diagnostics?.entropyBits.toFixed(3) ?? '--'} unit="bits" />
+                          <MetricBadge label="Part. Ratio" value={optResult.qaoa.diagnostics?.participationRatio.toFixed(2) ?? '--'} unit="effective states" />
+                          <MetricBadge label="Avg Weight" value={optResult.qaoa.diagnostics?.averageHammingWeight.toFixed(2) ?? '--'} unit="1-bits per sample" />
+                          <MetricBadge label="Grid" value={`${optResult.qaoa.simulation?.gammaGridSteps ?? '--'}×${optResult.qaoa.simulation?.betaGridSteps ?? '--'}`} unit="gamma/beta search" />
                         </div>
                       ) : null}
                       <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
@@ -3555,6 +4285,61 @@ export default function App() {
 
                   <DashboardCard title="State Distribution" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
                     <QuantumDistribution distribution={optResult?.qaoa.distribution} />
+                  </DashboardCard>
+
+                  <DashboardCard title="Layer Diagnostics" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
+                    {quantumLayerData.length ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={quantumLayerData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis dataKey="layer" stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <YAxis stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} />
+                          <Legend wrapperStyle={{ fontSize: 10 }} />
+                          <Line type="monotone" dataKey="energy" stroke="#4B9CD3" dot={false} name="Energy" />
+                          <Line type="monotone" dataKey="entropy" stroke="#f59e0b" dot={false} name="Entropy (bits)" />
+                          <Line type="monotone" dataKey="participation" stroke="#22c55e" dot={false} name="Participation" />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-slate-400">Run mission optimization to inspect per-layer quantum diagnostics.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Qubit Marginals" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
+                    {quantumMarginalData.length ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={quantumMarginalData} margin={{ top: 4, right: 8, left: 0, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis dataKey="qubit" stroke="#64748b" tick={{ fontSize: 9 }} />
+                          <YAxis domain={[0, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value: number) => [`${(value * 100).toFixed(2)}%`, 'P(|1>)']} />
+                          <Bar dataKey="probabilityOne" fill="#4B9CD3" radius={[3, 3, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-slate-400">Qubit occupation probabilities appear after optimization.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="ZZ Correlations" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
+                    {quantumZZData.length ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={quantumZZData} margin={{ top: 4, right: 8, left: 0, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis dataKey="pair" stroke="#64748b" tick={{ fontSize: 9 }} />
+                          <YAxis domain={[-1, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value: number) => [value.toFixed(3), '⟨ZiZj⟩']} />
+                          <Bar dataKey="correlation" radius={[3, 3, 0, 0]}>
+                            {quantumZZData.map((entry, index) => (
+                              <Cell key={index} fill={entry.correlation >= 0 ? '#22c55e' : '#f97316'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-slate-400">Nearest-neighbor Z correlations appear after optimization.</p>
+                    )}
                   </DashboardCard>
 
                   <DashboardCard title="Annealing History" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
