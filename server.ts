@@ -64,7 +64,8 @@ async function startServer() {
   app.post("/api/optimize", (req, res) => {
     const {
       nodes, edges, weights, start, end, steps,
-      date, radiationIndex, isp_s = 450, spacecraft_mass_kg = 5000
+      date, radiationIndex, isp_s = 450, spacecraft_mass_kg = 5000,
+      qaoa_p = 3
     } = req.body;
 
     try {
@@ -74,10 +75,32 @@ async function startServer() {
       const finalMultiplier = baseRadiation * (radiationIndex || 1.0);
 
       const annealer = new SimulatedAnnealer(nodes, edges, weights, isp_s, spacecraft_mass_kg);
-      const result = annealer.optimize(start, end, steps, finalMultiplier);
+      const result = annealer.optimize(start, end, steps, finalMultiplier, qaoa_p);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || "Optimization failed" });
+    }
+  });
+
+  // ── QAOA-Only Re-run ──────────────────────────────────────────────────────
+  // Re-runs only the QAOA simulation for a pre-found SA path.
+  // Much faster than /api/optimize (~<50ms vs ~300ms) since SA is skipped.
+  // Used by the p-depth slider in the Quantum tab.
+  app.post("/api/qaoa", (req, res) => {
+    const {
+      bestPath, nodes, edges, weights, qaoa_p = 3
+    } = req.body;
+
+    if (!bestPath || !nodes || !edges || !weights) {
+      return res.status(400).json({ error: "bestPath, nodes, edges, and weights are required" });
+    }
+
+    try {
+      const annealer = new SimulatedAnnealer(nodes, edges, weights);
+      const result = annealer.runQAOAOnly(bestPath, qaoa_p);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "QAOA re-run failed" });
     }
   });
 
