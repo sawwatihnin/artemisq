@@ -380,8 +380,6 @@ export function validateCrewRadiationReadiness(
   params: CrewRadiationParams = {},
   alternateRouteSamples?: RadiationSamplePoint[],
 ): CrewRiskValidationReport {
-  const shieldingFactor = params.shieldingFactor ?? 0.72;
-  const crewSensitivity = params.crewSensitivity ?? 1.08;
   const consistencyChecks = runInternalConsistencyChecks(samples, baseline, params);
   const plausibilityChecks = runPlausibilityChecks(samples, params);
   const thresholdTrace = generateThresholdTrace(baseline, params);

@@ -38,8 +38,6 @@ import {
   atmosphericDensity,
   calculateArtemisTrajectory,
   computeHohmann,
-  estimateConjunctionRisk,
-  getPlanetPosition,
   keplerian2ECI,
   RE,
   CISLUNAR_VIS_KM_PER_UNIT,
@@ -47,7 +45,6 @@ import {
 } from './lib/orbital';
 import { moonGeocentricPositionKm, normalize3, slerpUnitVectors } from './lib/lunarEphemeris';
 import { AeroDynamicsVisualizer } from './components/AeroDynamicsVisualizer';
-import { AscentDynamicsVisualizer } from './components/AscentDynamicsVisualizer';
 import type { GeometryStabilityHints } from './lib/ascentDynamics';
 import { explainAscentDynamics } from './lib/explain';
 import { j2NodalPrecession, tsiolkovskyFuelMass, vanAllenDose } from './lib/optimizer';
@@ -59,7 +56,6 @@ import {
   getApproximateHeliocentricPosition,
   getDateAdjustedLocalGravity,
   heliocentricHorizonsKmToScene,
-  searchBodies,
 } from './lib/celestial';
 import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
 import { generateMissionReport } from './lib/report';
@@ -1062,13 +1058,6 @@ function stageColor(label: string): string {
   return '#a78bfa';
 }
 
-function stagePhase(progress: number): string {
-  if (progress < 0.2) return 'Launch and ascent';
-  if (progress < 0.55) return 'Outbound phase';
-  if (progress < 0.82) return 'Return phase';
-  return 'Recovery phase';
-}
-
 function getFlightSequenceTemplate(targetPlanetId: string, launchBodyId: string): FlightSequenceTemplateEntry[] {
   return targetPlanetId === 'moon' && launchBodyId === 'earth'
     ? LUNAR_FLIGHT_SEQUENCE_TEMPLATE
@@ -1163,9 +1152,8 @@ function deriveTrajectoryStages(
   const labelIndex = new Map<string, number>();
   for (let i = 0; i < trajectory.length; i++) {
     const rawLabel = trajectory[i]?.label;
-    const label = typeof rawLabel === 'string'
-      ? normalizeStageLabel(rawLabel, options.targetPlanetId, options.launchBodyId)
-      : null;
+    if (typeof rawLabel !== 'string') continue;
+    const label = normalizeStageLabel(rawLabel, options.targetPlanetId, options.launchBodyId);
     if (label && !labelIndex.has(label)) labelIndex.set(label, i);
   }
 
@@ -1188,64 +1176,6 @@ function deriveTrajectoryStages(
       driver: stageDriver(stageTemplate.label, template),
     };
   });
-}
-
-function findClosestStepTime(steps: LaunchSimulationStep[], predicate: (step: LaunchSimulationStep) => boolean): number | null {
-  for (const step of steps) {
-    if (predicate(step)) return step.time;
-  }
-  return null;
-}
-
-function deriveAscentTimelineStages(
-  simResult: LaunchOptimizationResponse | null,
-  transferTimeDays?: number,
-): StageDisplay[] {
-  const template = GENERIC_FLIGHT_SEQUENCE_TEMPLATE;
-  if (!simResult) {
-    return [
-      { label: 'Launch', progress: 0.015, color: stageColor('Launch'), phase: 'Launch and ascent', driver: 'Initial ascent from the launch site.' },
-      { label: 'Stage Sep', progress: 0.12, color: stageColor('Stage Sep'), phase: 'Launch and ascent', driver: 'Stage separation reshapes thrust-to-mass and drag conditions.' },
-      { label: 'Parking Orbit', progress: 0.26, color: stageColor('Parking Orbit'), phase: 'Launch and ascent', driver: stageDriver('Parking Orbit', template) },
-      { label: 'Transfer Burn', progress: 0.42, color: stageColor('Transfer Burn'), phase: 'Launch and ascent', driver: stageDriver('Transfer Burn', template) },
-      { label: 'Encounter', progress: 0.7, color: stageColor('Encounter'), phase: 'Outbound phase', driver: stageDriver('Encounter', template) },
-      { label: 'Entry', progress: 0.9, color: stageColor('Entry'), phase: 'Recovery phase', driver: stageDriver('Entry', template) },
-      { label: 'Landing', progress: 0.985, color: stageColor('Landing'), phase: 'Recovery phase', driver: stageDriver('Landing', template) },
-    ].map((stage, index) => ({
-      sequence: index + 1,
-      ...stage,
-    }));
-  }
-
-  const steps = simResult.best.steps;
-  const transonicTime = findClosestStepTime(steps, (step) => step.mach >= 0.95) ?? simResult.best.maxQTime * 0.85;
-  const stageSepTime = Math.min(simResult.best.mecoTime * 0.58, Math.max(transonicTime, simResult.best.maxQTime * 1.08));
-  const parkingOrbitTime = simResult.best.mecoTime + Math.max(120, Math.min(900, simResult.best.mecoTime * 0.4));
-  const transferBurnTime = parkingOrbitTime + Math.max(120, Math.min(1800, simResult.best.mecoTime * 1.2));
-  const transferDurationS = Math.max(1, (transferTimeDays ?? 5) * 86400);
-  const encounterTime = transferBurnTime + transferDurationS;
-  const entryTime = encounterTime + transferDurationS * 0.82;
-  const landingTime = encounterTime + transferDurationS;
-  const totalTime = Math.max(landingTime, 1);
-  const events = [
-    { label: 'Launch', timeS: 0 },
-    { label: 'Stage Sep', timeS: stageSepTime },
-    { label: 'Parking Orbit', timeS: parkingOrbitTime },
-    { label: 'Transfer Burn', timeS: transferBurnTime },
-    { label: 'Encounter', timeS: encounterTime },
-    { label: 'Entry', timeS: entryTime },
-    { label: 'Landing', timeS: landingTime },
-  ];
-
-  return events.map((event, index) => ({
-    sequence: index + 1,
-    label: event.label,
-    progress: index === 0 ? 0.015 : index === events.length - 1 ? 0.985 : Math.max(0.02, Math.min(0.97, event.timeS / totalTime)),
-    color: stageColor(event.label),
-    phase: stagePhase(event.timeS / totalTime),
-    timeS: event.timeS,
-    driver: stageDriver(event.label, template),
-  }));
 }
 
 function getSurfaceDensity(bodyId: string): number | undefined {
@@ -1425,10 +1355,15 @@ function QuantumDistribution({ distribution }: { distribution?: Array<{ state: s
         <YAxis stroke="#64748b" tick={{ fontSize: 9 }} tickFormatter={(value) => `${(value * 100).toFixed(0)}%`} />
         <Tooltip
           contentStyle={{ background: '#020617', border: '1px solid #334155' }}
-          formatter={(value, _name, payload: { payload?: { energy: number; isOptimal: boolean; shotCount?: number } }) => [
-            `${(Number(value ?? 0) * 100).toFixed(2)}%`,
-            `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}${payload.payload?.shotCount != null ? ` · ${payload.payload.shotCount} shots` : ''}`,
-          ]}
+          formatter={(value, _name, item) => {
+            const raw = typeof value === 'number' ? value : Number(value);
+            const safe = Number.isFinite(raw) ? raw : 0;
+            const payload = item as { payload?: {energy: number; isOptimal: boolean; shotCount?: number} };
+            return [
+              `${(safe * 100).toFixed(2)}%`,
+              `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}${payload.payload?.shotCount != null ? ` · ${payload.payload.shotCount} shots` : ''}`,
+            ];
+          }}
         />
         <Bar dataKey="probability" radius={[3, 3, 0, 0]}>
           {distribution.map((entry, index) => (
@@ -2293,7 +2228,7 @@ function ConjunctionPanel({
       }
     }
     return results.sort((a, b) => a.closestApproachKm - b.closestApproachKm).slice(0, 6);
-  }, [importedNodes]);
+  }, [importedNodes, externalThreats]);
 
   return (
     <div className="space-y-2">
@@ -2488,7 +2423,6 @@ export default function App() {
   }, []);
 
   const preset = MISSION_PRESETS[missionType];
-  const baseGraph = importedGraph ?? { nodes: preset.nodes, edges: preset.edges };
   const altitude = keplerEl.a - 6371;
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
   const bodyCatalog = useMemo(() => (
@@ -2540,8 +2474,28 @@ export default function App() {
         safeFetchJson<ExternalConjunctionFeed | null>('/api/celestrak/conjunctions?group=STATIONS&limit=10', null),
         safeFetchJson<ExternalTelemetryFeed | null>('/api/telemetry/latest', null),
         safeFetchJson<Record<string, unknown> | null>('/api/webgeocalc/metadata', null),
-        safeFetchJson<{ sites?: Array<{ id: string; name: string }>; source?: string } | null>('/api/ground/launch-sites', null),
-      ]);
+        safeFetchJson<LaunchSiteFeed | null>('/api/ground/launch-sites', null),
+      ]) as [
+        { source?: string; wind_speed?: number; precipitation?: number } | { source?: string },
+        { source?: string },
+        {
+          source?: string;
+          radiationIndex?: number;
+          kpIndex?: number;
+          flareProbabilityM?: number;
+          flareProbabilityX?: number;
+          protonEventProbability?: number;
+          polarCapAbsorption?: boolean;
+        },
+        SolarBodiesFeed | null,
+        SystemEphemerisFeed | null,
+        NearEarthRadiationFeed | null,
+        ExternalEventFeed | null,
+        ExternalConjunctionFeed | null,
+        ExternalTelemetryFeed | null,
+        Record<string, unknown> | null,
+        LaunchSiteFeed | null,
+      ];
 
       if (cancelled) return;
 
@@ -3655,7 +3609,7 @@ export default function App() {
     const template = getFlightSequenceTemplate(targetPlanet, launchBodyId);
     return derived.length
       ? derived
-      : template.map((stage, index) => ({
+      : template.map((stage, index): StageDisplay => ({
           sequence: index + 1,
           label: stage.label,
           progress: stage.progress,
@@ -3664,10 +3618,6 @@ export default function App() {
           driver: stage.driver,
         }));
   }, [missionTrajectory, missionKmPerUnit, targetPlanet, launchBodyId]);
-  const vehicleTimelineStages = useMemo(
-    () => deriveAscentTimelineStages(simResult, optResult?.physics.transferTime_days),
-    [simResult, optResult?.physics.transferTime_days],
-  );
   const displayedCrewHealth = useMemo(() => {
     if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarMissionAnalysis) {
       const dose = cislunarMissionAnalysis.dose;
@@ -5280,7 +5230,14 @@ export default function App() {
                           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                           <XAxis dataKey="qubit" stroke="#64748b" tick={{ fontSize: 9 }} />
                           <YAxis domain={[0, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
-                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value) => [`${(Number(value ?? 0) * 100).toFixed(2)}%`, 'P(|1>)']} />
+                          <Tooltip
+                            contentStyle={{ background: '#020617', border: '1px solid #334155' }}
+                            formatter={(value) => {
+                              const raw = typeof value === 'number' ? value : Number(value);
+                              const safe = Number.isFinite(raw) ? raw : 0;
+                              return [`${(safe * 100).toFixed(2)}%`, 'P(|1>)'];
+                            }}
+                          />
                           <Bar dataKey="probabilityOne" fill="#4B9CD3" radius={[3, 3, 0, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
@@ -5296,7 +5253,14 @@ export default function App() {
                           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                           <XAxis dataKey="pair" stroke="#64748b" tick={{ fontSize: 9 }} />
                           <YAxis domain={[-1, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
-                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value) => [Number(value ?? 0).toFixed(3), '⟨ZiZj⟩']} />
+                          <Tooltip
+                            contentStyle={{ background: '#020617', border: '1px solid #334155' }}
+                            formatter={(value) => {
+                              const raw = typeof value === 'number' ? value : Number(value);
+                              const safe = Number.isFinite(raw) ? raw : 0;
+                              return [safe.toFixed(3), '⟨ZiZj⟩'];
+                            }}
+                          />
                           <Bar dataKey="correlation" radius={[3, 3, 0, 0]}>
                             {quantumZZData.map((entry, index) => (
                               <Cell key={index} fill={entry.correlation >= 0 ? '#22c55e' : '#f97316'} />

@@ -3,7 +3,6 @@
  * Typical error: hundreds of km; suitable for mission visualization, not navigation.
  */
 
-const J2000_MS = Date.UTC(2000, 0, 1, 12, 0, 0, 0);
 const D2R = Math.PI / 180;
 
 function julianDateUt(date: Date): number {

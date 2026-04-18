@@ -516,8 +516,8 @@ export function buildFormalMissionQUBO(
       const radiation = state?.radiationField[t] ?? node.radiation;
       const commOpen = state?.communicationWindow[t] ?? 1;
       const commReliability = state?.communicationReliability[t] ?? node.commScore;
-      const gravityPenalty = state?.gravityPenalty?.[t] ?? 0;
-      const gravityAssistPotential = state?.gravityAssistPotential?.[t] ?? 0;
+      const gravityPenalty = (state?.gravityPenalty ?? [])[t] ?? 0;
+      const gravityAssistPotential = (state?.gravityAssistPotential ?? [])[t] ?? 0;
       const timeCost = 1 + 0.001 * (node.altitude_km ?? 0);
       const radiationPenalty = radiation > missionProfile.radiationThreshold
         ? 40 * ((radiation - missionProfile.radiationThreshold) / missionProfile.radiationThreshold) ** 2
@@ -550,8 +550,8 @@ export function buildFormalMissionQUBO(
         if (edge) {
           const state = missionProfile.nodeStates[fromNode.id];
           const fuelMultiplier = state?.fuelMultiplier[t] ?? 1;
-          const gravityPenalty = state?.gravityPenalty?.[t] ?? 0;
-          const gravityAssistPotential = state?.gravityAssistPotential?.[t] ?? 0;
+          const gravityPenalty = (state?.gravityPenalty ?? [])[t] ?? 0;
+          const gravityAssistPotential = (state?.gravityAssistPotential ?? [])[t] ?? 0;
           Q[idx(i, t)][idx(j, t + 1)] += weights.fuel * edge.fuelCost * fuelMultiplier;
           Q[idx(i, t)][idx(j, t + 1)] += weights.fuel * edge.fuelCost * (gravityPenalty - 0.45 * gravityAssistPotential);
           if (rule) {
@@ -955,8 +955,8 @@ export class SimulatedAnnealer {
           const commPenalty = state?.communicationWindow[t]
             ? (1 - (state?.communicationReliability[t] ?? node?.commScore ?? 0.2)) ** 2
             : 8;
-          const gravityPenalty = state?.gravityPenalty?.[t] ?? 0;
-          const gravityAssistPotential = state?.gravityAssistPotential?.[t] ?? 0;
+          const gravityPenalty = (state?.gravityPenalty ?? [])[t] ?? 0;
+          const gravityAssistPotential = (state?.gravityAssistPotential ?? [])[t] ?? 0;
           const score =
             edge.fuelCost * (1 + gravityPenalty - 0.4 * gravityAssistPotential) * this.weights.fuel +
             radiation ** 2 * this.weights.rad +
@@ -1030,8 +1030,8 @@ export class SimulatedAnnealer {
         1,
       );
       const radiation = (state?.radiationField[t] ?? node.radiation) * uncertainty.radiationScale * shielding.radiationMultiplier;
-      const gravityPenalty = state?.gravityPenalty?.[t] ?? 0;
-      const gravityAssistPotential = state?.gravityAssistPotential?.[t] ?? 0;
+      const gravityPenalty = (state?.gravityPenalty ?? [])[t] ?? 0;
+      const gravityAssistPotential = (state?.gravityAssistPotential ?? [])[t] ?? 0;
       const gravityFuelFactor = 1 + gravityPenalty - 0.55 * gravityAssistPotential;
       const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale * massPenalty.deltaVMultiplier * gravityFuelFactor;
       const radiationPenalty = radiation ** 2;
@@ -1115,7 +1115,7 @@ export class SimulatedAnnealer {
               nodeSafetyPenalty += 45 * radShock ** 2;
               reasons.push('radiation gradient');
             }
-            const gravityShock = Math.abs((nextState?.gravityPenalty?.[t + 1] ?? 0) - gravityPenalty);
+            const gravityShock = Math.abs(((nextState?.gravityPenalty ?? [])[t + 1] ?? 0) - gravityPenalty);
             if (gravityShock > 0.06) {
               nodeSafetyPenalty += 30 * gravityShock ** 2;
               reasons.push('gravity gradient');

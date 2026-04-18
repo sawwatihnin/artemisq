@@ -236,7 +236,6 @@ export function getApproximateHeliocentricPosition(body: CelestialBody, date: Da
   if (!body.orbit) return [0, 0, 0];
   const daysFromJ2000 = (date.getTime() - J2000_MS) / 86400000;
   const orbit = body.orbit;
-  const meanMotion = (2 * Math.PI) / orbit.periodDays;
   const meanAnomalyDeg = orbit.meanLongitudeDeg - orbit.longitudePerihelionDeg + (daysFromJ2000 / orbit.periodDays) * 360;
   const M = ((meanAnomalyDeg % 360) * Math.PI) / 180;
   let E = M;

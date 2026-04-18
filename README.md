@@ -400,7 +400,7 @@ Vehicle panels include:
 - `GET /api/noaa/space-weather`
 - `GET /api/donki/space-weather`
 - `GET /api/radiation/near-earth`
-- `GET /api/radiation/live`
+- `GET /api/radiation/live` (cached snapshot, `refresh=true` to force refresh)
 - `GET /api/radiation/live/latest`
 - `GET /api/radiation/live/history`
 - `POST /api/radiation/intersections`
@@ -437,6 +437,11 @@ Vehicle panels include:
 - `POST /api/ccsds/opm`
 - `POST /api/ccsds/import`
 - `POST /api/baselines/compare`
+
+### Telemetry access
+
+- `POST /api/telemetry/ingest`, `GET /api/telemetry/latest`, and `GET /api/telemetry/history` now support mission scoping with `missionId`.
+- Set `TELEMETRY_ACCESS_TOKEN` to require a bearer token for telemetry reads and writes in shared deployments.
 
 ## Architecture
 

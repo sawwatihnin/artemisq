@@ -1,4 +1,4 @@
-import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP, type CelestialBody } from './celestial';
+import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP } from './celestial';
 
 const SOLAR_SYSTEM_BASE = 'https://api.le-systeme-solaire.net/rest';
 const SOLAR_SYSTEM_TOKEN = process.env.SOLAR_SYSTEM_OPENDATA_TOKEN ?? '';

@@ -77,10 +77,6 @@ function sub(a: [number, number, number], b: [number, number, number]): [number,
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
-function add(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-}
-
 function stumpffC(z: number): number {
   if (z > 0) {
     const sz = Math.sqrt(z);

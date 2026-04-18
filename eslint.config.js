@@ -24,5 +24,9 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ['src/components/AscentDynamicsVisualizer.tsx'],
+    rules: {'react-refresh/only-export-components': 'off'},
+  },
   eslintConfigPrettier,
 );
