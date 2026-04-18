@@ -420,8 +420,9 @@ const DEFAULT_VIS_KEPLER: KeplerianElements = {
 };
 
 /**
- * Mission trajectory in **display units** matching the visualizer: cislunar uses {@link VIS_SCENE_KM_PER_UNIT};
- * interplanetary uses Earth-centered heliocentric offsets (same scale as {@link getApproximateHeliocentricPosition}).
+ * Mission trajectory in **display units** matching the visualizer: cislunar uses {@link CISLUNAR_VIS_KM_PER_UNIT};
+ * interplanetary uses Earth-centered offsets in the same scale as {@link getApproximateHeliocentricPosition}
+ * (about 1.5e6 km per scene unit).
  */
 export function calculateArtemisTrajectory(
   launchDate: string,

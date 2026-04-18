@@ -1,12 +1,15 @@
 import * as THREE from 'three';
 import {
+  heliocentricHorizonsKmToScene,
+  heliocentricHorizonsVelocityKmPerSToScene,
+} from './celestial';
+import {
   CISLUNAR_VIS_KM_PER_UNIT,
   computeHohmann,
   type KeplerianElements,
   keplerian2ECI,
   RE,
   type TrajectoryPoint,
-  VIS_SCENE_KM_PER_UNIT,
 } from './orbital';
 import { normalize3, slerpUnitVectors } from './lunarEphemeris';
 import type { LaunchWindowEvaluation } from './launchWindow';
@@ -459,15 +462,13 @@ export async function buildHorizonsTrajectory(params: {
   const inboundDurationS = transferDays * 86400;
   const arrivalIndex = Math.max(1, Math.floor(vectors.length * 0.5));
   const origin = new THREE.Vector3(0, 0, 0);
-  const destinationOutbound = new THREE.Vector3(
-    vectors[arrivalIndex].x / VIS_SCENE_KM_PER_UNIT,
-    vectors[arrivalIndex].y / VIS_SCENE_KM_PER_UNIT,
-    vectors[arrivalIndex].z / VIS_SCENE_KM_PER_UNIT,
-  );
+  const destinationOutbound = new THREE.Vector3(...heliocentricHorizonsKmToScene(vectors[arrivalIndex]));
   const returnTarget = new THREE.Vector3(0, 0, 0);
-  const originVelocity = differenceVelocity(vectors[0], vectors[1]).divideScalar(VIS_SCENE_KM_PER_UNIT);
-  const destinationArrivalVelocity = differenceVelocity(vectors[arrivalIndex - 1], vectors[arrivalIndex]).divideScalar(VIS_SCENE_KM_PER_UNIT);
-  const returnVelocity = differenceVelocity(vectors[vectors.length - 2], vectors[vectors.length - 1]).divideScalar(VIS_SCENE_KM_PER_UNIT);
+  const originVelocity = new THREE.Vector3(0, 0, 0);
+  const destinationArrivalVelocity = new THREE.Vector3(
+    ...heliocentricHorizonsVelocityKmPerSToScene(differenceVelocity(vectors[arrivalIndex - 1], vectors[arrivalIndex])),
+  );
+  const returnVelocity = new THREE.Vector3(0, 0, 0);
 
   const outbound = cubicTransferBetween(origin, destinationOutbound, originVelocity, destinationArrivalVelocity, 64, 0, outboundDurationS, 'Outbound');
   const inbound = cubicTransferBetween(destinationOutbound, returnTarget, destinationArrivalVelocity, returnVelocity, 64, outboundDurationS, inboundDurationS, 'Inbound');

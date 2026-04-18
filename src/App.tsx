@@ -53,7 +53,14 @@ import { explainAscentDynamics } from './lib/explain';
 import { j2NodalPrecession, tsiolkovskyFuelMass, vanAllenDose } from './lib/optimizer';
 import { LaunchSimulator } from './lib/simulator';
 import { STLAnalyzer, type STLAnalysis } from './lib/stlAnalyzer';
-import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition, getDateAdjustedLocalGravity, searchBodies } from './lib/celestial';
+import {
+  CELESTIAL_BODIES,
+  CELESTIAL_BODY_MAP,
+  getApproximateHeliocentricPosition,
+  getDateAdjustedLocalGravity,
+  heliocentricHorizonsKmToScene,
+  searchBodies,
+} from './lib/celestial';
 import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
 import { generateMissionReport } from './lib/report';
 
@@ -1469,6 +1476,157 @@ function createPlanetTexture(bodyId: string, baseColor: string) {
       ctx.bezierCurveTo(canvas.width * 0.3, (i / 12) * canvas.height + 40, canvas.width * 0.7, (i / 12) * canvas.height - 40, canvas.width, (i / 12) * canvas.height);
       ctx.stroke();
     }
+  } else if (bodyId === 'mercury') {
+    const g = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    g.addColorStop(0, '#d1d5db');
+    g.addColorStop(0.45, '#9ca3af');
+    g.addColorStop(1, '#4b5563');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(17,24,39,0.22)';
+    for (let i = 0; i < 42; i++) {
+      ctx.beginPath();
+      ctx.ellipse(Math.random() * canvas.width, Math.random() * canvas.height, 18 + Math.random() * 68, 10 + Math.random() * 38, Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (bodyId === 'venus') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#fde68a');
+    g.addColorStop(0.32, '#fbbf24');
+    g.addColorStop(0.68, '#d97706');
+    g.addColorStop(1, '#92400e');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(255,244,214,0.22)';
+    ctx.lineWidth = 18;
+    for (let i = 0; i < 11; i++) {
+      const y = 30 + i * 46;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(canvas.width * 0.25, y + 26, canvas.width * 0.65, y - 18, canvas.width, y + 8);
+      ctx.stroke();
+    }
+  } else if (bodyId === 'mars') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#fecaca');
+    g.addColorStop(0.28, '#fb923c');
+    g.addColorStop(0.68, '#c2410c');
+    g.addColorStop(1, '#7c2d12');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(127,29,29,0.22)';
+    for (let i = 0; i < 18; i++) {
+      ctx.beginPath();
+      ctx.ellipse(60 + i * 56, 120 + (i % 5) * 58, 40 + (i % 4) * 14, 14 + (i % 3) * 10, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255,245,245,0.16)';
+    ctx.beginPath();
+    ctx.ellipse(790, 72, 150, 44, 0.06, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (bodyId === 'jupiter') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#f5d0a9');
+    g.addColorStop(0.25, '#e7b074');
+    g.addColorStop(0.5, '#d99752');
+    g.addColorStop(0.75, '#9a6a42');
+    g.addColorStop(1, '#5b4637');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const bands = [
+      ['rgba(120,74,49,0.32)', 42],
+      ['rgba(255,240,214,0.18)', 88],
+      ['rgba(110,63,43,0.28)', 140],
+      ['rgba(250,220,180,0.16)', 196],
+      ['rgba(115,70,44,0.3)', 254],
+      ['rgba(245,228,198,0.16)', 318],
+      ['rgba(122,77,52,0.24)', 384],
+    ] as const;
+    for (const [stroke, y] of bands) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 28;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(canvas.width * 0.25, y + 14, canvas.width * 0.75, y - 16, canvas.width, y + 10);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(172,74,47,0.55)';
+    ctx.beginPath();
+    ctx.ellipse(690, 292, 96, 42, -0.1, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (bodyId === 'saturn') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#fef3c7');
+    g.addColorStop(0.35, '#fcd34d');
+    g.addColorStop(0.72, '#d6a651');
+    g.addColorStop(1, '#8b6a3d');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(255,248,220,0.2)';
+    ctx.lineWidth = 18;
+    for (let i = 0; i < 9; i++) {
+      const y = 44 + i * 52;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(canvas.width * 0.3, y + 12, canvas.width * 0.7, y - 8, canvas.width, y + 8);
+      ctx.stroke();
+    }
+  } else if (bodyId === 'uranus') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#d9f99d');
+    g.addColorStop(0.25, '#a7f3d0');
+    g.addColorStop(0.7, '#67e8f9');
+    g.addColorStop(1, '#0f766e');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(236,254,255,0.18)';
+    ctx.lineWidth = 14;
+    for (let i = 0; i < 8; i++) {
+      const y = 52 + i * 54;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(canvas.width * 0.3, y + 10, canvas.width * 0.7, y - 10, canvas.width, y + 6);
+      ctx.stroke();
+    }
+  } else if (bodyId === 'neptune') {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, '#bfdbfe');
+    g.addColorStop(0.25, '#60a5fa');
+    g.addColorStop(0.6, '#2563eb');
+    g.addColorStop(1, '#1e3a8a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(219,234,254,0.18)';
+    ctx.lineWidth = 20;
+    for (let i = 0; i < 8; i++) {
+      const y = 40 + i * 56;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(canvas.width * 0.28, y + 16, canvas.width * 0.72, y - 12, canvas.width, y + 10);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(720, 210, 120, 34, 0.04, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (bodyId === 'pluto') {
+    const g = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    g.addColorStop(0, '#f5e1d3');
+    g.addColorStop(0.4, '#c4a484');
+    g.addColorStop(0.72, '#7c5c45');
+    g.addColorStop(1, '#3f2d25');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.beginPath();
+    ctx.ellipse(720, 132, 160, 70, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(35,23,18,0.22)';
+    for (let i = 0; i < 16; i++) {
+      ctx.beginPath();
+      ctx.ellipse(Math.random() * canvas.width, Math.random() * canvas.height, 20 + Math.random() * 44, 12 + Math.random() * 28, Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
   } else {
     ctx.fillStyle = 'rgba(255,255,255,0.08)';
     for (let i = 0; i < 12; i++) {
@@ -1488,12 +1646,25 @@ function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: strin
   return (
     <group>
       <mesh>
-        <sphereGeometry args={[radius, 64, 64]} />
-        <meshStandardMaterial map={texture ?? undefined} color={color} emissive="#001020" metalness={0.2} roughness={0.8} />
+        <sphereGeometry args={[radius, 80, 80]} />
+        <meshPhysicalMaterial
+          map={texture ?? undefined}
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.12}
+          metalness={0.04}
+          roughness={0.84}
+          clearcoat={0.22}
+          clearcoatRoughness={0.78}
+        />
       </mesh>
-      <mesh scale={1.02}>
-        <sphereGeometry args={[radius, 64, 64]} />
-        <meshStandardMaterial color={color} transparent opacity={0.08} side={THREE.BackSide} />
+      <mesh scale={1.035}>
+        <sphereGeometry args={[radius, 80, 80]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.16} transparent opacity={0.12} side={THREE.BackSide} />
+      </mesh>
+      <mesh scale={1.085}>
+        <sphereGeometry args={[radius, 56, 56]} />
+        <meshBasicMaterial color={color} transparent opacity={0.05} side={THREE.BackSide} />
       </mesh>
     </group>
   );
@@ -1547,6 +1718,27 @@ function computeSceneRadius(points: Array<[number, number, number]>, center: THR
     radius = Math.max(radius, center.distanceTo(new THREE.Vector3(point[0], point[1], point[2])));
   }
   return radius;
+}
+
+function trajectoryIndexAtStage(trajectory: TrajectoryPoint[], stageList: StageDisplay[], labels: string[]): number {
+  if (trajectory.length < 2) return 0;
+  const stage = labels
+    .map((label) => stageList.find((item) => item.label === label))
+    .find((item): item is StageDisplay => Boolean(item));
+  if (!stage) return trajectory.length - 1;
+
+  let bestIndex = Math.min(trajectory.length - 1, Math.max(1, Math.floor(stage.progress * (trajectory.length - 1))));
+  if (stage.timeS != null) {
+    let bestDt = Infinity;
+    for (let i = 0; i < trajectory.length; i++) {
+      const dt = Math.abs((trajectory[i].time_s ?? 0) - stage.timeS);
+      if (dt < bestDt) {
+        bestDt = dt;
+        bestIndex = i;
+      }
+    }
+  }
+  return bestIndex;
 }
 
 function MissionSceneNavigator({
@@ -1683,16 +1875,17 @@ function MissionGlobe({
   externalBodies: Array<SolarBodyFeed & { pos?: [number, number, number] }>;
   radiationEnvironment: NearEarthRadiationFeed | null;
 }) {
+  const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
   const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
-  const { outboundTrajectory, inboundTrajectory } = useMemo(() => {
-    const n = trajectory.length;
-    if (n < 2) return { outboundTrajectory: trajectory, inboundTrajectory: trajectory };
-    const split = Math.floor(n * 0.55);
-    return {
-      outboundTrajectory: trajectory.slice(0, Math.max(2, split + 1)),
-      inboundTrajectory: trajectory.slice(split),
-    };
-  }, [trajectory]);
+  const { outboundTrajectory, returnTrajectory } = useMemo(() => {
+    if (trajectory.length < 2) {
+      return { outboundTrajectory: trajectory, returnTrajectory: [] as TrajectoryPoint[] };
+    }
+    const encounterIndex = trajectoryIndexAtStage(trajectory, stageList, ['Encounter', 'Approach']);
+    const outbound = trajectory.slice(0, Math.max(2, encounterIndex + 1));
+    const inbound = encounterIndex < trajectory.length - 1 ? trajectory.slice(encounterIndex) : [];
+    return { outboundTrajectory: outbound, returnTrajectory: inbound };
+  }, [trajectory, stageList]);
   const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
   const heliocentricEarthRadiusScene = RE / VIS_SCENE_KM_PER_UNIT;
   const earthRadiusScene = isCislunar ? RE / CISLUNAR_VIS_KM_PER_UNIT : heliocentricEarthRadiusScene;
@@ -1701,7 +1894,7 @@ function MissionGlobe({
   const systemBodies = useMemo(() => {
     if (isCislunar) return [];
     if (externalBodies.length) {
-      return externalBodies
+      const fromFeed = externalBodies
         .filter((body) => body.pos && body.id !== launchBodyId && body.bodyType?.toLowerCase().includes('planet'))
         .map((body) => ({
           id: body.id,
@@ -1711,6 +1904,7 @@ function MissionGlobe({
           atmosphereScaleHeightKm: body.atmosphereScaleHeightKm,
           pos: body.pos!,
         }));
+      if (fromFeed.length) return fromFeed;
     }
     const earthHelio = getApproximateHeliocentricPosition(CELESTIAL_BODY_MAP.earth, sceneDate);
     return CELESTIAL_BODIES
@@ -1824,8 +2018,12 @@ function MissionGlobe({
       {isCislunar ? (
         <group position={moonScene.pos}>
           <mesh>
-            <sphereGeometry args={[moonScene.radius, 48, 48]} />
-            <meshStandardMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.9} metalness={0.04} emissive="#0a0c10" emissiveIntensity={0.08} />
+            <sphereGeometry args={[moonScene.radius, 72, 72]} />
+            <meshPhysicalMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.88} metalness={0.03} emissive="#9ca3af" emissiveIntensity={0.08} clearcoat={0.12} clearcoatRoughness={0.82} />
+          </mesh>
+          <mesh scale={1.04}>
+            <sphereGeometry args={[moonScene.radius, 56, 56]} />
+            <meshBasicMaterial color="#e2e8f0" transparent opacity={0.05} side={THREE.BackSide} />
           </mesh>
           <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
             Moon
@@ -1839,8 +2037,12 @@ function MissionGlobe({
         return (
           <group key={body.id} position={bodyPos}>
             <mesh>
-              <sphereGeometry args={[radius, 32, 32]} />
-              <meshStandardMaterial color={body.color} roughness={0.82} metalness={0.06} />
+              <sphereGeometry args={[radius, 48, 48]} />
+              <meshPhysicalMaterial color={body.color} roughness={0.8} metalness={0.04} emissive={body.color} emissiveIntensity={isTarget ? 0.18 : 0.1} clearcoat={0.18} clearcoatRoughness={0.8} />
+            </mesh>
+            <mesh scale={1.05}>
+              <sphereGeometry args={[radius, 40, 40]} />
+              <meshBasicMaterial color={body.color} transparent opacity={isTarget ? 0.08 : 0.045} side={THREE.BackSide} />
             </mesh>
             <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={body.atmosphereScaleHeightKm} isPrimary={isTarget} />
             <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
@@ -1849,8 +2051,10 @@ function MissionGlobe({
           </group>
         );
       })}
-      <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
-      <DreiLine points={inboundTrajectory.map((point) => point.pos)} color="#f59e0b" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
+      <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.8 : 2.5} transparent opacity={0.96} />
+      {isCislunar && returnTrajectory.length >= 2 ? (
+        <DreiLine points={returnTrajectory.map((point) => point.pos)} color="#38bdf8" lineWidth={isCislunar ? 3.2 : 2.2} transparent opacity={0.88} />
+      ) : null}
       {projectedNodes.map((node) => {
         const selected = pathNodeIds.includes(node.id);
         const nr = isCislunar ? (selected ? 2.4 : 1.55) : (selected ? 2.2 : 1.4);
@@ -1869,21 +2073,40 @@ function MissionGlobe({
         );
       })}
       {stageMarkers.map((stage) => {
-        const sr = isCislunar ? 2.5 : 2.8;
-        const ty = isCislunar ? 5.2 : 5.5;
-        const tf = isCislunar ? 2.2 : 2.4;
+        const stageId = `${stage.sequence}-${stage.label}`;
+        const active = selectedStageId === stageId;
+        const sr = isCislunar ? 1.4 : 1.55;
+        const tf = isCislunar ? 1.65 : 1.75;
         return (
-          <group key={`${stage.sequence}-${stage.label}`} position={stage.point as [number, number, number]}>
-            <mesh>
+          <group key={stageId} position={stage.point as [number, number, number]}>
+            <mesh
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedStageId((current) => (current === stageId ? null : stageId));
+              }}
+            >
               <sphereGeometry args={[sr, 16, 16]} />
               <meshBasicMaterial color={stage.color} />
             </mesh>
-            <Text position={[0, ty + 1.8, 0]} fontSize={tf * 0.92} color="#f8fafc" anchorX="center">
-              {stage.sequence}
-            </Text>
-            <Text position={[0, ty - 0.6, 0]} fontSize={tf} color={stage.color} anchorX="center">
-              {stage.label}
-            </Text>
+            <mesh
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedStageId((current) => (current === stageId ? null : stageId));
+              }}
+            >
+              <sphereGeometry args={[sr * 1.8, 12, 12]} />
+              <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+            </mesh>
+            {active ? (
+              <>
+                <Text position={[0, sr + 2.1, 0]} fontSize={tf * 0.92} color="#f8fafc" anchorX="center">
+                  {stage.sequence}
+                </Text>
+                <Text position={[0, sr + 0.45, 0]} fontSize={tf} color={stage.color} anchorX="center">
+                  {stage.label}
+                </Text>
+              </>
+            ) : null}
           </group>
         );
       })}
@@ -2267,6 +2490,9 @@ export default function App() {
   }, [launchSites, launchLatitude, launchLongitude]);
 
   useEffect(() => {
+    let cancelled = false;
+    let firstFetch = true;
+
     const fetchAll = async () => {
       const isEarth = launchBodyId === 'earth';
       const weatherUrl = `/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
@@ -2297,6 +2523,8 @@ export default function App() {
       const wgc = wgcResult.status === 'fulfilled' ? wgcResult.value : null;
       const sites = launchSitesResult.status === 'fulfilled' ? launchSitesResult.value : null;
 
+      if (cancelled) return;
+
       setWeatherData(wx);
       setOpenMeteoWeather(openMeteo);
       setNasaWeather(nasa);
@@ -2310,19 +2538,30 @@ export default function App() {
       setLaunchSites(sites);
       if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
 
-      addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
-      addLog(`Space weather: ${nasa.source ?? 'UNAVAILABLE'}`);
-      if (ephemeris?.source) addLog(`Planet ephemerides: ${ephemeris.source}`);
-      if (radiation?.environment?.source) addLog(`Radiation belts: ${radiation.environment.source}`);
-      if (traffic?.source) addLog(`Traffic screening: ${traffic.source}`);
-      if (telemetry?.frame) addLog(`Telemetry ingest active: ${telemetry.frame.source}`);
+      if (firstFetch) {
+        addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
+        addLog(`Space weather: ${nasa.source ?? 'UNAVAILABLE'}`);
+        if (ephemeris?.source) addLog(`Planet ephemerides: ${ephemeris.source}`);
+        if (radiation?.environment?.source) addLog(`Radiation belts: ${radiation.environment.source}`);
+        if (traffic?.source) addLog(`Traffic screening: ${traffic.source}`);
+        if (telemetry?.frame) addLog(`Telemetry ingest active: ${telemetry.frame.source}`);
+        firstFetch = false;
+      }
       if (!isEarth) {
         setWeatherData({ source: 'NOT APPLICABLE' });
         setOpenMeteoWeather({ source: 'NOT APPLICABLE' });
       }
     };
-    fetchAll();
-  }, [addLog, launchBodyId, launchLatitude, launchLongitude]);
+    void fetchAll();
+    const intervalId = window.setInterval(() => {
+      void fetchAll();
+    }, 300000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [addLog, launchBodyId, launchLatitude, launchLongitude, launchDate]);
 
   useEffect(() => {
     const fetchDsnVisibility = async () => {
@@ -3371,7 +3610,7 @@ export default function App() {
                           const eph = systemEphemeris?.bodies?.find((item) => item.id === body.id);
                           return {
                             ...body,
-                            pos: eph ? [eph.x / VIS_SCENE_KM_PER_UNIT, eph.y / VIS_SCENE_KM_PER_UNIT, eph.z / VIS_SCENE_KM_PER_UNIT] as [number, number, number] : undefined,
+                            pos: eph ? heliocentricHorizonsKmToScene(eph) : undefined,
                           };
                         })}
                         radiationEnvironment={nearEarthRadiation}

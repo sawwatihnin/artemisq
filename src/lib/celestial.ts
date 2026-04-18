@@ -26,7 +26,24 @@ export interface CelestialBody {
 export const AU_KM = 149597870.7;
 export const MU_SUN_KM3S2 = 132712440018;
 export const HELIOCENTRIC_DISPLAY_SCALE_KM = AU_KM / 1500000;
+/** Scene length unit for interplanetary paths (km ÷ this → scene coords; matches {@link getApproximateHeliocentricPosition}). */
+export const HELIOCENTRIC_KM_PER_SCENE_UNIT = AU_KM / HELIOCENTRIC_DISPLAY_SCALE_KM;
 const J2000_MS = Date.UTC(2000, 0, 1, 12, 0, 0, 0);
+
+/**
+ * JPL Horizons ICRF km (relative to the query center) → Three.js scene units used with
+ * {@link getApproximateHeliocentricPosition}. Uses the same [x, z, y] axis order as that helper.
+ */
+export function heliocentricHorizonsKmToScene(km: { x: number; y: number; z: number }): [number, number, number] {
+  const s = 1 / HELIOCENTRIC_KM_PER_SCENE_UNIT;
+  return [km.x * s, km.z * s, km.y * s];
+}
+
+/** Horizons velocity in km/s → scene units per second (same axis mapping as {@link heliocentricHorizonsKmToScene}). */
+export function heliocentricHorizonsVelocityKmPerSToScene(v: { x: number; y: number; z: number }): [number, number, number] {
+  const s = 1 / HELIOCENTRIC_KM_PER_SCENE_UNIT;
+  return [v.x * s, v.z * s, v.y * s];
+}
 
 export const CELESTIAL_BODIES: CelestialBody[] = [
   {
