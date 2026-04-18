@@ -180,6 +180,8 @@ export interface MissionTimeProfile {
   reentrySafeVelocityMaxMs?: number;
   inverseTargetRisk?: number;
   inverseTargetCost?: number;
+  externalTransferTimeDays?: number;
+  externalLaunchWindows?: LaunchWindowEvaluation[];
 }
 
 export interface MissionTimelinePoint {
@@ -1494,7 +1496,7 @@ export class SimulatedAnnealer {
     const costBenchmark = [...decisionCosts].sort((a, b) => b.riskAdjustedCost - a.riskAdjustedCost)[0];
     const preferredReplan = replanOptions[0];
     const verification = runMissionSupportVerification(bestRadiationSamples, crewRiskParams, replanOptions);
-    const launchWindows = rankLaunchWindows(
+    const launchWindows = missionProfile.externalLaunchWindows ?? rankLaunchWindows(
       generateLaunchWindows(new Date().toISOString(), missionProfile.launchWindowOffsetsHours ?? [0, 6, 12, 24]),
       {
         baseDeltaV_ms: totalDeltaV,
@@ -1881,7 +1883,7 @@ export class SimulatedAnnealer {
         hohmannDeltaV: hohmann.dvTotal,
         j2Correction: j2corr,
         vanAllenDose: vanAllenDoseVal,
-        transferTime_days: hohmann.tof_days,
+        transferTime_days: missionProfile.externalTransferTimeDays ?? hohmann.tof_days,
       },
       timeline: bestCost.timeline,
       constraintViolations: bestCost.violations,

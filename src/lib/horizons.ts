@@ -1,14 +1,15 @@
 import * as THREE from 'three';
 import {
   CISLUNAR_VIS_KM_PER_UNIT,
+  computeHohmann,
   type KeplerianElements,
   keplerian2ECI,
-  computeHohmann,
   RE,
   type TrajectoryPoint,
   VIS_SCENE_KM_PER_UNIT,
 } from './orbital';
 import { normalize3, slerpUnitVectors } from './lunarEphemeris';
+import type { LaunchWindowEvaluation } from './launchWindow';
 
 const HORIZONS_API_URL = 'https://ssd.jpl.nasa.gov/api/horizons.api';
 
@@ -48,6 +49,14 @@ export interface HorizonsApiResponse {
   result?: string;
   error?: string;
   message?: string;
+}
+
+export interface HorizonsTransferEstimate {
+  transferTimeDays: number;
+  deltaV_ms: number;
+  departureRangeKm: number;
+  arrivalRangeKm: number;
+  alignmentScore: number;
 }
 
 const MAJOR_BODY_IDS: Record<string, string> = {
@@ -193,6 +202,148 @@ function differenceVelocity(a: HorizonsVectorRow, b: HorizonsVectorRow): THREE.V
     (b.y - a.y) / dtSeconds,
     (b.z - a.z) / dtSeconds,
   );
+}
+
+function norm(row: HorizonsVectorRow): number {
+  return Math.hypot(row.x, row.y, row.z);
+}
+
+function dotUnit(a: HorizonsVectorRow, b: HorizonsVectorRow): number {
+  const na = norm(a);
+  const nb = norm(b);
+  if (na <= 0 || nb <= 0) return 0;
+  return (a.x * b.x + a.y * b.y + a.z * b.z) / (na * nb);
+}
+
+export async function fetchHorizonsTransferEstimate(params: {
+  launchDate: string;
+  destinationId: string;
+  launchBodyId: string;
+  keplerEl?: KeplerianElements;
+}): Promise<HorizonsTransferEstimate> {
+  const launchDate = new Date(params.launchDate);
+  const destinationId = params.destinationId.toLowerCase();
+  const launchBodyId = params.launchBodyId.toLowerCase();
+
+  if (destinationId === 'moon' && launchBodyId === 'earth') {
+    const keplerEl = params.keplerEl ?? { a: 6778, e: 0.0008, i: 51.6, raan: 247, argp: 130, nu: 0 };
+    const state0 = keplerian2ECI(keplerEl);
+    const r1 = Math.hypot(state0.r[0], state0.r[1], state0.r[2]);
+    const leoAlt = Math.max(150, r1 - RE);
+    const departureMoon = await fetchHorizonsVectors({
+      COMMAND: `'301'`,
+      CENTER: `'500@399'`,
+      START_TIME: `'${isoDate(launchDate)}'`,
+      STOP_TIME: `'${isoDate(new Date(launchDate.getTime() + 24 * 3600 * 1000))}'`,
+      STEP_SIZE: `'12 h'`,
+    });
+    const moonDeparture = departureMoon[0];
+    if (!moonDeparture) throw new Error('Unable to fetch lunar departure geometry from Horizons');
+    const departureRangeKm = norm(moonDeparture);
+    const hoh = computeHohmann(leoAlt, Math.max(250_000, departureRangeKm - RE));
+    const arrivalDate = new Date(launchDate.getTime() + hoh.tof_s * 1000);
+    const arrivalMoon = await fetchHorizonsVectors({
+      COMMAND: `'301'`,
+      CENTER: `'500@399'`,
+      START_TIME: `'${isoDate(arrivalDate)}'`,
+      STOP_TIME: `'${isoDate(new Date(arrivalDate.getTime() + 24 * 3600 * 1000))}'`,
+      STEP_SIZE: `'12 h'`,
+    });
+    const moonArrival = arrivalMoon[0] ?? moonDeparture;
+    const alignmentScore = 0.5 * (1 + dotUnit(moonDeparture, moonArrival));
+    return {
+      transferTimeDays: hoh.tof_days,
+      deltaV_ms: hoh.dvTotal_ms * (1 + 0.08 * (1 - alignmentScore)),
+      departureRangeKm,
+      arrivalRangeKm: norm(moonArrival),
+      alignmentScore,
+    };
+  }
+
+  const command = getHorizonsMajorBodyId(destinationId);
+  const center = `'500@${getHorizonsMajorBodyId(launchBodyId)}'`;
+  const departureWindow = await fetchHorizonsVectors({
+    COMMAND: `'${command}'`,
+    CENTER: center,
+    START_TIME: `'${isoDate(launchDate)}'`,
+    STOP_TIME: `'${isoDate(new Date(launchDate.getTime() + 24 * 3600 * 1000))}'`,
+    STEP_SIZE: `'12 h'`,
+  });
+  const departure = departureWindow[0];
+  if (!departure) throw new Error('Unable to fetch departure geometry from Horizons');
+  const departureRangeKm = norm(departure);
+  const transferTimeDays = Math.max(30, departureRangeKm / 38000);
+  const arrivalDate = new Date(launchDate.getTime() + transferTimeDays * 86400 * 1000);
+  const arrivalWindow = await fetchHorizonsVectors({
+    COMMAND: `'${command}'`,
+    CENTER: center,
+    START_TIME: `'${isoDate(arrivalDate)}'`,
+    STOP_TIME: `'${isoDate(new Date(arrivalDate.getTime() + 24 * 3600 * 1000))}'`,
+    STEP_SIZE: `'12 h'`,
+  });
+  const arrival = arrivalWindow[0] ?? departure;
+  const alignmentScore = 0.5 * (1 + dotUnit(departure, arrival));
+
+  return {
+    transferTimeDays,
+    deltaV_ms: Math.max(1200, departureRangeKm * 0.012 * (1 + 0.2 * (1 - alignmentScore))),
+    departureRangeKm,
+    arrivalRangeKm: norm(arrival),
+    alignmentScore,
+  };
+}
+
+export async function fetchHorizonsLaunchWindowEvaluations(params: {
+  launchDate: string;
+  destinationId: string;
+  launchBodyId: string;
+  offsetsHours: number[];
+  baseRadiation: number;
+  baseCommunication: number;
+  keplerEl?: KeplerianElements;
+}): Promise<LaunchWindowEvaluation[]> {
+  const evaluations: LaunchWindowEvaluation[] = [];
+  const baseline = await fetchHorizonsTransferEstimate({
+    launchDate: params.launchDate,
+    destinationId: params.destinationId,
+    launchBodyId: params.launchBodyId,
+    keplerEl: params.keplerEl,
+  });
+
+  for (const offsetHours of params.offsetsHours) {
+    const shiftedLaunch = new Date(new Date(params.launchDate).getTime() + offsetHours * 3600 * 1000);
+    const estimate = await fetchHorizonsTransferEstimate({
+      launchDate: shiftedLaunch.toISOString(),
+      destinationId: params.destinationId,
+      launchBodyId: params.launchBodyId,
+      keplerEl: params.keplerEl,
+    });
+    const communicationAvailability = Math.max(
+      0,
+      Math.min(1, params.baseCommunication * (0.88 + 0.12 * estimate.alignmentScore)),
+    );
+    const radiationExposure = params.baseRadiation * (1 + 0.1 * (1 - estimate.alignmentScore));
+    const normalizedCost = estimate.deltaV_ms / Math.max(baseline.deltaV_ms, 1);
+    const normalizedRisk = radiationExposure / Math.max(params.baseRadiation, 1e-6);
+    const normalizedCommPenalty = 1 - communicationAvailability;
+    const score = 0.45 * normalizedRisk + 0.35 * normalizedCost + 0.2 * normalizedCommPenalty;
+
+    evaluations.push({
+      window: {
+        launchTimeIso: shiftedLaunch.toISOString(),
+        offsetHours,
+        epochMs: shiftedLaunch.getTime(),
+        phaseAngleRad: Math.acos(Math.max(-1, Math.min(1, 2 * estimate.alignmentScore - 1))),
+        alignmentScore: estimate.alignmentScore,
+      },
+      deltaV_ms: estimate.deltaV_ms,
+      radiationExposure,
+      communicationAvailability,
+      score,
+    });
+  }
+
+  return evaluations.sort((a, b) => a.score - b.score);
 }
 
 export async function buildHorizonsTrajectory(params: {

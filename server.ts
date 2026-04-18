@@ -5,7 +5,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
-import { buildHorizonsTrajectory, buildHorizonsUrl } from "./src/lib/horizons.ts";
+import {
+  buildHorizonsTrajectory,
+  buildHorizonsUrl,
+  fetchHorizonsLaunchWindowEvaluations,
+  fetchHorizonsTransferEstimate,
+} from "./src/lib/horizons.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -158,13 +163,16 @@ async function startServer() {
   });
 
   // ── Optimize ────────────────────────────────────────────────────────────────
-  app.post("/api/optimize", (req, res) => {
+  app.post("/api/optimize", async (req, res) => {
     const {
       nodes, edges, weights, start, end, steps,
       date, radiationIndex, isp_s = 450, spacecraft_mass_kg = 5000,
       missionProfile,
       monteCarloRuns = 80,
       qaoa_p = 3,
+      targetPlanet,
+      launchBodyId = 'earth',
+      keplerEl,
     } = req.body;
 
     try {
@@ -172,9 +180,38 @@ async function startServer() {
       const solarOffset = (year - 2019) % 11;
       const baseRadiation = 1 + Math.sin((solarOffset / 11) * Math.PI) * 0.5;
       const finalMultiplier = baseRadiation * (radiationIndex || 1.0);
+      let resolvedMissionProfile = missionProfile;
+
+      if (date && targetPlanet) {
+        try {
+          const offsets = missionProfile?.launchWindowOffsetsHours ?? [0, 6, 12, 24, 36];
+          const transferEstimate = await fetchHorizonsTransferEstimate({
+            launchDate: date,
+            destinationId: targetPlanet,
+            launchBodyId,
+            keplerEl,
+          });
+          const launchWindows = await fetchHorizonsLaunchWindowEvaluations({
+            launchDate: date,
+            destinationId: targetPlanet,
+            launchBodyId,
+            offsetsHours: offsets,
+            baseRadiation: Math.max(0.2, finalMultiplier),
+            baseCommunication: 0.82,
+            keplerEl,
+          });
+          resolvedMissionProfile = {
+            ...missionProfile,
+            externalTransferTimeDays: transferEstimate.transferTimeDays,
+            externalLaunchWindows: launchWindows,
+          };
+        } catch {
+          resolvedMissionProfile = missionProfile;
+        }
+      }
 
       const annealer = new SimulatedAnnealer(nodes, edges, weights, isp_s, spacecraft_mass_kg);
-      const result = annealer.optimize(start, end, steps, finalMultiplier, missionProfile, monteCarloRuns, qaoa_p);
+      const result = annealer.optimize(start, end, steps, finalMultiplier, resolvedMissionProfile, monteCarloRuns, qaoa_p);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || "Optimization failed" });

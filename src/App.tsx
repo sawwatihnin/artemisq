@@ -1405,6 +1405,9 @@ export default function App() {
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
+          targetPlanet,
+          launchBodyId,
+          keplerEl,
           missionProfile: {
             launchOffsetHours,
             launchWindowOffsetsHours: [0, 6, 12, 24, 36],
@@ -2385,10 +2388,6 @@ export default function App() {
                     <PhysicsPanel keplerEl={keplerEl} fuelType={fuelType} />
                   </DashboardCard>
 
-                  <DashboardCard title="STL Aerodynamics" icon={Wind} provenance={stlAnalysis ? 'formula' : 'preset'}>
-                    <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
-                  </DashboardCard>
-
                   <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : 'preset'}>
                     <ConjunctionPanel importedNodes={importedGraph?.nodes ?? []} />
                   </DashboardCard>
@@ -2496,6 +2495,10 @@ export default function App() {
                     ) : (
                       <p className="text-sm text-slate-400">No vehicle uploaded yet. Geometry is parsed locally from the user STL.</p>
                     )}
+                  </DashboardCard>
+
+                  <DashboardCard title="STL Aerodynamics" icon={Wind} provenance={stlAnalysis ? 'formula' : 'preset'}>
+                    <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
                   </DashboardCard>
 
                   <DashboardCard title="Best Flight Path" icon={Gauge} provenance={simResult ? 'formula' : 'preset'}>
