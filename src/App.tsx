@@ -1162,7 +1162,10 @@ function deriveTrajectoryStages(
 
   const labelIndex = new Map<string, number>();
   for (let i = 0; i < trajectory.length; i++) {
-    const label = trajectory[i].label ? normalizeStageLabel(trajectory[i].label, options.targetPlanetId, options.launchBodyId) : null;
+    const rawLabel = trajectory[i]?.label;
+    const label = typeof rawLabel === 'string'
+      ? normalizeStageLabel(rawLabel, options.targetPlanetId, options.launchBodyId)
+      : null;
     if (label && !labelIndex.has(label)) labelIndex.set(label, i);
   }
 
@@ -1422,8 +1425,8 @@ function QuantumDistribution({ distribution }: { distribution?: Array<{ state: s
         <YAxis stroke="#64748b" tick={{ fontSize: 9 }} tickFormatter={(value) => `${(value * 100).toFixed(0)}%`} />
         <Tooltip
           contentStyle={{ background: '#020617', border: '1px solid #334155' }}
-          formatter={(value: number, _name, payload: { payload?: { energy: number; isOptimal: boolean; shotCount?: number } }) => [
-            `${(value * 100).toFixed(2)}%`,
+          formatter={(value, _name, payload: { payload?: { energy: number; isOptimal: boolean; shotCount?: number } }) => [
+            `${(Number(value ?? 0) * 100).toFixed(2)}%`,
             `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}${payload.payload?.shotCount != null ? ` · ${payload.payload.shotCount} shots` : ''}`,
           ]}
         />
@@ -2524,20 +2527,20 @@ export default function App() {
       const openMeteoUrl = `/api/openmeteo/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
       const [wx, openMeteo, nasa, bodies, ephemeris, radiation, eonet, traffic, telemetry, wgc, sites] = await Promise.all([
         isEarth
-          ? safeFetchJson(weatherUrl, { source: 'UNAVAILABLE' })
-          : Promise.resolve({ source: 'NOT APPLICABLE' }),
+          ? safeFetchJson<{ source?: string; wind_speed?: number; precipitation?: number }>(weatherUrl, { source: 'UNAVAILABLE' })
+          : Promise.resolve<{ source?: string }>({ source: 'NOT APPLICABLE' }),
         isEarth
-          ? safeFetchJson(openMeteoUrl, { source: 'UNAVAILABLE' })
-          : Promise.resolve({ source: 'NOT APPLICABLE' }),
-        safeFetchJson('/api/space-weather', { source: 'UNAVAILABLE' }),
-        safeFetchJson('/api/bodies', null),
-        safeFetchJson(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`, null),
-        safeFetchJson('/api/radiation/live?days=7', null),
-        safeFetchJson('/api/eonet/events?status=open&limit=4&days=14', null),
-        safeFetchJson('/api/celestrak/conjunctions?group=STATIONS&limit=10', null),
-        safeFetchJson('/api/telemetry/latest', null),
-        safeFetchJson('/api/webgeocalc/metadata', null),
-        safeFetchJson('/api/ground/launch-sites', null),
+          ? safeFetchJson<{ source?: string }>(openMeteoUrl, { source: 'UNAVAILABLE' })
+          : Promise.resolve<{ source?: string }>({ source: 'NOT APPLICABLE' }),
+        safeFetchJson<{ source?: string; radiationIndex?: number; kpIndex?: number; flareProbabilityM?: number; flareProbabilityX?: number; protonEventProbability?: number; polarCapAbsorption?: boolean }>('/api/space-weather', { source: 'UNAVAILABLE' }),
+        safeFetchJson<SolarBodiesFeed | null>('/api/bodies', null),
+        safeFetchJson<SystemEphemerisFeed | null>(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`, null),
+        safeFetchJson<NearEarthRadiationFeed | null>('/api/radiation/live?days=7', null),
+        safeFetchJson<ExternalEventFeed | null>('/api/eonet/events?status=open&limit=4&days=14', null),
+        safeFetchJson<ExternalConjunctionFeed | null>('/api/celestrak/conjunctions?group=STATIONS&limit=10', null),
+        safeFetchJson<ExternalTelemetryFeed | null>('/api/telemetry/latest', null),
+        safeFetchJson<Record<string, unknown> | null>('/api/webgeocalc/metadata', null),
+        safeFetchJson<{ sites?: Array<{ id: string; name: string }>; source?: string } | null>('/api/ground/launch-sites', null),
       ]);
 
       if (cancelled) return;
@@ -3647,7 +3650,7 @@ export default function App() {
       setTleInputText(lines);
     }
   }, [importedMissionConfig]);
-  const missionStages = useMemo(() => {
+  const missionStages = useMemo<StageDisplay[]>(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit, targetPlanetId: targetPlanet, launchBodyId });
     const template = getFlightSequenceTemplate(targetPlanet, launchBodyId);
     return derived.length
@@ -5277,7 +5280,7 @@ export default function App() {
                           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                           <XAxis dataKey="qubit" stroke="#64748b" tick={{ fontSize: 9 }} />
                           <YAxis domain={[0, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
-                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value: number) => [`${(value * 100).toFixed(2)}%`, 'P(|1>)']} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value) => [`${(Number(value ?? 0) * 100).toFixed(2)}%`, 'P(|1>)']} />
                           <Bar dataKey="probabilityOne" fill="#4B9CD3" radius={[3, 3, 0, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
@@ -5293,7 +5296,7 @@ export default function App() {
                           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                           <XAxis dataKey="pair" stroke="#64748b" tick={{ fontSize: 9 }} />
                           <YAxis domain={[-1, 1]} stroke="#64748b" tick={{ fontSize: 9 }} />
-                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value: number) => [value.toFixed(3), '⟨ZiZj⟩']} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} formatter={(value) => [Number(value ?? 0).toFixed(3), '⟨ZiZj⟩']} />
                           <Bar dataKey="correlation" radius={[3, 3, 0, 0]}>
                             {quantumZZData.map((entry, index) => (
                               <Cell key={index} fill={entry.correlation >= 0 ? '#22c55e' : '#f97316'} />

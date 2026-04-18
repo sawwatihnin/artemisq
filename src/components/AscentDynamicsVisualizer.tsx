@@ -1,3 +1,4 @@
+import type { MutableRefObject, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Grid, OrbitControls, Sparkles, Text } from '@react-three/drei';
@@ -127,7 +128,7 @@ export function interpolateAscentStep(steps: AscentVizStep[], t: number): Ascent
   };
 }
 
-function ProceduralRocket({ matRef }: { matRef: React.RefObject<THREE.MeshStandardMaterial | null> }) {
+function ProceduralRocket({ matRef }: { matRef: RefObject<THREE.MeshStandardMaterial | null> }) {
   return (
     <group scale={1.2}>
       <mesh position={[0, 9, 0]}>
@@ -152,7 +153,7 @@ function DragArrowLive({
   layout,
   qMax,
 }: {
-  playheadRef: React.MutableRefObject<number>;
+  playheadRef: MutableRefObject<number>;
   steps: AscentVizStep[];
   layout: { sx: number; sy: number };
   qMax: number;
@@ -201,7 +202,7 @@ function TelemetryBroadcaster({
   playing,
   onTick,
 }: {
-  playheadRef: React.MutableRefObject<number>;
+  playheadRef: MutableRefObject<number>;
   playing: boolean;
   onTick: (t: number) => void;
 }) {
@@ -232,14 +233,14 @@ function TrajectoryScene({
   steps: AscentVizStep[];
   maxQIndex: number;
   mecoIndex: number;
-  playheadRef: React.MutableRefObject<number>;
+  playheadRef: MutableRefObject<number>;
   playing: boolean;
   stlGeometry: THREE.BufferGeometry | null;
   stressPerVertex: number[] | undefined;
   principalAxis: 'x' | 'y' | 'z';
   mecoTime: number;
-  controlsRef: React.RefObject<any>;
-  vehiclePosRef: React.MutableRefObject<THREE.Vector3>;
+  controlsRef: RefObject<any>;
+  vehiclePosRef: MutableRefObject<THREE.Vector3>;
   qMax: number;
   onTelemetryHead: (t: number) => void;
 }) {

@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express from "express";
+import express, { type Request, type Response } from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -31,7 +31,7 @@ import { solveMissionTimeline } from "./src/lib/missionTimeline.ts";
 import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
 import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
 import { buildOpsConsole } from "./src/lib/opsConsole.ts";
-import { getLatestRadiationSnapshot, getRadiationSnapshotHistory, ingestLiveRadiationSnapshot } from "./src/lib/radiationIngest.ts";
+import { getLatestRadiationSnapshot, getRadiationSnapshotHistory, ingestLiveRadiationSnapshot, shouldRefreshRadiationSnapshot } from "./src/lib/radiationIngest.ts";
 import { assessTrajectoryRadiationIntersections } from "./src/lib/radiationIntersection.ts";
 import { buildNearEarthRadiationEnvironment } from "./src/lib/radiationModel.ts";
 import { fetchSolarBodies, fetchSolarBody, fetchSolarSkyPositions, mergeCelestialFallback } from "./src/lib/solarSystem.ts";
@@ -55,6 +55,74 @@ import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webg
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DEFAULT_MISSION_ID = "default";
+const MAX_OPTIMIZER_NODES = 24;
+const MAX_OPTIMIZER_EDGES = 160;
+const MAX_OPTIMIZER_STEPS = 12;
+const MAX_MONTE_CARLO_RUNS = 100;
+const MAX_QAOA_DEPTH = 6;
+const TELEMETRY_ACCESS_TOKEN = process.env.TELEMETRY_ACCESS_TOKEN?.trim() || "";
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+function normalizeMissionId(value: unknown): string {
+  const missionId = typeof value === "string" ? value.trim() : "";
+  return missionId.slice(0, 64) || DEFAULT_MISSION_ID;
+}
+
+function hasTelemetryAccess(req: Request): boolean {
+  if (!TELEMETRY_ACCESS_TOKEN) return true;
+  const bearer = req.header("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const headerToken = req.header("x-telemetry-token")?.trim();
+  return bearer === TELEMETRY_ACCESS_TOKEN || headerToken === TELEMETRY_ACCESS_TOKEN;
+}
+
+function rejectIfNoTelemetryAccess(req: Request, res: Response): boolean {
+  if (hasTelemetryAccess(req)) return false;
+  res.status(401).json({ error: "Telemetry access token required" });
+  return true;
+}
+
+function validateOptimizerPayload(body: any): string | null {
+  const nodes = Array.isArray(body?.nodes) ? body.nodes : [];
+  const edges = Array.isArray(body?.edges) ? body.edges : [];
+  const steps = clampInteger(body?.steps, 8, 2, MAX_OPTIMIZER_STEPS);
+  const monteCarloRuns = clampInteger(body?.monteCarloRuns, 80, 10, MAX_MONTE_CARLO_RUNS);
+  const qaoaDepth = clampInteger(body?.qaoa_p, 3, 1, MAX_QAOA_DEPTH);
+
+  if (!nodes.length || !edges.length) return "nodes and edges are required";
+  if (nodes.length > MAX_OPTIMIZER_NODES) return `nodes must not exceed ${MAX_OPTIMIZER_NODES}`;
+  if (edges.length > MAX_OPTIMIZER_EDGES) return `edges must not exceed ${MAX_OPTIMIZER_EDGES}`;
+  if (!body?.start || !body?.end) return "start and end are required";
+  if (steps > MAX_OPTIMIZER_STEPS) return `steps must not exceed ${MAX_OPTIMIZER_STEPS}`;
+  if (monteCarloRuns > MAX_MONTE_CARLO_RUNS) return `monteCarloRuns must not exceed ${MAX_MONTE_CARLO_RUNS}`;
+  if (qaoaDepth > MAX_QAOA_DEPTH) return `qaoa_p must not exceed ${MAX_QAOA_DEPTH}`;
+  return null;
+}
+
+function validateTelemetryFrame(body: any): string | null {
+  if (!body || typeof body !== "object") return "telemetry frame must be an object";
+  const missionId = normalizeMissionId(body.missionId);
+  if (!missionId) return "missionId is required";
+  if (body.subsystemFlags && !Array.isArray(body.subsystemFlags)) return "subsystemFlags must be an array of strings";
+  const numericFields = [
+    "commMarginDb",
+    "radiationDoseRate",
+    "propulsionDeltaVErrorPct",
+    "powerMarginPct",
+    "thermalMarginC",
+  ] as const;
+  for (const field of numericFields) {
+    if (body[field] !== undefined && !Number.isFinite(Number(body[field]))) {
+      return `${field} must be a finite number`;
+    }
+  }
+  return null;
+}
 
 async function startServer() {
   const app = express();
@@ -342,23 +410,37 @@ async function startServer() {
 
   app.get("/api/radiation/live", async (req, res) => {
     try {
-      const snapshot = await ingestLiveRadiationSnapshot(Number(req.query.days ?? 7));
+      const days = clampInteger(req.query.days, 7, 1, 30);
+      const refresh = req.query.refresh === "true";
+      const latest = getLatestRadiationSnapshot();
+      const snapshot = refresh || shouldRefreshRadiationSnapshot(latest, days)
+        ? await ingestLiveRadiationSnapshot(days)
+        : latest!;
       res.json(snapshot);
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Live radiation ingest failed', source: 'UPSTREAM ERROR' });
     }
   });
 
-  app.get("/api/radiation/live/latest", (_req, res) => {
-    res.json({
-      snapshot: getLatestRadiationSnapshot(),
-      source: 'LIVE · NOAA SWPC GOES + NASA CCMC DONKI Ingest',
-    });
+  app.get("/api/radiation/live/latest", async (req, res) => {
+    try {
+      const days = clampInteger(req.query.days, 7, 1, 30);
+      const latest = getLatestRadiationSnapshot();
+      const snapshot = shouldRefreshRadiationSnapshot(latest, days)
+        ? await ingestLiveRadiationSnapshot(days)
+        : latest;
+      res.json({
+        snapshot,
+        source: 'LIVE · NOAA SWPC GOES + NASA CCMC DONKI Ingest',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Live radiation fetch failed', source: 'UPSTREAM ERROR' });
+    }
   });
 
   app.get("/api/radiation/live/history", (req, res) => {
     res.json({
-      snapshots: getRadiationSnapshotHistory(Number(req.query.limit ?? 12)),
+      snapshots: getRadiationSnapshotHistory(clampInteger(req.query.limit, 12, 1, 48)),
       source: 'LIVE · NOAA SWPC GOES + NASA CCMC DONKI Ingest',
     });
   });
@@ -809,6 +891,11 @@ async function startServer() {
   // ── Telemetry Ingest ───────────────────────────────────────────────────────
   app.post("/api/telemetry/ingest", (req, res) => {
     try {
+      if (rejectIfNoTelemetryAccess(req, res)) return;
+      const validationError = validateTelemetryFrame(req.body);
+      if (validationError) {
+        return res.status(400).json({ error: validationError });
+      }
       const frame = ingestTelemetryFrame(req.body);
       res.status(201).json({ ok: true, frame });
     } catch (error: any) {
@@ -816,16 +903,22 @@ async function startServer() {
     }
   });
 
-  app.get("/api/telemetry/latest", (_req, res) => {
+  app.get("/api/telemetry/latest", (req, res) => {
+    if (rejectIfNoTelemetryAccess(req, res)) return;
+    const missionId = normalizeMissionId(req.query.missionId);
     res.json({
-      frame: getLatestTelemetryFrame(),
+      missionId,
+      frame: getLatestTelemetryFrame(missionId),
       source: 'LIVE · External Telemetry Ingest',
     });
   });
 
   app.get("/api/telemetry/history", (req, res) => {
+    if (rejectIfNoTelemetryAccess(req, res)) return;
+    const missionId = normalizeMissionId(req.query.missionId);
     res.json({
-      frames: getTelemetryHistory(Number(req.query.limit ?? 50)),
+      missionId,
+      frames: getTelemetryHistory(clampInteger(req.query.limit, 50, 1, 200), missionId),
       source: 'LIVE · External Telemetry Ingest',
     });
   });
@@ -945,6 +1038,10 @@ async function startServer() {
 
   // ── Optimize ────────────────────────────────────────────────────────────────
   app.post("/api/optimize", async (req, res) => {
+    const validationError = validateOptimizerPayload(req.body);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
     const {
       nodes, edges, weights, start, end, steps,
       date, radiationIndex, isp_s = 450, spacecraft_mass_kg = 5000,
@@ -992,7 +1089,15 @@ async function startServer() {
       }
 
       const annealer = new SimulatedAnnealer(nodes, edges, weights, isp_s, spacecraft_mass_kg);
-      const result = annealer.optimize(start, end, steps, finalMultiplier, resolvedMissionProfile, monteCarloRuns, qaoa_p);
+      const result = annealer.optimize(
+        start,
+        end,
+        clampInteger(steps, 8, 2, MAX_OPTIMIZER_STEPS),
+        finalMultiplier,
+        resolvedMissionProfile,
+        clampInteger(monteCarloRuns, 80, 10, MAX_MONTE_CARLO_RUNS),
+        clampInteger(qaoa_p, 3, 1, MAX_QAOA_DEPTH),
+      );
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || "Optimization failed" });
@@ -1012,7 +1117,7 @@ async function startServer() {
 
     try {
       const annealer = new SimulatedAnnealer(nodes, edges, weights, isp_s, spacecraft_mass_kg);
-      const result = annealer.runQAOAOnly(bestPath, qaoa_p);
+      const result = annealer.runQAOAOnly(bestPath, clampInteger(qaoa_p, 3, 1, MAX_QAOA_DEPTH));
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || "QAOA re-run failed" });

@@ -1,5 +1,5 @@
 const DONKI_BASE_URL = process.env.DONKI_BASE_URL ?? 'https://kauai.ccmc.gsfc.nasa.gov/DONKI/WS/get';
-const DONKI_API_KEY = process.env.NASA_API_KEY ?? '0ZuzFuvYsYirOPMbLUAgP7d7NLbpYgYZnxMjS4WI';
+const DONKI_API_KEY = process.env.NASA_API_KEY ?? '';
 
 interface DonkiLinkedEvent {
   activityID?: string;
