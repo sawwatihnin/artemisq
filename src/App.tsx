@@ -1718,42 +1718,24 @@ export default function App() {
         <main className="grid flex-1 gap-4 lg:grid-cols-[1.2fr_420px]">
           <section className="flex min-h-0 flex-col gap-4">
             <DashboardCard
-              title={activeTab === 'vehicle' ? 'Ascent Dynamics Visualizer' : `${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`}
-              icon={activeTab === 'vehicle' ? Rocket : Globe}
-              provenance={activeTab === 'vehicle' ? (simResult ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
+              title={activeTab === 'vehicle' ? 'STL Aerodynamics Visualizer' : `${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`}
+              icon={activeTab === 'vehicle' ? Wind : Globe}
+              provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
               className="flex-1"
             >
               {activeTab === 'vehicle' ? (
-                simResult ? (
-                  <AscentDynamicsVisualizer
-                    steps={simResult.best.steps.map((s) => ({
-                      time: s.time,
-                      altitude: s.altitude,
-                      downrangeKm: s.downrangeKm,
-                      q: s.q,
-                      velocity: s.velocity,
-                      dragN: s.dragN,
-                      pitch: s.pitch,
-                      mach: s.mach,
-                      stress: s.stress,
-                    }))}
-                    mecoTime={simResult.best.mecoTime}
-                    missionStages={vehicleTimelineStages}
-                    transferTimeDays={optResult?.physics.transferTime_days}
-                    stlGeometry={stlVizGeometry}
-                    stressConcentrations={stlAnalysis?.stressConcentrations}
-                    principalAxis={stlAnalysis?.principalAxis ?? 'y'}
-                  />
+                stlAnalysis ? (
+                  <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
                 ) : (
                   <div className="flex h-[420px] flex-col items-center justify-center gap-2 rounded-xl border border-slate-800 bg-black/40 px-6 text-center">
                     <p className="text-sm text-slate-300">
-                      On this tab, click <span className="font-medium text-sky-200">Run STL-Based Ascent Optimization</span> (right column). The trajectory appears here after the run; upload an STL first if you want mesh-derived area and drag.
+                      Upload an STL on this tab to inspect the vehicle’s aerodynamic cross-section, flow cues, and drag-driven trends in the main visualizer.
                     </p>
                     {stlAnalysis ? (
-                      <p className="text-xs text-sky-200/90">Mesh ready ({stlFilename}) — press Run to compute the ascent.</p>
+                      <p className="text-xs text-sky-200/90">Mesh ready ({stlFilename}).</p>
                     ) : (
                       <p className="max-w-md text-xs text-slate-500">
-                        Without an STL, the solver uses a reference 18 m² / Cd 0.48 vehicle. The plot uses q = ½ρv² along the path (blue → red).
+                        Without an STL, the aerodynamic viewer has no vehicle geometry to render. Upload a rocket mesh to drive frontal area and drag visualization.
                       </p>
                     )}
                   </div>
@@ -2497,9 +2479,6 @@ export default function App() {
                     )}
                   </DashboardCard>
 
-                  <DashboardCard title="STL Aerodynamics" icon={Wind} provenance={stlAnalysis ? 'formula' : 'preset'}>
-                    <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
-                  </DashboardCard>
 
                   <DashboardCard title="Best Flight Path" icon={Gauge} provenance={simResult ? 'formula' : 'preset'}>
                     {simResult ? (

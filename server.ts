@@ -5,12 +5,20 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
+import { fetchCelestrakGp, fetchCelestrakTrafficAssessment } from "./src/lib/celestrak.ts";
+import { fetchDonkiSpaceWeatherSummary } from "./src/lib/donki.ts";
+import { fetchEonetEvents } from "./src/lib/eonet.ts";
+import { computeDsnVisibility } from "./src/lib/groundStations.ts";
 import {
   buildHorizonsTrajectory,
   buildHorizonsUrl,
   fetchHorizonsLaunchWindowEvaluations,
   fetchHorizonsTransferEstimate,
 } from "./src/lib/horizons.ts";
+import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
+import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
+import { getLatestTelemetryFrame, getTelemetryHistory, ingestTelemetryFrame } from "./src/lib/telemetryHub.ts";
+import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webgeocalc.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,73 +100,216 @@ async function startServer() {
   app.get("/api/weather", async (req, res) => {
     const lat = req.query.lat || 28.5729;  // KSC Pad 39B
     const lon = req.query.lon || -80.6490;
-    const apiKey = process.env.OPENWEATHER_API_KEY;
-
-    if (!apiKey) {
-      return res.status(503).json({
-        error: "OPENWEATHER_API_KEY is not configured",
-        source: "UNAVAILABLE"
-      });
-    }
     try {
-      const r = await fetch(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric`);
-      if (!r.ok) {
-        return res.status(502).json({
-          error: `OpenWeatherMap HTTP ${r.status}`,
-          source: "UPSTREAM ERROR",
+      const weather = await fetchNoaaSurfaceWeather(Number(lat), Number(lon));
+      res.json(weather);
+    } catch (error: any) {
+      try {
+        const fallback = await fetchOpenMeteoWeather(Number(lat), Number(lon));
+        res.json({
+          ...fallback,
+          source: `${fallback.source} (NOAA fallback)`,
         });
+      } catch (fallbackError: any) {
+        res.status(502).json({ error: fallbackError?.message || error?.message || "Weather fetch failed", source: "UPSTREAM ERROR" });
       }
-      const d: any = await r.json();
-      const cod = d.cod;
-      if (cod !== undefined && Number(cod) !== 200) {
-        return res.status(502).json({
-          error: typeof d.message === "string" ? d.message : "Weather API error",
-          source: "UPSTREAM ERROR",
-        });
-      }
-      if (!d.main || typeof d.main.temp !== "number") {
-        return res.status(502).json({ error: "Invalid weather payload", source: "UPSTREAM ERROR" });
-      }
-      res.json({
-        temp: d.main.temp,
-        wind_speed: (d.wind?.speed ?? 0) * 3.6,
-        precipitation: d.rain?.['1h'] || 0,
-        pressure: d.main.pressure / 10,
-        humidity: d.main.humidity,
-        source: "LIVE · OpenWeatherMap"
-      });
-    } catch {
-      res.status(502).json({ error: "Weather fetch failed", source: "UPSTREAM ERROR" });
     }
   });
 
-  // ── Space Weather (NASA DONKI) ──────────────────────────────────────────────
-  app.get("/api/space-weather", async (req, res) => {
-    const apiKey = process.env.NASA_API_KEY;
-    if (!apiKey) {
-      return res.status(503).json({ error: "NASA_API_KEY is not configured", source: "UNAVAILABLE" });
-    }
+  app.get("/api/noaa/weather", async (req, res) => {
+    const lat = Number(req.query.lat || 28.5729);
+    const lon = Number(req.query.lon || -80.6490);
     try {
-      const now = new Date();
-      const start = new Date(now.getTime() - 7 * 86400000).toISOString().split('T')[0];
-      const r = await fetch(`https://api.nasa.gov/DONKI/CME?startDate=${start}&api_key=${apiKey}`);
-      if (!r.ok) {
-        return res.status(502).json({
-          error: `NASA DONKI HTTP ${r.status}`,
-          source: "UPSTREAM ERROR",
+      const weather = await fetchNoaaSurfaceWeather(lat, lon);
+      res.json(weather);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "NOAA weather fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.get("/api/openmeteo/weather", async (req, res) => {
+    const lat = Number(req.query.lat || 28.5729);
+    const lon = Number(req.query.lon || -80.6490);
+    try {
+      const weather = await fetchOpenMeteoWeather(lat, lon);
+      res.json(weather);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "Open-Meteo fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  // ── Space Weather (NOAA SWPC) ──────────────────────────────────────────────
+  app.get("/api/space-weather", async (req, res) => {
+    try {
+      const days = Number(req.query.days ?? 7);
+      const [noaaResult, donkiResult] = await Promise.allSettled([
+        fetchNoaaSpaceWeather(),
+        fetchDonkiSpaceWeatherSummary(days),
+      ]);
+
+      if (noaaResult.status !== 'fulfilled') {
+        throw noaaResult.reason;
+      }
+
+      const noaa = noaaResult.value;
+      if (donkiResult.status !== 'fulfilled') {
+        return res.json({
+          ...noaa,
+          source: `${noaa.source} (DONKI unavailable)`,
         });
       }
-      const cmes: unknown = await r.json();
-      if (!Array.isArray(cmes)) {
-        return res.status(502).json({
-          error: "Unexpected NASA DONKI response",
-          source: "UPSTREAM ERROR",
-        });
-      }
-      const radiationIndex = 1.0 + cmes.length * 0.15;
-      res.json({ radiationIndex, eventCount: cmes.length, source: "LIVE · NASA DONKI" });
-    } catch {
-      res.status(502).json({ error: "NASA API error", source: "UPSTREAM ERROR" });
+
+      const donki = donkiResult.value;
+      res.json({
+        ...noaa,
+        radiationIndex: Number((noaa.radiationIndex * donki.radiationBoost).toFixed(3)),
+        eventCount: noaa.eventCount + donki.eventCount,
+        donki,
+        source: `${noaa.source} + ${donki.source}`,
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "Space weather fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.get("/api/noaa/space-weather", async (_req, res) => {
+    try {
+      const spaceWeather = await fetchNoaaSpaceWeather();
+      res.json(spaceWeather);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "NOAA SWPC fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.get("/api/donki/space-weather", async (req, res) => {
+    try {
+      const donki = await fetchDonkiSpaceWeatherSummary(Number(req.query.days ?? 7));
+      res.json(donki);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "DONKI fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  // ── Telemetry Ingest ───────────────────────────────────────────────────────
+  app.post("/api/telemetry/ingest", (req, res) => {
+    try {
+      const frame = ingestTelemetryFrame(req.body);
+      res.status(201).json({ ok: true, frame });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || "Telemetry ingest failed" });
+    }
+  });
+
+  app.get("/api/telemetry/latest", (_req, res) => {
+    res.json({
+      frame: getLatestTelemetryFrame(),
+      source: 'LIVE · External Telemetry Ingest',
+    });
+  });
+
+  app.get("/api/telemetry/history", (req, res) => {
+    res.json({
+      frames: getTelemetryHistory(Number(req.query.limit ?? 50)),
+      source: 'LIVE · External Telemetry Ingest',
+    });
+  });
+
+  // ── CelesTrak ───────────────────────────────────────────────────────────────
+  app.get("/api/celestrak/gp", async (req, res) => {
+    try {
+      const records = await fetchCelestrakGp({
+        group: req.query.group ? String(req.query.group) : undefined,
+        name: req.query.name ? String(req.query.name) : undefined,
+        catnr: req.query.catnr ? String(req.query.catnr) : undefined,
+        format: 'JSON',
+      });
+      res.json({
+        records,
+        source: 'LIVE · CelesTrak GP',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "CelesTrak fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.get("/api/celestrak/conjunctions", async (req, res) => {
+    try {
+      const assessment = await fetchCelestrakTrafficAssessment({
+        group: req.query.group ? String(req.query.group) : 'STATIONS',
+        name: req.query.name ? String(req.query.name) : undefined,
+        catnr: req.query.catnr ? String(req.query.catnr) : undefined,
+        limit: Number(req.query.limit ?? 12),
+        horizonSeconds: Number(req.query.horizonSeconds ?? 86400),
+        dtSeconds: Number(req.query.dtSeconds ?? 120),
+      });
+      res.json(assessment);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "CelesTrak conjunction screening failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  // ── EONET ───────────────────────────────────────────────────────────────────
+  app.get("/api/eonet/events", async (req, res) => {
+    try {
+      const events = await fetchEonetEvents({
+        status: (req.query.status ? String(req.query.status) : 'open') as 'open' | 'closed' | 'all',
+        limit: Number(req.query.limit ?? 6),
+        days: Number(req.query.days ?? 14),
+        category: req.query.category ? String(req.query.category) : undefined,
+        source: req.query.source ? String(req.query.source) : undefined,
+        bbox: req.query.bbox ? String(req.query.bbox) : undefined,
+      });
+      res.json(events);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "EONET fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  // ── WebGeocalc ──────────────────────────────────────────────────────────────
+  app.get("/api/webgeocalc/metadata", async (_req, res) => {
+    try {
+      const metadata = await fetchWebGeoCalcMetadata();
+      res.json({
+        ...metadata,
+        source: 'LIVE · NAIF WebGeocalc',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "WebGeocalc metadata fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.post("/api/webgeocalc/query", async (req, res) => {
+    try {
+      const result = await submitWebGeoCalcRequest(
+        String(req.body.path || ''),
+        req.body.payload,
+        (req.body.method === 'GET' ? 'GET' : 'POST'),
+      );
+      res.json({
+        result,
+        source: 'LIVE · NAIF WebGeocalc',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "WebGeocalc query failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  // ── Ground Station / DSN Visibility ────────────────────────────────────────
+  app.get("/api/dsn/visibility", async (req, res) => {
+    const targetId = String(req.query.targetId || 'moon');
+    const startTime = String(req.query.startTime || new Date().toISOString().slice(0, 10));
+    const stopTime = String(req.query.stopTime || new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10));
+    try {
+      const summary = await computeDsnVisibility({
+        targetId,
+        startTime,
+        stopTime,
+        stepSize: req.query.stepSize ? String(req.query.stepSize) : '1 h',
+        minElevationDeg: Number(req.query.minElevationDeg ?? 10),
+      });
+      res.json(summary);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "DSN visibility computation failed", source: "UPSTREAM ERROR" });
     }
   });
 

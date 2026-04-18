@@ -115,7 +115,7 @@ function AeroVehicleScene({
       </group>
 
       {mach >= 0.98 ? (
-        <mesh position={[18, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
+        <mesh position={[-18, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
           <coneGeometry args={[14, 28, 20, 1, true]} />
           <meshBasicMaterial color="#60a5fa" transparent opacity={0.06} side={THREE.DoubleSide} depthWrite={false} />
         </mesh>
