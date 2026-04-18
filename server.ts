@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
 import { fetchCelestrakGp, fetchCelestrakTrafficAssessment } from "./src/lib/celestrak.ts";
+import { analyzeCrewedCislunarMissionOps } from "./src/lib/cislunarOps.ts";
 import { fetchDonkiSpaceWeatherSummary } from "./src/lib/donki.ts";
 import { fetchEonetEvents } from "./src/lib/eonet.ts";
 import { assessTrajectoryGravityInfluence } from "./src/lib/gravityInfluence.ts";
@@ -355,6 +356,59 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Radiation intersection assessment failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.post("/api/ops/cislunar", async (req, res) => {
+    try {
+      const trajectory = Array.isArray(req.body?.trajectory) ? req.body.trajectory : [];
+      const launchDate = String(req.body?.launchDate || '');
+      const targetId = String(req.body?.targetId || 'moon');
+      const lat = Number(req.body?.lat ?? 28.5729);
+      const lon = Number(req.body?.lon ?? -80.649);
+      const crewCount = Number(req.body?.crewCount ?? 4);
+      const shieldingFactor = Number(req.body?.shieldingFactor ?? 0.72);
+      const powerGenerationKw = Number(req.body?.powerGenerationKw ?? 6.2);
+      const hotelLoadKw = Number(req.body?.hotelLoadKw ?? 4.8);
+
+      if (!trajectory.length || !launchDate) {
+        return res.status(400).json({ error: 'trajectory and launchDate are required' });
+      }
+
+      const startTime = launchDate;
+      const stopTime = new Date(new Date(`${launchDate}T00:00:00Z`).getTime() + 3 * 86400000).toISOString().slice(0, 10);
+      const [weather, spaceWeather, snapshot, dsnVisibility] = await Promise.all([
+        fetchNoaaSurfaceWeather(lat, lon).catch(() => null),
+        fetchNoaaSpaceWeather(),
+        getLatestRadiationSnapshot() ?? ingestLiveRadiationSnapshot(7),
+        computeDsnVisibility({
+          targetId,
+          startTime,
+          stopTime,
+          stepSize: '2 h',
+          minElevationDeg: 10,
+        }).catch(() => null),
+      ]);
+
+      const analysis = analyzeCrewedCislunarMissionOps({
+        trajectory,
+        launchDate,
+        radiationEnvironment: snapshot.environment,
+        spaceWeather,
+        weather,
+        dsnVisibility,
+        shieldingFactor,
+        crewCount,
+        powerGenerationKw,
+        hotelLoadKw,
+      });
+
+      res.json({
+        analysis,
+        source: analysis.provenance.join(' + '),
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Cislunar ops analysis failed', source: 'UPSTREAM ERROR' });
     }
   });
 

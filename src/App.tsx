@@ -191,6 +191,45 @@ interface RadiationIntersectionFeed {
   source: string;
 }
 
+interface CislunarOpsFeed {
+  analysis: {
+    lane: 'CREWED_CISLUNAR_MISSION_OPS';
+    dose: {
+      cumulativeDoseMsv: number;
+      peakDoseRateMsvHr: number;
+      beltDoseMsv: number;
+      deepSpaceDoseMsv: number;
+      safeHavenRequired: boolean;
+      safeHavenWindows: Array<{ startHour: number; endHour: number; reason: string }>;
+    };
+    lighting: {
+      eclipseFraction: number;
+      longestEclipseHours: number;
+      betaAngleDeg: number;
+      eclipseIntervals: Array<{ startHour: number; endHour: number; body: 'EARTH' | 'MOON' }>;
+    };
+    consumables: {
+      missionDurationHours: number;
+      oxygenUsedKg: number;
+      waterUsedKg: number;
+      foodUsedKg: number;
+      powerGeneratedKWh: number;
+      powerConsumedKWh: number;
+      batteryDrawKWh: number;
+      commCoverageFraction: number;
+      lifeSupportMarginHours: number;
+      propellantReservePolicyPct: number;
+    };
+    goNoGo: {
+      overall: 'GO' | 'CONDITIONAL' | 'NO_GO';
+      rationale: string;
+      rules: Array<{ rule: string; status: 'GO' | 'WATCH' | 'NO_GO'; value: number | string; threshold: string; rationale: string }>;
+    };
+    provenance: string[];
+  };
+  source: string;
+}
+
 interface GravityInfluenceFeed {
   assessments: Array<{
     bodyId: string;
@@ -580,6 +619,10 @@ const FLIGHT_SEQUENCE_TEMPLATE = [
   { label: 'Entry', phase: 'Recovery phase', progress: 0.9, driver: 'Aerothermal entry corridor and deceleration constraints dominate the physics.' },
   { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal descent uses residual reserves and recovery geometry to complete the mission.' },
 ] as const;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
 function stageColor(label: string): string {
   const lower = label.toLowerCase();
@@ -1494,6 +1537,7 @@ export default function App() {
   const [systemEphemeris, setSystemEphemeris] = useState<SystemEphemerisFeed | null>(null);
   const [nearEarthRadiation, setNearEarthRadiation] = useState<NearEarthRadiationFeed | null>(null);
   const [radiationIntersection, setRadiationIntersection] = useState<RadiationIntersectionFeed | null>(null);
+  const [cislunarOps, setCislunarOps] = useState<CislunarOpsFeed | null>(null);
   const [gravityInfluence, setGravityInfluence] = useState<GravityInfluenceFeed | null>(null);
   const [eonetEvents, setEonetEvents] = useState<ExternalEventFeed | null>(null);
   const [celestrakTraffic, setCelestrakTraffic] = useState<ExternalConjunctionFeed | null>(null);
@@ -1818,6 +1862,9 @@ export default function App() {
       localGravity,
       weatherData,
       nasaWeather,
+      nearEarthRadiation,
+      radiationIntersection,
+      cislunarOps,
       optimization: optResult,
       importedMissionConfig,
       importedGraph,
@@ -2005,6 +2052,44 @@ export default function App() {
     };
     analyzeRadiationIntersection();
   }, [launchBodyId, missionTrajectory, missionKmPerUnit, nearEarthRadiation]);
+
+  useEffect(() => {
+    const analyzeCislunarOps = async () => {
+      if (!missionTrajectory.length || launchBodyId !== 'earth' || targetPlanet !== 'moon') {
+        setCislunarOps(null);
+        return;
+      }
+      try {
+        const response = await fetch('/api/ops/cislunar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trajectory: missionTrajectory.map((point) => ({
+              time_s: point.time_s,
+              pos: [
+                point.pos[0] * missionKmPerUnit,
+                point.pos[1] * missionKmPerUnit,
+                point.pos[2] * missionKmPerUnit,
+              ],
+            })),
+            launchDate,
+            targetId: targetPlanet,
+            lat: launchLatitude,
+            lon: launchLongitude,
+            crewCount: 4,
+            shieldingFactor: clamp(0.58 + shieldingMassKg / 1000, 0.58, 0.86),
+            powerGenerationKw: 6.2,
+            hotelLoadKw: 4.8,
+          }),
+        });
+        const data = await response.json();
+        setCislunarOps(data);
+      } catch {
+        setCislunarOps(null);
+      }
+    };
+    analyzeCislunarOps();
+  }, [missionTrajectory, missionKmPerUnit, launchDate, launchBodyId, targetPlanet, launchLatitude, launchLongitude, shieldingMassKg]);
   const missionStages = useMemo(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
     return derived.length
@@ -2792,6 +2877,38 @@ export default function App() {
                         <p className="text-sm text-slate-400">No planetary influence assessment is available for the current trajectory.</p>
                       )}
                     </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Crewed Cislunar Ops" icon={ShieldAlert} provenance={cislunarOps?.source?.includes('LIVE') ? 'live-api' : 'formula'}>
+                    {cislunarOps?.analysis ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Go / No-Go" value={cislunarOps.analysis.goNoGo.overall} unit="ops rule" tone={cislunarOps.analysis.goNoGo.overall === 'GO' ? 'good' : cislunarOps.analysis.goNoGo.overall === 'CONDITIONAL' ? 'warn' : 'bad'} />
+                          <MetricBadge label="Dose" value={cislunarOps.analysis.dose.cumulativeDoseMsv.toFixed(1)} unit="mSv" tone={cislunarOps.analysis.dose.cumulativeDoseMsv < 25 ? 'good' : 'warn'} />
+                          <MetricBadge label="Peak Dose Rate" value={cislunarOps.analysis.dose.peakDoseRateMsvHr.toFixed(2)} unit="mSv/h" tone={cislunarOps.analysis.dose.peakDoseRateMsvHr < 0.25 ? 'good' : 'warn'} />
+                          <MetricBadge label="Beta Angle" value={cislunarOps.analysis.lighting.betaAngleDeg.toFixed(1)} unit="deg" />
+                          <MetricBadge label="Longest Eclipse" value={cislunarOps.analysis.lighting.longestEclipseHours.toFixed(2)} unit="h" tone={cislunarOps.analysis.lighting.longestEclipseHours < 3.5 ? 'good' : 'warn'} />
+                          <MetricBadge label="Comm Coverage" value={(cislunarOps.analysis.consumables.commCoverageFraction * 100).toFixed(0)} unit="%" tone={cislunarOps.analysis.consumables.commCoverageFraction > 0.6 ? 'good' : 'warn'} />
+                          <MetricBadge label="Life Support" value={cislunarOps.analysis.consumables.lifeSupportMarginHours.toFixed(0)} unit="h margin" tone={cislunarOps.analysis.consumables.lifeSupportMarginHours > 168 ? 'good' : 'warn'} />
+                          <MetricBadge label="Reserve Policy" value={cislunarOps.analysis.consumables.propellantReservePolicyPct.toFixed(1)} unit="% prop reserve" />
+                        </div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          <p>{cislunarOps.analysis.goNoGo.rationale}</p>
+                          {cislunarOps.analysis.dose.safeHavenRequired ? (
+                            <p className="mt-1 text-amber-200">Safe-haven posture required during at least one elevated-dose segment.</p>
+                          ) : null}
+                          <div className="mt-2 space-y-1">
+                            {cislunarOps.analysis.goNoGo.rules.slice(0, 4).map((rule) => (
+                              <p key={rule.rule}>
+                                {rule.rule}: <span className={rule.status === 'GO' ? 'text-emerald-300' : rule.status === 'WATCH' ? 'text-amber-300' : 'text-rose-300'}>{rule.status}</span> ({String(rule.value)}; {rule.threshold})
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Crewed cislunar mission-ops analysis becomes available for Earth-to-Moon trajectories.</p>
+                    )}
                   </DashboardCard>
 
                   <DashboardCard title="Provenance Audit" icon={ShieldAlert}>
