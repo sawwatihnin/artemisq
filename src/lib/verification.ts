@@ -115,7 +115,7 @@ export function verifyExplainability(
   const failedChecks: string[] = [];
   const baseline = computeCrewRadiationReadiness(samples, params);
   const validation = validateCrewRadiationReadiness(samples, baseline, params);
-  if (!validation.thresholdTrace.includes('Do not embark') && baseline.classification === 'DO_NOT_EMBARK') {
+  if (!validation.thresholdTrace.includes('Do not embark') && baseline.embarkationDecision === 'DO_NOT_EMBARK') {
     failedChecks.push('Explainability verification: threshold trace does not match final classification.');
   }
   if (!['peak acute exposure', 'unsafe duration', 'cumulative dose'].includes(validation.dominantRiskDriver)) {

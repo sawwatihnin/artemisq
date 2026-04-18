@@ -1427,7 +1427,7 @@ export default function App() {
                 </div>
 
                 <div className="grid gap-4 lg:grid-cols-[1.3fr_0.7fr]">
-                  <DashboardCard title="Decision Intelligence Board" icon={Gauge} provenance="formula">
+                  <DashboardCard title="Replan Comparison Board" icon={Gauge} provenance="formula">
                     <div className="space-y-3">
                       {optResult.replanOptions?.slice(0, 6).map((option) => {
                         const cost = optResult.decisionCosts?.find((item) => item.optionName === option.name);
@@ -1449,7 +1449,13 @@ export default function App() {
                               <MetricBadge label="Delta-v" value={`${option.deltaVChange >= 0 ? '+' : ''}${option.deltaVChange.toFixed(0)}`} unit="m/s" />
                               <MetricBadge label="Risk Cost" value={formatMoney(cost?.riskAdjustedCost ?? 0)} unit="expected" tone="warn" />
                             </div>
-                            <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
+                            <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-5">
+                              <MetricBadge
+                                label="Embarkation"
+                                value={option.newTotalMissionRisk > 1 ? 'DO NOT EMBARK' : option.newTotalMissionRisk > 0.6 ? 'PROCEED WITH CAUTION' : 'SAFE TO EMBARK'}
+                                unit="crew posture"
+                                tone={option.newTotalMissionRisk > 1 ? 'bad' : option.newTotalMissionRisk > 0.6 ? 'warn' : 'good'}
+                              />
                               <MetricBadge label="Direct Cost" value={formatMoney(cost?.directCost ?? 0)} unit="direct" />
                               <MetricBadge label="Indirect Cost" value={formatMoney(cost?.indirectCost ?? 0)} unit="indirect" />
                               <MetricBadge label="Value Score" value={(cost?.recommendationValueScore ?? 0).toExponential(2)} unit="risk / $" tone="good" />
