@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  /* Backgrounds */
+  --color-bg-dark: #050810;
+  --color-bg-card: #0d1224;
+
+  /* Borders — kept for any residual references */
+  --color-border-main: rgba(255,255,255,0.10);
+
+  /* Text — boosted for readability */
+  --color-text-main: #e2e8f0;
+  --color-text-dim:  #94a3b8;   /* was #4a5568 — much more readable */
+
+  /* Primary accent: Carolina Blue (replaces turquoise) */
+  --color-accent-blue:   #4B9CD3;
+  --color-accent-amber:  #f59e0b;
+  --color-accent-red:    #f87171;
+  --color-accent-purple: #a78bfa;
+  --color-accent-green:  #4ade80;
+
+  --font-mono: "Space Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: "Space Mono", monospace;
+  background: #050810;
+  color: #e2e8f0;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+::-webkit-scrollbar-thumb { background: rgba(75,156,211,0.25); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(75,156,211,0.45); }
+
+/* Range sliders — global accent colour */
+input[type="range"] { accent-color: #4B9CD3; }
+
+/* Date/number inputs */
+input[type="date"],
+input[type="number"],
+input[type="text"] {
+  color-scheme: dark;
+}

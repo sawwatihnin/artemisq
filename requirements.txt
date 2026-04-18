@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+dimod
+dwave-samplers
+trimesh
+numpy
+scipy
+pydantic
+python-multipart

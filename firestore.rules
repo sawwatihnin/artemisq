@@ -1,0 +1,56 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Auth Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation for MissionConfig
+    function isValidMissionConfig(data) {
+      return data.keys().hasAll(['userId', 'targetPlanet', 'missionType', 'fuelType', 'launchDate', 'updatedAt']) &&
+             data.keys().size() <= 10 &&
+             data.userId == request.auth.uid &&
+             data.targetPlanet is string && data.targetPlanet.size() <= 20 &&
+             data.missionType is string && data.missionType.size() <= 20 &&
+             data.fuelType is string && data.fuelType.size() <= 20 &&
+             data.launchDate is string && data.launchDate.size() <= 20 &&
+             data.updatedAt == request.time;
+    }
+
+    match /configs/{configId} {
+      allow get: if isSignedIn() && isOwner(existing().userId);
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      
+      allow create: if isSignedIn() && isValidId(configId) && isValidMissionConfig(incoming());
+      
+      allow update: if isSignedIn() && isOwner(existing().userId) && 
+                      isValidMissionConfig(incoming()) &&
+                      incoming().userId == existing().userId &&
+                      incoming().diff(existing()).affectedKeys().hasAny(['targetPlanet', 'missionType', 'fuelType', 'launchDate', 'updatedAt', 'name', 'windSpeed']);
+      
+      allow delete: if isSignedIn() && isOwner(existing().userId);
+    }
+  }
+}

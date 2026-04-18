@@ -1,0 +1,26 @@
+{
+  "entities": {
+    "MissionConfig": {
+      "title": "Mission Configuration",
+      "description": "Saved rocket mission parameters and optimization settings.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Unique identifier of the user who created this config." },
+        "name": { "type": "string", "description": "Friendly name for the configuration." },
+        "targetPlanet": { "type": "string", "description": "Destination planet ID." },
+        "missionType": { "type": "string", "description": "Category of the mission (lunar, orbital, rover)." },
+        "fuelType": { "type": "string", "description": "Propellant type." },
+        "launchDate": { "type": "string", "format": "date", "description": "Planned window start." },
+        "windSpeed": { "type": "number", "description": "Surface wind speed in m/s." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp." }
+      },
+      "required": ["userId", "targetPlanet", "missionType", "fuelType", "launchDate", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/configs/{configId}": {
+      "schema": "MissionConfig",
+      "description": "Collection of saved mission configurations."
+    }
+  }
+}

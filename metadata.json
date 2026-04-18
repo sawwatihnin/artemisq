@@ -1,0 +1,6 @@
+{
+  "name": "ARTEMIS-Q",
+  "description": "Quantum-inspired mission optimization platform for spacecraft trajectories and lunar missions, featuring a launch stability simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
