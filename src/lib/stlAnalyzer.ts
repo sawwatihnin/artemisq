@@ -17,6 +17,12 @@ export interface STLAnalysis {
   panelLoads: Array<{ station: number; area: number; loadCoefficient: number; pressurePa: number; stressPa: number }>;
 }
 
+export interface STLAnalyzeWithMesh {
+  analysis: STLAnalysis;
+  /** Cloned geometry for Three.js visualization (caller owns lifecycle / dispose). */
+  geometry: THREE.BufferGeometry;
+}
+
 export class STLAnalyzer {
   private loader: STLLoader;
 
@@ -24,13 +30,24 @@ export class STLAnalyzer {
     this.loader = new STLLoader();
   }
 
-  public async analyze(file: File): Promise<STLAnalysis> {
+  /**
+   * Parse STL once; return analysis plus a **clone** of the mesh for R3F (safe to dispose independently).
+   */
+  public async parseWithGeometry(file: File): Promise<STLAnalyzeWithMesh> {
     const arrayBuffer = await file.arrayBuffer();
     const geometry = this.loader.parse(arrayBuffer);
-    
     geometry.computeBoundingBox();
     geometry.computeVertexNormals();
-    
+    const analysis = this.buildAnalysis(geometry);
+    return { analysis, geometry: geometry.clone() };
+  }
+
+  public async analyze(file: File): Promise<STLAnalysis> {
+    const { analysis } = await this.parseWithGeometry(file);
+    return analysis;
+  }
+
+  private buildAnalysis(geometry: THREE.BufferGeometry): STLAnalysis {
     const box = geometry.boundingBox!;
     const size = new THREE.Vector3();
     box.getSize(size);
@@ -49,9 +66,8 @@ export class STLAnalyzer {
     const volume = this.calculateVolume(geometry);
     const surfaceArea = this.calculateSurfaceArea(geometry);
 
-    // Estimates
-    const densityAluminum = 2700; // kg/m^3
-    const materialStrength = 310e6; // 6061-T6 Aluminum yield strength (approx 310 MPa)
+    const densityAluminum = 2700;
+    const materialStrength = 310e6;
     const estimatedMass = volume * densityAluminum * 0.15;
 
     const finenessRatio = height / Math.max(width, depth);
@@ -60,7 +76,6 @@ export class STLAnalyzer {
     if (finenessRatio > 10) dragCoeff = 0.25;
     if (finenessRatio < 2) dragCoeff = 0.8;
 
-    // Calculate stress concentrations based on local curvature/normals
     const panelLoads = this.calculatePanelLoads(geometry, principalAxis, box);
     const stressConcentrations = this.calculateStressConcentrations(geometry, panelLoads, principalAxis, box);
     const centerOfPressure = this.calculateCenterOfPressure(geometry, principalAxis);

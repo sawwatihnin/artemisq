@@ -1,5 +1,5 @@
 import type { ChangeEvent, ReactNode } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -46,6 +46,7 @@ import {
   VIS_SCENE_KM_PER_UNIT,
 } from './lib/orbital';
 import { moonGeocentricPositionKm, normalize3, slerpUnitVectors } from './lib/lunarEphemeris';
+import { AeroDynamicsVisualizer } from './components/AeroDynamicsVisualizer';
 import { AscentDynamicsVisualizer } from './components/AscentDynamicsVisualizer';
 import type { GeometryStabilityHints } from './lib/ascentDynamics';
 import { explainAscentDynamics } from './lib/explain';
@@ -320,11 +321,15 @@ interface LaunchOptimizationResponse {
 }
 
 interface StageDisplay {
+  sequence: number;
   label: string;
   progress: number;
   color: string;
   phase: string;
   timeS?: number;
+  distanceKm?: number;
+  fuelRemainingPct?: number;
+  driver?: string;
 }
 
 const PROPELLANTS: Record<FuelType, PropellantType> = {
@@ -409,29 +414,16 @@ const MISSION_SCENARIOS = [
   { id: 'venus-orbit', name: 'Venus Orbital Insertion', target: 'venus', mode: 'orbital', fuel: 'RP-1', date: '2026-10-10', mass: 18000, thrust: 95000 },
 ];
 
-const DEFAULT_MISSION_STAGES = [
-  { label: 'Launch', progress: 0.02, color: '#84cc16' },
-  { label: 'Stage Sep', progress: 0.12, color: '#eab308' },
-  { label: 'Parking Orbit', progress: 0.22, color: '#84cc16' },
-  { label: 'Transfer Burn', progress: 0.34, color: '#38bdf8' },
-  { label: 'Encounter', progress: 0.58, color: '#f59e0b' },
-  { label: 'Return Burn', progress: 0.73, color: '#38bdf8' },
-  { label: 'Entry', progress: 0.9, color: '#ef4444' },
-  { label: 'Landing', progress: 0.98, color: '#84cc16' },
-];
-
-/** Wider progress spacing along the cislunar polyline so flight phases are not clustered near Earth. */
-const CISLUNAR_MISSION_STAGES = [
-  { label: 'Launch', progress: 0.015, color: '#84cc16' },
-  { label: 'Stage Sep', progress: 0.055, color: '#eab308' },
-  { label: 'Parking Orbit', progress: 0.1, color: '#84cc16' },
-  { label: 'Transfer Burn', progress: 0.18, color: '#38bdf8' },
-  { label: 'Translunar', progress: 0.36, color: '#a78bfa' },
-  { label: 'Encounter', progress: 0.52, color: '#f59e0b' },
-  { label: 'Return Burn', progress: 0.7, color: '#38bdf8' },
-  { label: 'Entry', progress: 0.86, color: '#ef4444' },
-  { label: 'Landing', progress: 0.97, color: '#84cc16' },
-];
+const FLIGHT_SEQUENCE_TEMPLATE = [
+  { label: 'Parking Orbit', phase: 'Launch and ascent', progress: 0.08, driver: 'Ascent energy is converted into a stable parking orbit before translunar commitment.' },
+  { label: 'Transfer Burn', phase: 'Launch and ascent', progress: 0.16, driver: 'Primary outbound delta-v impulse commits the vehicle to the transfer trajectory.' },
+  { label: 'Translunar coast', phase: 'Launch and ascent', progress: 0.36, driver: 'Ballistic coast is dominated by transfer geometry, distance growth, and low-propulsive trim.' },
+  { label: 'Approach', phase: 'Outbound phase', progress: 0.48, driver: 'Relative range to the destination collapses and guidance starts shaping encounter conditions.' },
+  { label: 'Encounter', phase: 'Outbound phase', progress: 0.58, driver: 'Closest-body operations are driven by capture, flyby, or proximity-operations physics.' },
+  { label: 'Return coast', phase: 'Return phase', progress: 0.74, driver: 'Earth-return leg is largely ballistic with reserve burns protecting corridor accuracy.' },
+  { label: 'Entry', phase: 'Recovery phase', progress: 0.9, driver: 'Aerothermal entry corridor and deceleration constraints dominate the physics.' },
+  { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal descent uses residual reserves and recovery geometry to complete the mission.' },
+] as const;
 
 function stageColor(label: string): string {
   const lower = label.toLowerCase();
@@ -450,20 +442,30 @@ function stagePhase(progress: number): string {
   return 'Recovery phase';
 }
 
+function stageDriver(label: string): string {
+  return FLIGHT_SEQUENCE_TEMPLATE.find((stage) => stage.label === label)?.driver ?? 'Mission phase derived from trajectory geometry and operational constraints.';
+}
+
 function normalizeStageLabel(label: string): string {
   switch (label) {
     case 'LEO / Departure':
       return 'Parking Orbit';
     case 'TLI':
       return 'Transfer Burn';
+    case 'Translunar':
+      return 'Translunar coast';
+    case 'Outbound Cruise':
+      return 'Translunar coast';
     case 'NRHO / Gateway':
       return 'Encounter';
+    case 'Return Burn':
+      return 'Return coast';
     case 'Earth return':
+      return 'Entry';
+    case 'Entry Interface':
       return 'Entry';
     case 'Lunar approach':
       return 'Approach';
-    case 'Launch / Takeoff':
-      return 'Launch';
     case 'Landing / Splashdown':
       return 'Landing';
     default:
@@ -471,22 +473,65 @@ function normalizeStageLabel(label: string): string {
   }
 }
 
-function deriveTrajectoryStages(trajectory: Array<{ label?: string; time_s?: number }>): StageDisplay[] {
-  const labeled = trajectory.filter((point): point is { label: string; time_s?: number } => Boolean(point.label));
-  if (labeled.length < 2) {
-    return [];
+function distanceBetweenPointsKm(a: [number, number, number], b: [number, number, number], kmPerUnit: number): number {
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  const dz = a[2] - b[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz) * kmPerUnit;
+}
+
+function estimateFuelRemainingPct(label: string, progress: number, distanceShare: number): number {
+  const baselineByStage: Record<string, number> = {
+    'Parking Orbit': 92,
+    'Transfer Burn': 74,
+    'Translunar coast': 66,
+    'Approach': 57,
+    'Encounter': 49,
+    'Return coast': 34,
+    'Entry': 12,
+    'Landing': 5,
+  };
+  const base = baselineByStage[label] ?? Math.round((1 - progress) * 100);
+  const distancePenalty = distanceShare * 8;
+  return Math.max(3, Math.min(98, Math.round(base - distancePenalty)));
+}
+
+function deriveTrajectoryStages(
+  trajectory: Array<{ label?: string; time_s?: number; pos: [number, number, number] }>,
+  options: { kmPerUnit: number },
+): StageDisplay[] {
+  if (trajectory.length < 2) return [];
+
+  const totalTime = Math.max(1, trajectory[trajectory.length - 1]?.time_s ?? 1);
+  const cumulativeDistanceKm: number[] = [0];
+  for (let i = 1; i < trajectory.length; i++) {
+    cumulativeDistanceKm.push(cumulativeDistanceKm[i - 1] + distanceBetweenPointsKm(trajectory[i - 1].pos, trajectory[i].pos, options.kmPerUnit));
   }
-  const totalTime = Math.max(1, labeled.at(-1)?.time_s ?? trajectory.at(-1)?.time_s ?? 1);
-  return labeled.map((point, index) => {
-    const normalized = normalizeStageLabel(point.label);
-    const rawProgress = Math.max(0, Math.min(1, (point.time_s ?? 0) / totalTime));
-    const progress = index === 0 ? Math.max(0.015, rawProgress) : index === labeled.length - 1 ? Math.min(0.985, Math.max(rawProgress, 0.96)) : rawProgress;
+  const totalDistanceKm = Math.max(cumulativeDistanceKm[cumulativeDistanceKm.length - 1], 1);
+
+  const labelIndex = new Map<string, number>();
+  for (let i = 0; i < trajectory.length; i++) {
+    const label = trajectory[i].label ? normalizeStageLabel(trajectory[i].label) : null;
+    if (label && !labelIndex.has(label)) labelIndex.set(label, i);
+  }
+
+  return FLIGHT_SEQUENCE_TEMPLATE.map((template, index) => {
+    const fallbackIdx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(template.progress * (trajectory.length - 1))));
+    const idx = labelIndex.get(template.label) ?? fallbackIdx;
+    const timeS = trajectory[idx]?.time_s ?? template.progress * totalTime;
+    const progress = Math.max(0.015, Math.min(0.985, timeS / totalTime));
+    const distanceKm = cumulativeDistanceKm[idx] ?? totalDistanceKm * progress;
+    const distanceShare = distanceKm / totalDistanceKm;
     return {
-      label: normalized,
+      sequence: index + 1,
+      label: template.label,
       progress,
-      color: stageColor(normalized),
-      phase: stagePhase(progress),
-      timeS: point.time_s ?? 0,
+      color: stageColor(template.label),
+      phase: template.phase,
+      timeS,
+      distanceKm,
+      fuelRemainingPct: estimateFuelRemainingPct(template.label, progress, distanceShare),
+      driver: stageDriver(template.label),
     };
   });
 }
@@ -503,9 +548,17 @@ function deriveAscentTimelineStages(
   transferTimeDays?: number,
 ): StageDisplay[] {
   if (!simResult) {
-    return DEFAULT_MISSION_STAGES.map((stage) => ({
+    return [
+      { label: 'Launch', progress: 0.015, color: stageColor('Launch'), phase: 'Launch and ascent', driver: 'Initial ascent from the launch site.' },
+      { label: 'Stage Sep', progress: 0.12, color: stageColor('Stage Sep'), phase: 'Launch and ascent', driver: 'Stage separation reshapes thrust-to-mass and drag conditions.' },
+      { label: 'Parking Orbit', progress: 0.26, color: stageColor('Parking Orbit'), phase: 'Launch and ascent', driver: stageDriver('Parking Orbit') },
+      { label: 'Transfer Burn', progress: 0.42, color: stageColor('Transfer Burn'), phase: 'Launch and ascent', driver: stageDriver('Transfer Burn') },
+      { label: 'Encounter', progress: 0.7, color: stageColor('Encounter'), phase: 'Outbound phase', driver: stageDriver('Encounter') },
+      { label: 'Entry', progress: 0.9, color: stageColor('Entry'), phase: 'Recovery phase', driver: stageDriver('Entry') },
+      { label: 'Landing', progress: 0.985, color: stageColor('Landing'), phase: 'Recovery phase', driver: stageDriver('Landing') },
+    ].map((stage, index) => ({
+      sequence: index + 1,
       ...stage,
-      phase: stagePhase(stage.progress),
     }));
   }
 
@@ -530,11 +583,13 @@ function deriveAscentTimelineStages(
   ];
 
   return events.map((event, index) => ({
+    sequence: index + 1,
     label: event.label,
     progress: index === 0 ? 0.015 : index === events.length - 1 ? 0.985 : Math.max(0.02, Math.min(0.97, event.timeS / totalTime)),
     color: stageColor(event.label),
     phase: stagePhase(event.timeS / totalTime),
     timeS: event.timeS,
+    driver: stageDriver(event.label),
   }));
 }
 
@@ -879,6 +934,7 @@ function MissionGlobe({
   preset,
   pathNodeIds,
   keplerEl,
+  stageList,
 }: {
   launchDate: string;
   targetPlanetId: string;
@@ -886,6 +942,7 @@ function MissionGlobe({
   preset: (typeof MISSION_PRESETS)[MissionType];
   pathNodeIds: string[];
   keplerEl: KeplerianElements;
+  stageList: StageDisplay[];
 }) {
   const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
   const trajectory = useMemo(
@@ -961,7 +1018,6 @@ function MissionGlobe({
 
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
   const targetBody = CELESTIAL_BODY_MAP[targetPlanetId] ?? CELESTIAL_BODY_MAP.moon;
-  const stageList = deriveTrajectoryStages(trajectory);
   const stageMarkers = stageList.map((stage) => {
     let idx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
     if (stage.timeS != null) {
@@ -1048,12 +1104,15 @@ function MissionGlobe({
         const ty = isCislunar ? 5.2 : 5.5;
         const tf = isCislunar ? 2.2 : 2.4;
         return (
-          <group key={stage.label} position={stage.point as [number, number, number]}>
+          <group key={`${stage.sequence}-${stage.label}`} position={stage.point as [number, number, number]}>
             <mesh>
               <sphereGeometry args={[sr, 16, 16]} />
               <meshBasicMaterial color={stage.color} />
             </mesh>
-            <Text position={[0, ty, 0]} fontSize={tf} color={stage.color} anchorX="center">
+            <Text position={[0, ty + 1.8, 0]} fontSize={tf * 0.92} color="#f8fafc" anchorX="center">
+              {stage.sequence}
+            </Text>
+            <Text position={[0, ty - 0.6, 0]} fontSize={tf} color={stage.color} anchorX="center">
               {stage.label}
             </Text>
           </group>
@@ -1078,7 +1137,7 @@ function SourceStatus({
   const rows = [
     { label: 'Surface weather', source: weatherData?.source ?? 'Unavailable', kind: weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Space weather', source: nasaWeather?.source ?? 'Unavailable', kind: nasaWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
-    { label: 'Ascent dynamics', source: simResult ? 'Formula-driven 2D ascent solver' : 'Not run', kind: simResult ? 'formula' : 'preset' },
+    { label: 'Ascent dynamics', source: simResult ? 'In-browser 2D ascent solver' : 'Not run', kind: simResult ? 'formula' : 'preset' },
     { label: 'Vehicle geometry', source: stlAnalysis ? 'User STL-derived geometry' : 'No uploaded vehicle', kind: stlAnalysis ? 'formula' : 'preset' },
     { label: 'Mission graph', source: 'Scenario graph still uses preset nodes and edges', kind: 'preset' },
     { label: 'Conjunction panel', source: 'Shell-spacing heuristic only', kind: 'heuristic' },
@@ -1209,10 +1268,21 @@ export default function App() {
   const [logLines, setLogLines] = useState<string[]>([
     '> ARTEMIS-Q analysis console ready',
     '> Live sources are labeled explicitly',
-    '> Upload a vehicle STL to run ascent optimization',
+    '> Ascent optimization runs in-browser from the Vehicle tab (STL optional)',
   ]);
   const [stlAnalysis, setStlAnalysis] = useState<STLAnalysis | null>(null);
+  const [stlVizGeometry, setStlVizGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const stlVizGeometryRef = useRef<THREE.BufferGeometry | null>(null);
   const [stlFilename, setStlFilename] = useState<string>('');
+  useEffect(() => {
+    stlVizGeometryRef.current = stlVizGeometry;
+  }, [stlVizGeometry]);
+  useEffect(() => {
+    return () => {
+      stlVizGeometryRef.current?.dispose();
+      stlVizGeometryRef.current = null;
+    };
+  }, []);
   const [simResult, setSimResult] = useState<LaunchOptimizationResponse | null>(null);
   const [ascentTargetDeltaV, setAscentTargetDeltaV] = useState(9200);
   const [maxQThresholdKpa, setMaxQThresholdKpa] = useState(42);
@@ -1224,6 +1294,8 @@ export default function App() {
   const [launchOffsetHours, setLaunchOffsetHours] = useState(0);
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('BALANCED');
   const [scenarioType, setScenarioType] = useState<ScenarioType>('NOMINAL');
+  const [targetRisk, setTargetRisk] = useState(0.45);
+  const [targetCostM, setTargetCostM] = useState(180);
 
   const [keplerEl, setKeplerEl] = useState<KeplerianElements>({
     a: 6778,
@@ -1314,6 +1386,8 @@ export default function App() {
             habitatAreaM2: Math.max(10, (stlAnalysis?.surfaceArea ?? 90) * 0.2),
             policyProfile,
             scenarioType,
+            inverseTargetRisk: targetRisk,
+            inverseTargetCost: targetCostM * 1_000_000,
           },
         }),
       });
@@ -1362,7 +1436,11 @@ export default function App() {
 
     try {
       const analyzer = new STLAnalyzer();
-      const analysis = await analyzer.analyze(file);
+      const { analysis, geometry } = await analyzer.parseWithGeometry(file);
+      setStlVizGeometry((prev) => {
+        prev?.dispose();
+        return geometry;
+      });
       setStlAnalysis(analysis);
       setStlFilename(file.name);
       addLog(`STL parsed: ${file.name}`);
@@ -1372,6 +1450,10 @@ export default function App() {
       addLog(`STL parsing failed: ${detail}`);
       setStlAnalysis(null);
       setStlFilename('');
+      setStlVizGeometry((prev) => {
+        prev?.dispose();
+        return null;
+      });
     } finally {
       event.target.value = '';
     }
@@ -1404,6 +1486,16 @@ export default function App() {
   };
 
   const exportMissionReport = () => {
+    const formalReport = optResult ? generateMissionReport({
+      missionName: `${launchBodyId} to ${targetPlanet}`,
+      crewRisk: optResult.crewRisk ?? { riskScore: 0, classification: 'SAFE', embarkationDecision: 'SAFE_TO_EMBARK' },
+      cost: { expectedCost: optResult.stochastic?.expectedCost ?? optResult.totalCost, riskAdjustedCost: optResult.decisionCosts?.[0]?.riskAdjustedCost },
+      missionDecision: optResult.missionDecision ?? { decision: 'CONTINUE', rationale: 'Mission decision unavailable.' },
+      confidence: optResult.missionConfidence,
+      counterfactuals: optResult.counterfactuals,
+      regret: optResult.regret,
+      voi: optResult.voi,
+    }) : null;
     const payload = {
       exportedAt: new Date().toISOString(),
       launchBodyId,
@@ -1424,6 +1516,7 @@ export default function App() {
       importedGraph,
       ascent: simResult,
       stlAnalysis,
+      formalReport,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1497,19 +1590,24 @@ export default function App() {
   };
 
   const cislunarVisualizer = missionType === 'lunar' && targetPlanet === 'moon' && launchBodyId === 'earth';
+  const missionKmPerUnit = cislunarVisualizer ? CISLUNAR_VIS_KM_PER_UNIT : VIS_SCENE_KM_PER_UNIT;
   const missionTrajectory = useMemo(
     () => calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
     [launchDate, targetPlanet, launchBodyId, keplerEl],
   );
   const missionStages = useMemo(() => {
-    const derived = deriveTrajectoryStages(missionTrajectory);
+    const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
     return derived.length
       ? derived
-      : (cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES).map((stage) => ({
-          ...stage,
-          phase: stagePhase(stage.progress),
+      : FLIGHT_SEQUENCE_TEMPLATE.map((stage, index) => ({
+          sequence: index + 1,
+          label: stage.label,
+          progress: stage.progress,
+          color: stageColor(stage.label),
+          phase: stage.phase,
+          driver: stage.driver,
         }));
-  }, [missionTrajectory, cislunarVisualizer]);
+  }, [missionTrajectory, missionKmPerUnit]);
   const vehicleTimelineStages = useMemo(
     () => deriveAscentTimelineStages(simResult, optResult?.physics.transferTime_days),
     [simResult, optResult?.physics.transferTime_days],
@@ -1567,10 +1665,16 @@ export default function App() {
                       q: s.q,
                       velocity: s.velocity,
                       dragN: s.dragN,
+                      pitch: s.pitch,
+                      mach: s.mach,
+                      stress: s.stress,
                     }))}
                     mecoTime={simResult.best.mecoTime}
-                    missionStages={cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES}
+                    missionStages={vehicleTimelineStages}
                     transferTimeDays={optResult?.physics.transferTime_days}
+                    stlGeometry={stlVizGeometry}
+                    stressConcentrations={stlAnalysis?.stressConcentrations}
+                    principalAxis={stlAnalysis?.principalAxis ?? 'y'}
                   />
                 ) : (
                   <div className="flex h-[420px] flex-col items-center justify-center gap-2 rounded-xl border border-slate-800 bg-black/40 px-6 text-center">
@@ -1594,7 +1698,7 @@ export default function App() {
                       <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
                       <ambientLight intensity={0.45} />
                       <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
-                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} />
+                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} stageList={missionStages} />
                     </Canvas>
                   </div>
                   <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
@@ -1736,9 +1840,18 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-2">
                           <MetricBadge label="Risk Reduction" value={`${(optResult.missionDecision.expectedRiskReduction * 100).toFixed(0)}%`} unit="estimated" />
                           <MetricBadge label="Driver" value={optResult.medicalValidation?.dominantRiskDriver ?? '--'} unit="dominant factor" />
+                          <MetricBadge label="Regret" value={optResult.regret?.regretScore.toFixed(2) ?? '--'} unit="utility gap" tone="warn" />
+                          <MetricBadge label="VOI" value={optResult.voi?.valueOfWaiting.toFixed(2) ?? '--'} unit="value of waiting" tone={(optResult.voi?.valueOfWaiting ?? 0) > 0 ? 'good' : 'default'} />
                         </div>
                         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
                           <p>{optResult.missionDecision.rationale}</p>
+                          {optResult.hierarchy ? (
+                            <div className="mt-2 space-y-1 text-xs text-slate-400">
+                              <p>Low-level: {optResult.hierarchy.lowLevelAction}</p>
+                              <p>Mid-level: {optResult.hierarchy.midLevelDecision}</p>
+                              <p>High-level: {optResult.hierarchy.highLevelDecision}</p>
+                            </div>
+                          ) : null}
                           {optResult.missionDecision.candidateActions?.length ? (
                             <div className="mt-2 space-y-1 text-xs text-slate-400">
                               {optResult.missionDecision.candidateActions.map((action, index) => (
@@ -1818,6 +1931,9 @@ export default function App() {
                           <p>{optResult.decisionNarrative.medicalRisk}</p>
                           <p className="mt-2">{optResult.decisionNarrative.operationalDecision}</p>
                           <p className="mt-2">{optResult.decisionNarrative.financialRecommendation}</p>
+                          {optResult.counterfactuals?.outcomeDifferences?.slice(0, 2).map((item, index) => (
+                            <p key={index} className="mt-2">{item}</p>
+                          ))}
                         </div>
                       ) : null}
                     </div>
@@ -1832,6 +1948,8 @@ export default function App() {
                         <MetricBadge label="Confidence" value={optResult.missionConfidence?.confidenceScore.toFixed(0) ?? '--'} unit="/100" tone={(optResult.missionConfidence?.confidenceScore ?? 0) >= 70 ? 'good' : (optResult.missionConfidence?.confidenceScore ?? 0) >= 50 ? 'warn' : 'bad'} />
                         <MetricBadge label="Shielding" value={optResult.shieldingTradeoff?.shieldingMassKg.toFixed(0) ?? String(shieldingMassKg)} unit="kg" />
                         <MetricBadge label="Shield Factor" value={optResult.shieldingTradeoff?.shieldingFactor.toFixed(2) ?? '--'} unit="attenuation" tone="good" />
+                        <MetricBadge label="Inverse Risk" value={optResult.inversePlanning?.expectedOutcome.risk.toFixed(2) ?? '--'} unit="targeted" />
+                        <MetricBadge label="Inverse Cost" value={formatMoney(optResult.inversePlanning?.expectedOutcome.cost ?? 0)} unit="targeted" />
                       </div>
                       {optResult.launchWindows?.slice(0, 4).map((entry, index) => (
                         <div key={`${entry.window.launchTimeIso}-${index}`} className={cn('rounded-lg border px-3 py-2 text-sm', index === 0 ? 'border-sky-400/40 bg-sky-400/5 text-slate-100' : 'border-slate-800 bg-slate-950/60 text-slate-300')}>
@@ -1891,6 +2009,9 @@ export default function App() {
                       <p>{optResult.stakeholderView?.crewView}</p>
                       <p>{optResult.stakeholderView?.controlView}</p>
                       <p>{optResult.stakeholderView?.financeView}</p>
+                      {optResult.policySwitch ? <p>{optResult.policySwitch.reason}</p> : null}
+                      {optResult.regret ? <p>{optResult.regret.missedOpportunity}</p> : null}
+                      {optResult.adaptiveNarrative ? <p>{optResult.adaptiveNarrative.bayesian}</p> : null}
                     </div>
                     {optResult.telemetry?.events?.length ? (
                       <div className="mt-3 space-y-2">
@@ -1901,6 +2022,19 @@ export default function App() {
                               <StatusPill value={event.severity} tone={event.severity === 'INFO' ? 'good' : event.severity === 'WATCH' ? 'warn' : 'bad'} />
                             </div>
                             <p className="mt-1">{event.detail}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {optResult.multiMission?.missionPlans?.length ? (
+                      <div className="mt-3 space-y-2">
+                        {optResult.multiMission.missionPlans.slice(0, 3).map((mission, index) => (
+                          <div key={`${mission.name}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                            <div className="flex items-center justify-between">
+                              <span>{mission.name}</span>
+                              <StatusPill value={mission.funded ? 'FUNDED' : 'DEFERRED'} tone={mission.funded ? 'good' : 'warn'} />
+                            </div>
+                            <p className="mt-1">Portfolio score {mission.portfolioScore.toFixed(2)}</p>
                           </div>
                         ))}
                       </div>
@@ -1999,6 +2133,17 @@ export default function App() {
                         </div>
                         <input className="w-full" type="range" min={0} max={1200} step={20} value={shieldingMassKg} onChange={(event) => setShieldingMassKg(+event.target.value)} />
                       </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Target Risk
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" min={0.1} max={1.5} step={0.01} value={targetRisk} onChange={(event) => setTargetRisk(+event.target.value)} />
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Target Cost
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" min={10} step={5} value={targetCostM} onChange={(event) => setTargetCostM(+event.target.value)} />
+                          <span className="mt-1 block text-[10px] text-slate-500">$M</span>
+                        </label>
+                      </div>
                       <label className="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
                         Import Mission Config
                         <input className="hidden" type="file" accept=".json" onChange={handleMissionConfigImport} />
@@ -2014,14 +2159,20 @@ export default function App() {
 
                   <DashboardCard title="Flight Sequence" icon={Rocket} provenance="formula">
                     <div className="space-y-2">
-                      {(cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES).map((stage, index) => (
+                      {missionStages.map((stage) => (
                         <div key={stage.label} className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
                           <div className="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold text-slate-950" style={{ background: stage.color }}>
-                            {index + 1}
+                            {stage.sequence}
                           </div>
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <p className="text-sm text-slate-100">{stage.label}</p>
-                            <p className="text-xs text-slate-400">{stage.progress < 0.5 ? 'Outbound phase' : stage.progress < 0.8 ? 'Return phase' : 'Recovery phase'}</p>
+                            <p className="text-xs text-slate-400">{stage.phase}</p>
+                            {stage.driver ? <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{stage.driver}</p> : null}
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.12em] text-slate-500">
+                              {stage.distanceKm != null ? <span>{stage.distanceKm.toLocaleString(undefined, { maximumFractionDigits: 0 })} km</span> : null}
+                              {stage.fuelRemainingPct != null ? <span>{stage.fuelRemainingPct}% fuel reserve</span> : null}
+                              {stage.timeS != null ? <span>T+{(stage.timeS / 3600).toFixed(1)} h</span> : null}
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -2104,6 +2255,10 @@ export default function App() {
 
                   <DashboardCard title="Orbital Physics" icon={Globe} provenance="formula">
                     <PhysicsPanel keplerEl={keplerEl} fuelType={fuelType} />
+                  </DashboardCard>
+
+                  <DashboardCard title="STL Aerodynamics" icon={Wind} provenance={stlAnalysis ? 'formula' : 'preset'}>
+                    <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
                   </DashboardCard>
 
                   <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : 'preset'}>
