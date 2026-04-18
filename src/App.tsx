@@ -3454,6 +3454,13 @@ export default function App() {
     }
   }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass]);
 
+  const sgp4AutoRunRef = useRef(false);
+  useEffect(() => {
+    if (sgp4AutoRunRef.current) return;
+    sgp4AutoRunRef.current = true;
+    void runSgp4Analysis();
+  }, [runSgp4Analysis]);
+
   const exportCcsdsProducts = useCallback(async () => {
     try {
       const points = missionTrajectory.map((point) => ({

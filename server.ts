@@ -35,6 +35,7 @@ import { getLatestRadiationSnapshot, getRadiationSnapshotHistory, ingestLiveRadi
 import { assessTrajectoryRadiationIntersections } from "./src/lib/radiationIntersection.ts";
 import { buildNearEarthRadiationEnvironment } from "./src/lib/radiationModel.ts";
 import { fetchSolarBodies, fetchSolarBody, fetchSolarSkyPositions, mergeCelestialFallback } from "./src/lib/solarSystem.ts";
+import { CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition } from "./src/lib/celestial.ts";
 import { analyzeMultiStageVehicle } from "./src/lib/multiStage.ts";
 import { analyzeSurfaceEnvironment } from "./src/lib/surfaceOps.ts";
 import { fetchGoesRadiationSummary } from "./src/lib/swpcGoes.ts";
@@ -249,7 +250,34 @@ async function startServer() {
         source: 'LIVE · JPL Horizons',
       });
     } catch (error: any) {
-      res.status(502).json({ error: error?.message || 'Horizons system ephemeris fetch failed', source: 'UPSTREAM ERROR' });
+      try {
+        const AU_KM = 149597870.7;
+        const epoch = new Date(`${date}T12:00:00Z`);
+        const center = CELESTIAL_BODY_MAP[centerBodyId] ?? CELESTIAL_BODY_MAP.earth;
+        const centerHelioAu = getApproximateHeliocentricPosition(center, epoch);
+        const bodies = bodyIds
+          .map((bodyId) => {
+            const body = CELESTIAL_BODY_MAP[bodyId];
+            if (!body?.orbit) return null;
+            const p = getApproximateHeliocentricPosition(body, epoch);
+            return {
+              id: bodyId,
+              x: (p[0] - centerHelioAu[0]) * AU_KM,
+              y: (p[1] - centerHelioAu[1]) * AU_KM,
+              z: (p[2] - centerHelioAu[2]) * AU_KM,
+              jd: 0,
+            };
+          })
+          .filter(Boolean);
+        res.json({
+          centerBodyId,
+          date,
+          bodies,
+          source: 'MODELED · approximate heliocentric ephemeris (Horizons fallback)',
+        });
+      } catch (fallbackError: any) {
+        res.status(502).json({ error: fallbackError?.message || error?.message || 'System ephemeris fetch failed', source: 'UPSTREAM ERROR' });
+      }
     }
   });
 
@@ -532,29 +560,62 @@ async function startServer() {
         return res.status(400).json({ error: 'launchDate is required' });
       }
 
-      const departure = await fetchHorizonsVectors({
-        COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
-        CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
-        START_TIME: `'${launchDate}'`,
-        STOP_TIME: `'${launchDate}'`,
-        STEP_SIZE: `'1 d'`,
-      });
-      const distanceKm = Math.hypot(departure[0]?.x ?? 384400, departure[0]?.y ?? 0, departure[0]?.z ?? 0);
+      let r1Km: [number, number, number] = [0, 0, 0];
+      let r2Km: [number, number, number] = [384400, 0, 0];
+      let distanceKm = 384400;
+      let geometrySource = 'MODELED · two-body geometry fallback';
+      const epoch = new Date(`${launchDate}T12:00:00Z`);
+
+      try {
+        const departure = await fetchHorizonsVectors({
+          COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
+          CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
+          START_TIME: `'${launchDate}'`,
+          STOP_TIME: `'${launchDate}'`,
+          STEP_SIZE: `'1 d'`,
+        });
+        distanceKm = Math.hypot(departure[0]?.x ?? 384400, departure[0]?.y ?? 0, departure[0]?.z ?? 0);
+        r1Km = [departure[0]?.x ?? 0, departure[0]?.y ?? 0, departure[0]?.z ?? 0];
+        geometrySource = 'LIVE · Horizons geometry';
+      } catch {
+        const AU_KM = 149597870.7;
+        const origin = CELESTIAL_BODY_MAP[launchBodyId];
+        const target = CELESTIAL_BODY_MAP[targetBodyId];
+        if (launchBodyId === 'earth' && targetBodyId === 'moon') {
+          r1Km = [0, 0, 0];
+          r2Km = [384400, 0, 0];
+          distanceKm = 384400;
+        } else if (origin?.orbit && target?.orbit) {
+          const po = getApproximateHeliocentricPosition(origin, epoch);
+          const pt = getApproximateHeliocentricPosition(target, epoch);
+          const rel: [number, number, number] = [(pt[0] - po[0]) * AU_KM, (pt[1] - po[1]) * AU_KM, (pt[2] - po[2]) * AU_KM];
+          r1Km = [0, 0, 0];
+          r2Km = rel;
+          distanceKm = Math.hypot(rel[0], rel[1], rel[2]);
+          geometrySource = 'MODELED · heliocentric approximation (Horizons fallback)';
+        }
+      }
       const transferDays = arrivalDate
         ? Math.max(1, (Date.parse(arrivalDate) - Date.parse(launchDate)) / 86400000)
         : inferTransferTimeDaysFromDistance(distanceKm, targetBodyId === 'moon' ? 1.1 : 24);
       const arrivalEpoch = new Date(Date.parse(launchDate) + transferDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
-      const arrival = await fetchHorizonsVectors({
-        COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
-        CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
-        START_TIME: `'${arrivalEpoch}'`,
-        STOP_TIME: `'${arrivalEpoch}'`,
-        STEP_SIZE: `'1 d'`,
-      });
+
+      try {
+        const arrival = await fetchHorizonsVectors({
+          COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
+          CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
+          START_TIME: `'${arrivalEpoch}'`,
+          STOP_TIME: `'${arrivalEpoch}'`,
+          STEP_SIZE: `'1 d'`,
+        });
+        r2Km = [arrival[0]?.x ?? r2Km[0], arrival[0]?.y ?? r2Km[1], arrival[0]?.z ?? r2Km[2]];
+      } catch {
+        // Keep modeled r2Km.
+      }
 
       const lambert = solveLambertUniversal({
-        r1Km: [departure[0]?.x ?? 0, departure[0]?.y ?? 0, departure[0]?.z ?? 0],
-        r2Km: [arrival[0]?.x ?? distanceKm, arrival[0]?.y ?? 0, arrival[0]?.z ?? 0],
+        r1Km,
+        r2Km,
         tofSec: transferDays * 86400,
         muKm3S2: launchBodyId === 'earth' && targetBodyId === 'moon' ? 398600.4418 : 132712440018,
       });
@@ -609,7 +670,7 @@ async function startServer() {
         abortBranches,
         reservePolicy,
         launchWindows,
-        source: 'LIVE · Horizons geometry + formula-driven trajectory design',
+        source: `${geometrySource} + formula-driven trajectory design`,
       });
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Trajectory design analysis failed', source: 'UPSTREAM ERROR' });
@@ -983,7 +1044,11 @@ async function startServer() {
         source: 'LIVE · NAIF WebGeocalc',
       });
     } catch (error: any) {
-      res.status(502).json({ error: error?.message || "WebGeocalc metadata fetch failed", source: "UPSTREAM ERROR" });
+      res.json({
+        version: 'unknown',
+        description: 'WebGeocalc metadata not reachable from this environment.',
+        source: 'MODELED · WebGeocalc offline fallback',
+      });
     }
   });
 
