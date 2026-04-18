@@ -46,6 +46,9 @@ import {
   VIS_SCENE_KM_PER_UNIT,
 } from './lib/orbital';
 import { moonGeocentricPositionKm, normalize3, slerpUnitVectors } from './lib/lunarEphemeris';
+import { AscentDynamicsVisualizer } from './components/AscentDynamicsVisualizer';
+import type { GeometryStabilityHints } from './lib/ascentDynamics';
+import { explainAscentDynamics } from './lib/explain';
 import { j2NodalPrecession, tsiolkovskyFuelMass, vanAllenDose } from './lib/optimizer';
 import { STLAnalyzer, type STLAnalysis } from './lib/stlAnalyzer';
 import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition, getDateAdjustedLocalGravity, searchBodies } from './lib/celestial';
@@ -64,6 +67,8 @@ type MissionType = 'lunar' | 'orbital' | 'rover';
 type FuelType = 'RP-1' | 'LH2' | 'Methane';
 type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum';
 type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
+type PolicyProfile = 'CREW_FIRST' | 'BALANCED' | 'COST_FIRST';
+type ScenarioType = 'NOMINAL' | 'SOLAR_STORM' | 'COMM_BLACKOUT' | 'PROPULSION_ANOMALY' | 'DELAYED_LAUNCH';
 
 interface PropellantType {
   name: FuelType;
@@ -179,6 +184,37 @@ interface OptimizationResult {
   };
   constraintViolations?: string[];
   timeDependent?: { communicationViolations: number; radiationViolations: number; radiationThreshold: number };
+  launchWindows?: Array<{
+    window: { launchTimeIso: string; offsetHours: number; alignmentScore: number };
+    deltaV_ms: number;
+    radiationExposure: number;
+    communicationAvailability: number;
+    score: number;
+  }>;
+  shieldingTradeoff?: {
+    shieldingMassKg: number;
+    shieldingFactor: number;
+    adjustedRadiation: number;
+    adjustedDeltaV_ms: number;
+    addedPropellantKg: number;
+    valueScore: number;
+  };
+  deltaVPhases?: {
+    totalDeltaV: number;
+    phases: { departure: number; midcourse: number; flyby: number; return: number };
+  };
+  uncertaintySummary?: {
+    cost: { mean: number; variance: number; p10: number; p50: number; p90: number; histogram: Array<{ binStart: number; binEnd: number; count: number }> };
+    risk: { mean: number; variance: number; p10: number; p50: number; p90: number; histogram: Array<{ binStart: number; binEnd: number; count: number }> };
+    success: { mean: number; variance: number; p10: number; p50: number; p90: number; histogram: Array<{ binStart: number; binEnd: number; count: number }> };
+  };
+  policy?: { profile: PolicyProfile; rationale: string };
+  reentry?: { reentrySafe: boolean; reentryRiskScore: number; violationReason?: string; approachVelocityMs: number; flightPathAngleDeg: number };
+  gravityAssist?: { adjustedDeltaV_ms: number; totalBonusFraction: number; contributions: Array<{ nodeName: string; deltaVBonusFraction: number }> };
+  telemetry?: { events: Array<{ timeIndex: number; event: string; severity: 'INFO' | 'WATCH' | 'ALERT'; detail: string }> };
+  scenario?: { type: ScenarioType; summary: string };
+  missionConfidence?: { confidenceScore: number; interpretation: string };
+  stakeholderView?: { crewView: string; controlView: string; financeView: string };
 }
 
 interface LaunchSimulationStep {
@@ -189,14 +225,21 @@ interface LaunchSimulationStep {
   stress: number;
   pitch: number;
   mach: number;
+  dragN: number;
+  downrangeKm: number;
+  accel_ms2: number;
+  cdEffective: number;
 }
 
 interface LaunchSimulationResult {
   steps: LaunchSimulationStep[];
   stabilityScore: number;
+  ascentFlags: string[];
   failurePoints: string[];
   maxQTime: number;
   maxQValue: number;
+  maxQAltitudeKm: number;
+  peakDragN: number;
   mecoTime: number;
   residualMass_kg: number;
   apogeeKm: number;
@@ -209,6 +252,13 @@ interface LaunchSimulationResult {
     pitchKickSpeed: number;
     pitchRateDegPerSec: number;
     maxPitchDeg: number;
+  };
+  aiSummary: {
+    max_q_kpa: number;
+    peak_drag_n: number;
+    stability_score: number;
+    max_q_altitude_km: number;
+    meco_time_s: number;
   };
 }
 
@@ -344,6 +394,19 @@ function getSurfaceDensity(bodyId: string): number | undefined {
     default:
       return undefined;
   }
+}
+
+function buildGeometryHints(stl: STLAnalysis | null): GeometryStabilityHints | null {
+  if (!stl) return null;
+  const { width, height, depth } = stl.bounds;
+  const axis = stl.principalAxis;
+  const length = axis === 'x' ? width : axis === 'y' ? height : depth;
+  const crossMax = axis === 'x' ? Math.max(height, depth) : axis === 'y' ? Math.max(width, depth) : Math.max(width, height);
+  const aspectRatio = length / Math.max(1e-9, crossMax);
+  const idx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+  const offset = Math.abs(stl.centerOfPressure[idx] - stl.centerOfMass[idx]);
+  const cpComOffsetNorm = offset / Math.max(1e-9, length);
+  return { aspectRatio, cpComOffsetNorm, referenceLengthM: length };
 }
 
 const CB = '#4B9CD3';
@@ -982,10 +1045,16 @@ export default function App() {
   const [stlAnalysis, setStlAnalysis] = useState<STLAnalysis | null>(null);
   const [stlFilename, setStlFilename] = useState<string>('');
   const [simResult, setSimResult] = useState<LaunchOptimizationResponse | null>(null);
+  const [ascentTargetDeltaV, setAscentTargetDeltaV] = useState(9200);
+  const [maxQThresholdKpa, setMaxQThresholdKpa] = useState(42);
   const [optimizing, setOptimizing] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [qaoaDepth, setQaoaDepth] = useState(3);
   const [qaoaRefreshing, setQaoaRefreshing] = useState(false);
+  const [shieldingMassKg, setShieldingMassKg] = useState(180);
+  const [launchOffsetHours, setLaunchOffsetHours] = useState(0);
+  const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('BALANCED');
+  const [scenarioType, setScenarioType] = useState<ScenarioType>('NOMINAL');
 
   const [keplerEl, setKeplerEl] = useState<KeplerianElements>({
     a: 6778,
@@ -1031,6 +1100,12 @@ export default function App() {
     fetchAll();
   }, [addLog, launchBodyId, launchLatitude, launchLongitude]);
 
+  useEffect(() => {
+    if (optResult?.totalDeltaV_ms && Number.isFinite(optResult.totalDeltaV_ms) && optResult.totalDeltaV_ms > 0) {
+      setAscentTargetDeltaV(Math.round(optResult.totalDeltaV_ms));
+    }
+  }, [optResult?.totalDeltaV_ms]);
+
   const handleScenarioChange = (scenarioId: string) => {
     const scenario = MISSION_SCENARIOS.find((item) => item.id === scenarioId);
     if (!scenario) return;
@@ -1063,6 +1138,14 @@ export default function App() {
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
+          missionProfile: {
+            launchOffsetHours,
+            launchWindowOffsetsHours: [0, 6, 12, 24, 36],
+            shieldingMassKg,
+            habitatAreaM2: Math.max(10, (stlAnalysis?.surfaceArea ?? 90) * 0.2),
+            policyProfile,
+            scenarioType,
+          },
         }),
       });
       const data = await response.json();
@@ -1204,6 +1287,9 @@ export default function App() {
           pressure: weatherData?.pressure ?? 101.325,
           exitArea: Math.max(0.2, frontalArea * 0.16),
           propellantMassFraction: 0.88,
+          targetDeltaV_ms: ascentTargetDeltaV,
+          maxQThresholdKpa: maxQThresholdKpa,
+          geometryHints: buildGeometryHints(stlAnalysis),
           dt: 0.5,
           maxTime: 420,
           body: {
@@ -1236,6 +1322,12 @@ export default function App() {
       setSimResult(result);
       addLog(`Ascent optimization complete: apogee ${result.best.apogeeKm.toFixed(1)} km`);
       addLog(`Best guidance: kick ${result.best.flightPath.pitchKickSpeed} m/s, rate ${result.best.flightPath.pitchRateDegPerSec.toFixed(2)} deg/s`);
+      addLog(
+        explainAscentDynamics({
+          ...result.best.aiSummary,
+          flags: result.best.ascentFlags,
+        }),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Launch simulation failed';
       addLog(`Launch simulation failed: ${message}`);
@@ -1282,27 +1374,68 @@ export default function App() {
 
         <main className="grid flex-1 gap-4 lg:grid-cols-[1.2fr_420px]">
           <section className="flex min-h-0 flex-col gap-4">
-            <DashboardCard title={`${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`} icon={Globe} provenance={importedGraph ? 'formula' : 'preset'} className="flex-1">
-              <div className="h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-black/40">
-                <Canvas>
-                  <PerspectiveCamera makeDefault position={cislunarVisualizer ? [0, 72, 520] : [0, 80, 500]} />
-                  <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
-                  <ambientLight intensity={0.45} />
-                  <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
-                  <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} />
-                </Canvas>
-              </div>
-              <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                {cislunarVisualizer ? (
-                  <>
-                    Cislunar view: 1 unit ≈ {CISLUNAR_VIS_KM_PER_UNIT.toLocaleString()} km (Earth radius ≈ {(RE / CISLUNAR_VIS_KM_PER_UNIT).toFixed(1)} units). Moon position from a truncated Meeus-style ephemeris; Moon sphere is slightly enlarged for readability. Transfer uses Hohmann TOF with direction blending along LEO→Moon.
-                  </>
+            <DashboardCard
+              title={activeTab === 'vehicle' ? 'Ascent Dynamics Visualizer' : `${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`}
+              icon={activeTab === 'vehicle' ? Rocket : Globe}
+              provenance={activeTab === 'vehicle' ? (simResult ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
+              className="flex-1"
+            >
+              {activeTab === 'vehicle' ? (
+                simResult ? (
+                  <AscentDynamicsVisualizer
+                    steps={simResult.best.steps.map((s) => ({
+                      time: s.time,
+                      altitude: s.altitude,
+                      downrangeKm: s.downrangeKm,
+                      q: s.q,
+                      velocity: s.velocity,
+                      dragN: s.dragN,
+                    }))}
+                    mecoTime={simResult.best.mecoTime}
+                    missionStages={cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES}
+                    transferTimeDays={optResult?.physics.transferTime_days}
+                  />
                 ) : (
-                  <>
-                    Heliocentric bodies are shown relative to Earth at the selected date (same scale as orbit polynomials in <code className="text-slate-400">celestial.ts</code>). Trajectory is a smooth guide curve, not a patched-conic solve.
-                  </>
-                )}
-              </p>
+                  <div className="flex h-[420px] flex-col items-center justify-center gap-2 rounded-xl border border-slate-800 bg-black/40 px-6 text-center">
+                    <p className="text-sm text-slate-300">Open the Vehicle tab, upload your STL, and run ascent optimization.</p>
+                    <p className="max-w-md text-xs text-slate-500">
+                      The plot shows altitude vs downrange with the path colored by dynamic pressure (q = ½ρv²). Orange marks Max Q; cyan marks MECO. Geometry for area, Cd, and stability heuristics comes from your uploaded mesh.
+                    </p>
+                  </div>
+                )
+              ) : (
+                <>
+                  <div className="h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-black/40">
+                    <Canvas>
+                      <PerspectiveCamera makeDefault position={cislunarVisualizer ? [0, 72, 520] : [0, 80, 500]} />
+                      <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
+                      <ambientLight intensity={0.45} />
+                      <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
+                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} />
+                    </Canvas>
+                  </div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                    {cislunarVisualizer ? (
+                      <>
+                        Cislunar view: 1 unit ≈ {CISLUNAR_VIS_KM_PER_UNIT.toLocaleString()} km (Earth radius ≈ {(RE / CISLUNAR_VIS_KM_PER_UNIT).toFixed(1)} units). Moon position from a truncated Meeus-style ephemeris; Moon sphere is slightly enlarged for readability. Transfer uses Hohmann TOF with direction blending along LEO→Moon.
+                      </>
+                    ) : (
+                      <>
+                        Heliocentric bodies are shown relative to Earth at the selected date (same scale as orbit polynomials in <code className="text-slate-400">celestial.ts</code>). Trajectory is a smooth guide curve, not a patched-conic solve.
+                      </>
+                    )}
+                  </p>
+                  {simResult ? (
+                    <p className="mt-2 text-[10px] text-sky-200/90">
+                      Ascent trajectory (q-colored path, Max Q / MECO) is in the top card on the{' '}
+                      <button type="button" className="font-semibold underline decoration-sky-400/60 underline-offset-2 hover:text-sky-100" onClick={() => setActiveTab('vehicle')}>
+                        Vehicle
+                      </button>{' '}
+                      tab.
+                    </p>
+                  ) : null}
+                </>
+              )}
             </DashboardCard>
 
             <div className="grid gap-4 lg:grid-cols-3">
@@ -1330,6 +1463,8 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-2">
                     <MetricBadge label="Apogee" value={simResult.best.apogeeKm.toFixed(1)} unit="km" tone="good" />
                     <MetricBadge label="Max-Q" value={simResult.best.maxQValue.toFixed(1)} unit="kPa" tone={simResult.best.maxQValue > 50 ? 'bad' : 'warn'} />
+                    <MetricBadge label="Max Q alt" value={simResult.best.maxQAltitudeKm.toFixed(1)} unit="km" tone="good" />
+                    <MetricBadge label="Peak drag" value={(simResult.best.peakDragN / 1000).toFixed(2)} unit="kN" />
                     <MetricBadge label="Peak Accel" value={simResult.best.peakAccelerationGs.toFixed(2)} unit="g" tone={simResult.best.peakAccelerationGs > 6 ? 'bad' : 'good'} />
                     <MetricBadge label="Stability" value={simResult.best.stabilityScore.toFixed(0)} unit="/100" tone={simResult.best.stabilityScore < 60 ? 'bad' : 'good'} />
                   </div>
@@ -1705,10 +1840,29 @@ export default function App() {
                           Wind
                           <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" value={windSpeed} onChange={(event) => setWindSpeed(+event.target.value)} />
                         </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Ascent ΔV (Tsiolkovsky)
+                          <input
+                            className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                            type="number"
+                            value={ascentTargetDeltaV}
+                            onChange={(event) => setAscentTargetDeltaV(+event.target.value)}
+                            title="Propellant mass uses the same rocket equation as the Fuel calculator: m_prop = m₀(1 − e^(−Δv/(Isp·g₀)))."
+                          />
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Max Q limit (kPa)
+                          <input
+                            className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                            type="number"
+                            value={maxQThresholdKpa}
+                            onChange={(event) => setMaxQThresholdKpa(+event.target.value)}
+                          />
+                        </label>
                       </div>
 
                       <p className="text-[10px] leading-snug text-slate-500">
-                        Runs on the dev server (<code className="text-slate-400">npm run dev</code>). Without an STL, a reference 18 m² / Cd 0.48 vehicle is used.
+                        Runs on the dev server (<code className="text-slate-400">npm run dev</code>). Without an STL, a reference 18 m² / Cd 0.48 vehicle is used. Atmosphere: ρ(h)=ρ₀e^(−h/H) with body-specific H and ρ₀. Ascent ΔV updates when you run mission optimization.
                       </p>
                       <button type="button" className="w-full rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200 disabled:opacity-50" onClick={runLaunchSimulation} disabled={simulating}>
                         {simulating ? 'Optimizing Flight Path...' : 'Run STL-Based Ascent Optimization'}
@@ -1792,6 +1946,37 @@ export default function App() {
                       </ResponsiveContainer>
                     ) : (
                       <p className="text-sm text-slate-400">The chart appears after a successful ascent run.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Stability & AI summary" icon={ShieldAlert} provenance={simResult ? 'formula' : 'preset'}>
+                    {simResult ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          {simResult.best.ascentFlags.length ? (
+                            simResult.best.ascentFlags.map((flag) => (
+                              <span key={flag} className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                                {flag}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200">
+                              Within heuristic thresholds
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Max Q altitude" value={simResult.best.maxQAltitudeKm.toFixed(1)} unit="km" />
+                          <MetricBadge label="Peak drag" value={(simResult.best.peakDragN / 1000).toFixed(2)} unit="kN" />
+                          <MetricBadge label="AI · max_q" value={simResult.best.aiSummary.max_q_kpa.toFixed(2)} unit="kPa" />
+                          <MetricBadge label="AI · stability" value={simResult.best.aiSummary.stability_score.toFixed(0)} unit="/100" />
+                        </div>
+                        <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs leading-relaxed text-slate-300">
+                          {explainAscentDynamics({ ...simResult.best.aiSummary, flags: simResult.best.ascentFlags })}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Run ascent optimization to populate stability flags and copilot-ready summary fields (max_q, peak_drag, stability_score).</p>
                     )}
                   </DashboardCard>
                 </motion.div>

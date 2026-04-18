@@ -3,6 +3,16 @@
  * Physics-informed 2D ascent model with configurable gravity-turn guidance.
  */
 
+import {
+  assessAscentStability,
+  cdMachMultiplier,
+  exponentialDensity,
+  isaTemperatureK,
+  propellantMassFromDeltaV,
+  speedOfSoundMs,
+  type AscentStabilityFlag,
+  type GeometryStabilityHints,
+} from './ascentDynamics';
 import { evaluateFlightRisk, type RiskAnalysis } from './risk';
 
 export interface FlightPathProgram {
@@ -21,6 +31,12 @@ export interface SimulationConfig {
   launchAltitudeMeters?: number;
   exitArea?: number;
   propellantMassFraction?: number;
+  /** If set with a positive value, propellant mass is taken from the Tsiolkovsky / rocket equation (same as Fuel panel). */
+  targetDeltaV_ms?: number;
+  /** Dynamic pressure threshold for Max-Q warnings (kPa). */
+  maxQThresholdKpa?: number;
+  /** STL / vehicle heuristics for stability scoring. */
+  geometryHints?: GeometryStabilityHints | null;
   flightPath?: FlightPathProgram;
   body?: {
     radiusMeters: number;
@@ -35,6 +51,9 @@ export interface SimulationStep {
   altitude: number; // km
   velocity: number; // m/s
   q: number; // dynamic pressure (kPa)
+  dragN: number;
+  downrangeKm: number;
+  accel_ms2: number;
   stress: number; // 0 to 1
   risk: string | null;
   riskScore?: number;
@@ -43,6 +62,7 @@ export interface SimulationStep {
   rho: number; // air density
   pitch: number; // degrees from vertical
   mach: number;
+  cdEffective: number;
 }
 
 export type FuelType = 'RP-1' | 'LH2' | 'Methane';
@@ -50,9 +70,12 @@ export type FuelType = 'RP-1' | 'LH2' | 'Methane';
 export interface SimulationResult {
   steps: SimulationStep[];
   stabilityScore: number;
+  ascentFlags: AscentStabilityFlag[];
   failurePoints: string[];
   maxQTime: number;
   maxQValue: number;
+  maxQAltitudeKm: number;
+  peakDragN: number;
   mecoTime: number;
   stressHotspots: { part: string; intensity: number; position: [number, number, number] }[];
   /** Mass above dry mass at end of integration (typically unburned propellant), not payload to orbit. */
@@ -65,6 +88,13 @@ export interface SimulationResult {
   source: 'formula-driven';
   flightPath: FlightPathProgram;
   riskAnalysis: RiskAnalysis;
+  aiSummary: {
+    max_q_kpa: number;
+    peak_drag_n: number;
+    stability_score: number;
+    max_q_altitude_km: number;
+    meco_time_s: number;
+  };
 }
 
 export interface FlightPathOptimizationResult {
@@ -134,15 +164,14 @@ export class LaunchSimulator {
       const rho0Default = config.surfaceDensityKgM3 ?? 1.225;
       if (scaleKm != null && scaleKm > 0) {
         const scaleHeightMeters = scaleKm * 1000;
-        const rho = rho0Default * Math.exp(-Math.max(0, altitudeMeters) / scaleHeightMeters);
-        const temp = 210;
+        const rho = exponentialDensity(Math.max(0, altitudeMeters), rho0Default, scaleHeightMeters);
+        const temp = isaTemperatureK(Math.max(0, altitudeMeters));
         const pPa = rho * 287.05 * temp;
         return { rho, pPa, temp };
       }
       if (config.surfaceDensityKgM3 != null && config.surfaceDensityKgM3 > 0) {
-        const scaleHeightMeters = 8500;
-        const rho = config.surfaceDensityKgM3 * Math.exp(-Math.max(0, altitudeMeters) / scaleHeightMeters);
-        const temp = 210;
+        const rho = exponentialDensity(Math.max(0, altitudeMeters), config.surfaceDensityKgM3, 8500);
+        const temp = isaTemperatureK(Math.max(0, altitudeMeters));
         const pPa = rho * 287.05 * temp;
         return { rho, pPa, temp };
       }
@@ -195,13 +224,20 @@ export class LaunchSimulator {
     const bodyConfig = config.body;
     const exitArea = config.exitArea ?? Math.max(0.2, this.frontalArea * 0.16);
     const propellantMassFraction = Math.min(0.93, Math.max(0.45, config.propellantMassFraction ?? 0.88));
+    const maxQThresholdKpa = config.maxQThresholdKpa ?? 42;
     const flightPath = config.flightPath ?? {
       pitchKickSpeed: 85,
       pitchRateDegPerSec: 0.18,
       maxPitchDeg: 72,
     };
 
-    const dryMass = this.massInitial * (1 - propellantMassFraction);
+    let dryMass: number;
+    if (config.targetDeltaV_ms != null && Number.isFinite(config.targetDeltaV_ms) && config.targetDeltaV_ms > 0) {
+      const mp = propellantMassFromDeltaV(this.massInitial, config.targetDeltaV_ms, this.fuel.ispVacuum);
+      dryMass = Math.max(this.massInitial * 0.05, this.massInitial - mp);
+    } else {
+      dryMass = this.massInitial * (1 - propellantMassFraction);
+    }
     let currentMass = this.massInitial;
     let altitude = launchAltitude;
     let downrange = 0;
@@ -213,7 +249,10 @@ export class LaunchSimulator {
     const failurePoints: string[] = [];
     let maxQValue = 0;
     let maxQTime = 0;
+    let maxQAltitudeKm = 0;
+    let peakDragN = 0;
     let peakAccelerationGs = 0;
+    let minMassAscent = this.massInitial;
     let apogee = altitude;
     let burnoutVelocity = 0;
     let mecoTime = maxTime;
@@ -229,11 +268,14 @@ export class LaunchSimulator {
       const relSpeed = Math.hypot(relWindX, relWindY);
       const qPa = 0.5 * rho * relSpeed * relSpeed;
       const q = qPa / 1000;
-      const mach = relSpeed / Math.max(295, Math.sqrt(1.4 * 287.05 * temp));
+      const aSound = speedOfSoundMs(temp);
+      const mach = relSpeed / Math.max(200, aSound);
+      const cdEff = this.dragCoeff * cdMachMultiplier(mach);
 
       if (q > maxQValue) {
         maxQValue = q;
         maxQTime = time;
+        maxQAltitudeKm = altitude / 1000;
       }
 
       const isp = this.fuel.ispSeaLevel + (this.fuel.ispVacuum - this.fuel.ispSeaLevel) * (1 - Math.min(1, pPa / this.SEA_LEVEL_PRESSURE_PA));
@@ -249,12 +291,14 @@ export class LaunchSimulator {
 
       const thrustX = thrust * Math.sin(pitchRad);
       const thrustY = thrust * Math.cos(pitchRad);
-      const drag = 0.5 * rho * relSpeed * relSpeed * this.dragCoeff * this.frontalArea;
+      const drag = 0.5 * rho * relSpeed * relSpeed * cdEff * this.frontalArea;
+      peakDragN = Math.max(peakDragN, drag);
       const dragX = relSpeed > 0 ? drag * (relWindX / relSpeed) : 0;
       const dragY = relSpeed > 0 ? drag * (relWindY / relSpeed) : 0;
 
       const ax = (thrustX - dragX) / currentMass;
       const ay = (thrustY - dragY) / currentMass - g;
+      const accelMag = Math.hypot(ax, ay);
       const accelGs = Math.hypot(ax, ay + g) / this.G_ACCEL;
       peakAccelerationGs = Math.max(peakAccelerationGs, accelGs);
 
@@ -267,15 +311,16 @@ export class LaunchSimulator {
       if (mdot > 0) {
         currentMass = Math.max(dryMass, currentMass - mdot * dt);
       }
+      minMassAscent = Math.min(minMassAscent, currentMass);
 
-      let stress = q / 45;
+      let stress = q / maxQThresholdKpa;
       if (mach > 0.92 && mach < 1.15) stress += 0.22;
       if (accelGs > 4.5) stress += (accelGs - 4.5) * 0.07;
       if (Math.abs(this.windSpeed) > 18 && altitude < 15000) stress += 0.12;
 
       let risk: string | null = null;
       if (stress > 0.98) risk = 'CRITICAL: STRUCTURAL LIMIT';
-      else if (q > 45) risk = 'HIGH MAX-Q';
+      else if (q > maxQThresholdKpa) risk = 'HIGH MAX-Q';
       else if (Math.abs(mach - 1) < 0.05) risk = 'TRANSONIC SHOCK';
       else if (time === maxQTime) risk = 'MAX-Q';
 
@@ -284,12 +329,16 @@ export class LaunchSimulator {
         altitude: altitude / 1000,
         velocity: Math.hypot(vx, vy),
         q,
+        dragN: drag,
+        downrangeKm: downrange / 1000,
+        accel_ms2: accelMag,
         stress: Math.min(1, stress),
         risk,
         g,
         rho,
         pitch,
         mach,
+        cdEffective: cdEff,
       });
 
       if (stress > 0.99 && !failurePoints.includes('Structural overload')) {
@@ -313,6 +362,14 @@ export class LaunchSimulator {
     }
 
     const maxStress = steps.length ? Math.max(...steps.map((step) => step.stress)) : 0;
+    const { score: heuristicScore, flags: ascentFlags } = assessAscentStability({
+      maxQ_kPa: maxQValue,
+      maxQThreshold_kPa: maxQThresholdKpa,
+      peakAccelG: peakAccelerationGs,
+      minMassDuringAscent_kg: minMassAscent,
+      peakDragN,
+      geometry: config.geometryHints ?? undefined,
+    });
     const riskAnalysis = evaluateFlightRisk(
       steps.map((step) => ({
         time: step.time,
@@ -321,6 +378,7 @@ export class LaunchSimulator {
         mach: step.mach,
         altitude: step.altitude,
       })),
+      { maxQkPa: maxQThresholdKpa },
     );
 
     const riskByTime = new Map(riskAnalysis.profile.map((point) => [point.time, point]));
@@ -341,15 +399,18 @@ export class LaunchSimulator {
       { part: 'Thrust Structure', intensity: maxStress * 0.78, position: [0, -2.2, 0] as [number, number, number] },
     ];
 
-    const stabilityPenalty = Math.max(0, maxQValue - 35) * 1.5 + failurePoints.length * 35 + Math.max(0, peakAccelerationGs - 5.5) * 10;
-    const stabilityScore = Math.max(0, 100 - stabilityPenalty);
+    const legacyPenalty = failurePoints.length * 12 + Math.max(0, peakAccelerationGs - 6) * 6;
+    const stabilityScore = Math.max(0, heuristicScore - legacyPenalty);
 
     return {
       steps,
       stabilityScore,
+      ascentFlags,
       failurePoints,
       maxQTime,
       maxQValue,
+      maxQAltitudeKm,
+      peakDragN,
       mecoTime,
       stressHotspots,
       residualMass_kg: Math.max(0, currentMass - dryMass),
@@ -361,6 +422,13 @@ export class LaunchSimulator {
       source: 'formula-driven',
       flightPath,
       riskAnalysis,
+      aiSummary: {
+        max_q_kpa: maxQValue,
+        peak_drag_n: peakDragN,
+        stability_score: stabilityScore,
+        max_q_altitude_km: maxQAltitudeKm,
+        meco_time_s: mecoTime,
+      },
     };
   }
 

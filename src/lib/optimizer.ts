@@ -54,6 +54,17 @@ import {
 import { generateReplanOptions, type ReplanOption } from './replan';
 import { assessDecisionCost, compareDecisionCosts, type DecisionCostAssessment } from './replanCost';
 import { runMissionSupportVerification, type MissionSupportVerification } from './verification';
+import { generateLaunchWindows, rankLaunchWindows, type LaunchWindowEvaluation } from './launchWindow';
+import { computeDeltaVPhases, type DeltaVPhaseBreakdown } from './deltaV';
+import { summarizeDistribution, type DistributionSummary } from './uncertainty';
+import { applyPolicy, type PolicyProfile } from './policy';
+import { evaluateReentry, type ReentryEvaluation } from './reentry';
+import { applyGravityAssist, type GravityAssistResult } from './gravityAssist';
+import { evaluateShieldingTradeoff, computeMassPenalty, computeShieldingEffect, type ShieldingTradeoff } from './shielding';
+import { simulateMissionTimeline, type TelemetryTimeline } from './telemetry';
+import { applyScenario, type ScenarioType } from './scenarios';
+import { computeMissionConfidence, type MissionConfidence } from './confidence';
+import { buildStakeholderView, type StakeholderView } from './stakeholder';
 
 export interface OptimizerNode {
   id: string;
@@ -131,6 +142,16 @@ export interface MissionTimeProfile {
   radiationThreshold: number;
   nodeStates: Record<string, TimeDependentNodeState>;
   illegalTransitions?: IllegalTransitionRule[];
+  launchOffsetHours?: number;
+  shieldingMassKg?: number;
+  habitatAreaM2?: number;
+  policyProfile?: PolicyProfile;
+  launchWindowOffsetsHours?: number[];
+  scenarioType?: ScenarioType;
+  reentrySafeAngleMinDeg?: number;
+  reentrySafeAngleMaxDeg?: number;
+  reentrySafeVelocityMinMs?: number;
+  reentrySafeVelocityMaxMs?: number;
 }
 
 export interface MissionTimelinePoint {
@@ -237,6 +258,27 @@ export interface OptimizationResult {
     communicationViolations: number;
     radiationViolations: number;
   };
+  launchWindows: LaunchWindowEvaluation[];
+  shieldingTradeoff: ShieldingTradeoff;
+  deltaVPhases: DeltaVPhaseBreakdown;
+  uncertaintySummary: {
+    cost: DistributionSummary;
+    risk: DistributionSummary;
+    success: DistributionSummary;
+  };
+  policy: {
+    profile: PolicyProfile;
+    rationale: string;
+  };
+  reentry: ReentryEvaluation;
+  gravityAssist: GravityAssistResult;
+  telemetry: TelemetryTimeline;
+  scenario: {
+    type: ScenarioType;
+    summary: string;
+  };
+  missionConfidence: MissionConfidence;
+  stakeholderView: StakeholderView;
 }
 
 const G = 6.67430e-11;
@@ -258,6 +300,17 @@ function timelineToRadiationSamples(timeline: MissionTimelinePoint[]): Radiation
     nodeName: point.nodeName,
     radiation: point.radiation,
   }));
+}
+
+function inferReturnFlightPathAngleDeg(timeline: MissionTimelinePoint[], nodes: Map<string, OptimizerNode>): number {
+  if (timeline.length < 2) return -6.4;
+  const last = timeline[timeline.length - 1];
+  const prev = timeline[timeline.length - 2];
+  const lastAlt = nodes.get(last.nodeId)?.altitude_km ?? 400;
+  const prevAlt = nodes.get(prev.nodeId)?.altitude_km ?? 1200;
+  const dAlt = Math.max(1, prevAlt - lastAlt);
+  const dIndex = Math.max(1, last.t - prev.t);
+  return -clamp(5 + Math.atan2(dAlt, dIndex * 450) * 180 / Math.PI, 4.5, 8.5);
 }
 
 function averageCommunicationStability(timeline: MissionTimelinePoint[]): number {
@@ -520,23 +573,25 @@ export class SimulatedAnnealer {
     radiationMultiplier: number,
     overrides?: Partial<MissionTimeProfile>,
   ): MissionTimeProfile {
+    const launchOffsetHours = overrides?.launchOffsetHours ?? 0;
+    const phaseOffset = (2 * Math.PI * launchOffsetHours) / Math.max(24 * 14, 1);
     const nodeList = [...this.nodes.values()];
     const nodeStates = Object.fromEntries(
       nodeList.map((node, index) => {
         const phase = (index + 1) * 0.65;
         const communicationWindow = Array.from({ length: horizon }, (_, t) =>
-          (0.5 + 0.5 * Math.sin((2 * Math.PI * (t + 1)) / Math.max(horizon, 2) + phase)) < (1 - node.commScore * 0.95)
+          (0.5 + 0.5 * Math.sin((2 * Math.PI * (t + 1)) / Math.max(horizon, 2) + phase + phaseOffset)) < (1 - node.commScore * 0.95)
             ? 0
             : 1,
         );
         const communicationReliability = Array.from({ length: horizon }, (_, t) =>
-          clamp(node.commScore * (0.85 + 0.2 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase / 2)), 0.05, 1),
+          clamp(node.commScore * (0.85 + 0.2 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase / 2 + phaseOffset)), 0.05, 1),
         );
         const radiationField = Array.from({ length: horizon }, (_, t) =>
-          clamp(node.radiation * radiationMultiplier * (0.88 + 0.28 * Math.sin((2 * Math.PI * t) / Math.max(horizon, 2) + phase)), 0, 2),
+          clamp(node.radiation * radiationMultiplier * (0.88 + 0.28 * Math.sin((2 * Math.PI * t) / Math.max(horizon, 2) + phase + phaseOffset)), 0, 2),
         );
         const fuelMultiplier = Array.from({ length: horizon }, (_, t) =>
-          1 + 0.08 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase),
+          1 + 0.08 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase + phaseOffset),
         );
 
         return [
@@ -551,11 +606,28 @@ export class SimulatedAnnealer {
       }),
     ) as Record<string, TimeDependentNodeState>;
 
-    return {
+    const baseProfile: MissionTimeProfile = {
       horizon,
       radiationThreshold: overrides?.radiationThreshold ?? 0.75,
       nodeStates: { ...nodeStates, ...(overrides?.nodeStates ?? {}) },
       illegalTransitions: overrides?.illegalTransitions ?? [],
+      launchOffsetHours,
+      shieldingMassKg: overrides?.shieldingMassKg ?? 0,
+      habitatAreaM2: overrides?.habitatAreaM2 ?? 18,
+      policyProfile: overrides?.policyProfile ?? 'BALANCED',
+      launchWindowOffsetsHours: overrides?.launchWindowOffsetsHours ?? [0, 6, 12, 24],
+      scenarioType: overrides?.scenarioType ?? 'NOMINAL',
+      reentrySafeAngleMinDeg: overrides?.reentrySafeAngleMinDeg,
+      reentrySafeAngleMaxDeg: overrides?.reentrySafeAngleMaxDeg,
+      reentrySafeVelocityMinMs: overrides?.reentrySafeVelocityMinMs,
+      reentrySafeVelocityMaxMs: overrides?.reentrySafeVelocityMaxMs,
+    };
+
+    const scenario = applyScenario(baseProfile as Parameters<typeof applyScenario>[0], baseProfile.scenarioType ?? 'NOMINAL');
+    return {
+      ...baseProfile,
+      nodeStates: scenario.profile.nodeStates,
+      launchOffsetHours: scenario.profile.launchOffsetHours ?? baseProfile.launchOffsetHours,
     };
   }
 
@@ -659,6 +731,14 @@ export class SimulatedAnnealer {
     end: string,
     uncertainty: MissionUncertaintySample = { fuelScale: 1, radiationScale: 1, communicationScale: 1 },
   ): MissionCostBreakdown {
+    const shielding = computeShieldingEffect(missionProfile.shieldingMassKg ?? 0, {
+      habitatAreaM2: missionProfile.habitatAreaM2,
+    });
+    const massPenalty = computeMassPenalty(missionProfile.shieldingMassKg ?? 0, {
+      spacecraftMassKg: this.spacecraft_mass_kg,
+      baseDeltaV_ms: 3200,
+      isp_s: this.isp_s,
+    });
     let fuel = 0;
     let rad = 0;
     let comm = 0;
@@ -697,8 +777,8 @@ export class SimulatedAnnealer {
         0.01,
         1,
       );
-      const radiation = (state?.radiationField[t] ?? node.radiation) * uncertainty.radiationScale;
-      const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale;
+      const radiation = (state?.radiationField[t] ?? node.radiation) * uncertainty.radiationScale * shielding.radiationMultiplier;
+      const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale * massPenalty.deltaVMultiplier;
       const radiationPenalty = radiation ** 2;
       const communicationPenalty = communicationOpen ? (1 - communicationReliability) ** 2 : 8 + (1 - communicationReliability);
       const timePenalty = 1 + 0.0015 * (node.altitude_km ?? 0);
@@ -755,9 +835,11 @@ export class SimulatedAnnealer {
         );
 
         if (edge) {
-          fuel += edge.fuelCost * fuelMultiplier;
-          deltaV_ms += edge.deltaV_ms ?? 0;
-          metric.fuelPenalty += this.weights.fuel * edge.fuelCost * fuelMultiplier;
+          const gravityAssist = applyGravityAssist([path[t], path[t + 1], path[t]], [node, nextNode ?? node], (edge.deltaV_ms ?? edge.fuelCost * 45));
+          const fuelContribution = edge.fuelCost * fuelMultiplier * (gravityAssist.adjustedDeltaV_ms / Math.max(edge.deltaV_ms ?? edge.fuelCost * 45, 1));
+          fuel += fuelContribution;
+          deltaV_ms += gravityAssist.adjustedDeltaV_ms;
+          metric.fuelPenalty += this.weights.fuel * fuelContribution;
 
           if (illegalRule) {
             illegalTransitionPenalty += illegalRule.penalty ?? 650;
@@ -809,6 +891,19 @@ export class SimulatedAnnealer {
         stepCost: weightedStepCost,
         riskScore: clamp(100 * (0.45 * radiation + 0.35 * (communicationOpen ? 0.15 : 1) + 0.2 * nodeSafetyPenalty / 50), 0, 100),
       });
+    }
+
+    const reentry = evaluateReentry(path, {
+      approachVelocityMs: 10850 + 0.25 * deltaV_ms,
+      flightPathAngleDeg: inferReturnFlightPathAngleDeg(timeline, this.nodes),
+      safeAngleMinDeg: missionProfile.reentrySafeAngleMinDeg,
+      safeAngleMaxDeg: missionProfile.reentrySafeAngleMaxDeg,
+      safeVelocityMinMs: missionProfile.reentrySafeVelocityMinMs,
+      safeVelocityMaxMs: missionProfile.reentrySafeVelocityMaxMs,
+    });
+    if (!reentry.reentrySafe) {
+      safety += reentry.reentryRiskScore * 0.45;
+      violations.push(`Unsafe reentry corridor: ${reentry.violationReason}`);
     }
 
     const total =
@@ -942,15 +1037,41 @@ export class SimulatedAnnealer {
   ): OptimizationResult {
     const horizon = Math.max(2, steps);
     const missionProfile = this.buildMissionProfile(horizon, radiationMultiplier, missionProfileOverrides);
+    const baseCrewRiskParams: CrewRadiationParams = {
+      timestepHours: 6,
+      shieldingFactor: 0.74,
+      crewSensitivity: 1.08,
+      unsafeDoseRateThreshold: missionProfile.radiationThreshold,
+      acuteDoseRateThreshold: missionProfile.radiationThreshold * 1.25,
+      alpha: 0.42,
+      beta: 0.95,
+      gamma: 0.08,
+    };
+    const appliedPolicy = applyPolicy(missionProfile.policyProfile ?? 'BALANCED', {
+      weights: this.weights,
+      crewRisk: baseCrewRiskParams,
+      missionDecision: {},
+      radiationThreshold: missionProfile.radiationThreshold,
+    });
+    const effectiveWeights: Required<QUBOWeights> = {
+      fuel: appliedPolicy.weights.fuel,
+      rad: appliedPolicy.weights.rad,
+      comm: appliedPolicy.weights.comm,
+      safety: appliedPolicy.weights.safety,
+      time: appliedPolicy.weights.time ?? this.weights.time,
+    };
+    const originalWeights = this.weights;
+    this.weights = effectiveWeights;
     const uncertaintyModel: UncertaintyModel = {
       fuelSigmaFraction: 0.07,
       radiationSigmaFraction: 0.14,
       communicationSpread: 0.2,
     };
 
-    const naivePath = this.getInitialPath(start, end, horizon);
-    const naiveCostData = this.evaluatePath(naivePath, missionProfile, start, end);
-    const naiveCost = naiveCostData.total;
+    try {
+      const naivePath = this.getInitialPath(start, end, horizon);
+      const naiveCostData = this.evaluatePath(naivePath, missionProfile, start, end);
+      const naiveCost = naiveCostData.total;
 
     let currentPath = [...naivePath];
     let currentCost = this.evaluatePath(currentPath, missionProfile, start, end);
@@ -1007,7 +1128,7 @@ export class SimulatedAnnealer {
     const shortestCostData = this.evaluatePath(shortestPath, missionProfile, start, end);
     const greedyCostData = this.evaluatePath(greedyPath, missionProfile, start, end);
 
-    const qubo = buildFormalMissionQUBO(this.nodes, this.edges, this.weights, bestPath.length, missionProfile, start, end);
+    const qubo = buildFormalMissionQUBO(this.nodes, this.edges, effectiveWeights, bestPath.length, missionProfile, start, end);
     const nQubits = Math.min(bestPath.length, 6);
     const dim = Math.pow(2, nQubits);
 
@@ -1076,15 +1197,12 @@ export class SimulatedAnnealer {
       uncertaintyModel,
     );
 
+    const shieldingEffect = computeShieldingEffect(missionProfile.shieldingMassKg ?? 0, {
+      habitatAreaM2: missionProfile.habitatAreaM2,
+    });
     const crewRiskParams: CrewRadiationParams = {
-      timestepHours: 6,
-      shieldingFactor: 0.74,
-      crewSensitivity: 1.08,
-      unsafeDoseRateThreshold: missionProfile.radiationThreshold,
-      acuteDoseRateThreshold: missionProfile.radiationThreshold * 1.25,
-      alpha: 0.42,
-      beta: 0.95,
-      gamma: 0.08,
+      ...appliedPolicy.crewRisk,
+      shieldingFactor: (appliedPolicy.crewRisk.shieldingFactor ?? 0.74) * shieldingEffect.radiationMultiplier,
     };
     const bestRadiationSamples = timelineToRadiationSamples(bestCost.timeline);
     const shortestRadiationSamples = timelineToRadiationSamples(shortestCostData.timeline);
@@ -1122,12 +1240,24 @@ export class SimulatedAnnealer {
         missionProgressGain: 0.86,
       },
     ];
+    const deltaVPhases = computeDeltaVPhases(bestPath, this.edges);
+    const gravityAssist = applyGravityAssist(bestPath, [...this.nodes.values()], totalDeltaV);
+    totalDeltaV = gravityAssist.adjustedDeltaV_ms;
+    const reentry = evaluateReentry(bestPath, {
+      approachVelocityMs: 10850 + 0.22 * deltaVPhases.return,
+      flightPathAngleDeg: inferReturnFlightPathAngleDeg(bestCost.timeline, this.nodes),
+      safeAngleMinDeg: missionProfile.reentrySafeAngleMinDeg,
+      safeAngleMaxDeg: missionProfile.reentrySafeAngleMaxDeg,
+      safeVelocityMinMs: missionProfile.reentrySafeVelocityMinMs,
+      safeVelocityMaxMs: missionProfile.reentrySafeVelocityMaxMs,
+    });
     const baseMissionDecision = evaluateMissionDecision(bestPath, crewRisk, {
       forecastRemainingRisk,
-      returnFeasibility,
+      returnFeasibility: clamp(returnFeasibility - reentry.reentryRiskScore / 160, 0, 1),
       communicationStability,
       missionProgress,
       alternateCorridorAvailable: candidateDecisionPaths.some((candidate) => candidate.projectedRiskScore < crewRisk.riskScore),
+      ...appliedPolicy.missionDecision,
     });
     const missionDecision = baseMissionDecision.decision === 'CONTINUE'
       ? baseMissionDecision
@@ -1240,8 +1370,44 @@ export class SimulatedAnnealer {
     const costBenchmark = [...decisionCosts].sort((a, b) => b.riskAdjustedCost - a.riskAdjustedCost)[0];
     const preferredReplan = replanOptions[0];
     const verification = runMissionSupportVerification(bestRadiationSamples, crewRiskParams, replanOptions);
+    const launchWindows = rankLaunchWindows(
+      generateLaunchWindows(new Date().toISOString(), missionProfile.launchWindowOffsetsHours ?? [0, 6, 12, 24]),
+      {
+        baseDeltaV_ms: totalDeltaV,
+        baseRadiation: crewRisk.cumulativeDose,
+        baseCommunication: communicationStability,
+      },
+    );
+    const shieldingTradeoff = evaluateShieldingTradeoff(bestCost.timeline, {
+      shieldingMassKg: missionProfile.shieldingMassKg ?? 0,
+      habitatAreaM2: missionProfile.habitatAreaM2,
+      spacecraftMassKg: this.spacecraft_mass_kg,
+      baseDeltaV_ms: totalDeltaV,
+      isp_s: this.isp_s,
+    });
+    const uncertaintySummary = {
+      cost: summarizeDistribution(stochastic.samples.map((sample) => sample.cost)),
+      risk: summarizeDistribution(decisionMonteCarlo.map((item) => item.expectedCrewRisk)),
+      success: summarizeDistribution(decisionMonteCarlo.map((item) => item.probabilityOfSuccessfulCompletion)),
+    };
+    const telemetry = simulateMissionTimeline(bestPath, bestCost.timeline);
+    const missionConfidence = computeMissionConfidence({
+      crewRiskScore: crewRisk.riskScore,
+      expectedCost: stochastic.expectedCost,
+      costVariance: stochastic.variance,
+      successProbability: stochastic.successProbability,
+      feasibility: replanOptions[0]?.feasibility ?? returnFeasibility,
+    });
+    const stakeholderView = buildStakeholderView({
+      crewRiskScore: crewRisk.riskScore,
+      successProbability: stochastic.successProbability,
+      riskAdjustedCost: financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost,
+      confidenceScore: missionConfidence.confidenceScore,
+      embarkationDecision: crewRisk.embarkationDecision,
+      missionDecision: missionDecision.decision,
+    });
 
-    return {
+      return {
       path: bestPath,
       totalCost: bestCost.total,
       fuel: bestCost.fuel,
@@ -1344,7 +1510,27 @@ export class SimulatedAnnealer {
         communicationViolations: bestCost.violations.filter((item) => item.includes('Communication blackout')).length,
         radiationViolations: bestCost.violations.filter((item) => item.includes('Radiation threshold exceeded')).length,
       },
-    };
+      launchWindows,
+      shieldingTradeoff,
+      deltaVPhases,
+      uncertaintySummary,
+      policy: {
+        profile: missionProfile.policyProfile ?? 'BALANCED',
+        rationale: appliedPolicy.rationale,
+      },
+      reentry,
+      gravityAssist,
+      telemetry,
+      scenario: {
+        type: missionProfile.scenarioType ?? 'NOMINAL',
+        summary: applyScenario(missionProfile as Parameters<typeof applyScenario>[0], missionProfile.scenarioType ?? 'NOMINAL').summary,
+      },
+      missionConfidence,
+      stakeholderView,
+      };
+    } finally {
+      this.weights = originalWeights;
+    }
   }
 
   public runQAOAOnly(

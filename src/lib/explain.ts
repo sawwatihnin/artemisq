@@ -102,6 +102,22 @@ export function explainMissionDecision(
   return `${decision.rationale} Expected risk reduction is ${decision.expectedRiskReduction.toFixed(2)}.`;
 }
 
+/** Narrative for AI / copilot layers using reduced-order ascent summary fields. */
+export function explainAscentDynamics(summary: {
+  max_q_kpa: number;
+  peak_drag_n: number;
+  stability_score: number;
+  max_q_altitude_km: number;
+  meco_time_s: number;
+  flags: string[];
+}): string {
+  const flagText = summary.flags.length ? ` Flags: ${summary.flags.join('; ')}.` : '';
+  return (
+    `Peak dynamic pressure is ${summary.max_q_kpa.toFixed(2)} kPa near ${summary.max_q_altitude_km.toFixed(1)} km altitude, producing the dominant aerodynamic load (peak drag ${(summary.peak_drag_n / 1000).toFixed(2)} kN). ` +
+    `MECO is modeled at T+${summary.meco_time_s.toFixed(0)} s. Stability score ${summary.stability_score.toFixed(0)}/100 from heuristic loads and geometry.${flagText}`
+  );
+}
+
 export function explainFinancialRecommendation(
   preferred: {
     optionName: string;
