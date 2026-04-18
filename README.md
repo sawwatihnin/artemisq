@@ -1,184 +1,535 @@
 # ARTEMIS-Q
 
-ARTEMIS-Q is a browser-based mission analysis and vehicle simulation app for cislunar and interplanetary concept studies. It combines lightweight orbital mechanics, a reduced-order ascent dynamics model, live weather and space-weather feeds, STL-based vehicle geometry analysis, and interactive 3D visualization.
+ARTEMIS-Q is a probabilistic, crew-aware mission optimization and decision-support platform for cislunar, orbital, and interplanetary mission analysis. It combines trajectory design, sequential decision logic, uncertainty propagation, live environmental context, vehicle engineering analysis, and mission-operations tooling in a single interactive application.
 
-The current codebase is aimed at fast, physically credible analysis in real time. It is not a mission-certification tool.
+The system is designed for physically grounded concept exploration and advanced trade studies. It is not a flight-certified or mission-assurance-grade operations stack.
 
-## What It Does
+## Scope
 
-### Mission analysis
-- Builds and visualizes mission routes for lunar, orbital, and rover-style scenarios.
-- Supports imported orbital objects and TLE/state-vector driven mission graphs.
-- Generates only reachable imported edges from orbital geometry rather than treating every edge as valid.
-- Shows event-based mission stages on the trajectory instead of fixed decorative markers.
+ARTEMIS-Q now spans four operational lanes:
 
-### Ascent dynamics
-- Uses a reduced-order 2D ascent model suitable for real-time interaction.
-- Computes:
-  - exponential atmosphere, `rho(h) = rho0 * exp(-h / H)`
-  - drag, `D = 0.5 * rho * v^2 * Cd * A`
-  - dynamic pressure, `q = 0.5 * rho * v^2`
-  - thrust / drag / gravity net acceleration
-  - time-varying mass with linear propellant burn
-  - Max Q, peak drag, burnout / MECO, apogee, downrange, and stability score
-- Colors the ascent path by dynamic pressure and marks Max Q and MECO on the vehicle visualizer.
+- `Mission planning and trajectory analysis`
+- `Launch/ascent and vehicle trade studies`
+- `Near-Earth conjunction and orbital operations`
+- `Crewed cislunar mission operations`
 
-### STL-driven vehicle workflow
-- Lets users upload an STL on the Vehicle tab.
-- Derives lightweight geometry metrics from the mesh, including:
+It includes:
+
+- mission design and trajectory analysis
+- Bayesian risk updating
+- anomaly detection and response
+- robust and sequential decision support
+- flight dynamics and orbital-ops workflows
+- multi-stage vehicle engineering
+- launch/range/ground-system assessment
+- crewed operations and EVA support
+- CCSDS-style data workflow and provenance tracking
+
+## Implemented Features
+
+### Mission Design
+
+- `Launch-window solver with real constraints`
+  Uses weather, radiation, DSN coverage, transfer time, and delta-v penalties.
+  Core math: [src/lib/trajectoryDesign.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/trajectoryDesign.ts)
+  Backend: [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
+  UI: [src/App.tsx](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/App.tsx)
+
+- `Lambert / patched-conic transfer solving`
+  Uses a universal-variable Lambert solver and patched-conic capture/departure estimates.
+
+- `Plane-change and phasing optimization`
+  Computes phase residual, synodic timing, and best delay.
+
+- `Gravity-assist sequencing`
+  Ranks candidate assist sequences using body ordering and delta-v gain heuristics informed by body properties.
+
+- `Abort and contingency trajectory branches`
+  Produces free-return, direct-return, and safe-haven style branches with time-to-recovery and risk modifiers.
+
+- `Propellant margin and reserve policy modeling`
+  Converts nominal and contingency delta-v into reserve policy and rationale.
+
+### Probabilistic Risk and Decision Support
+
+- `Bayesian risk updating`
+  Prior/posterior risk updates from telemetry-like evidence.
+  Module: [src/lib/bayes.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/bayes.ts)
+
+- `Fault detection and isolation`
+  Detects comm loss, propulsion deviation, and radiation spikes.
+  Module: [src/lib/fdi.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/fdi.ts)
+
+- `Multi-stage decision tree`
+  Builds and evaluates sequential policies across future mission epochs.
+  Module: [src/lib/decisionTree.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/decisionTree.ts)
+
+- `Robust optimization`
+  Compares expected-optimal and worst-case route behavior.
+  Module: [src/lib/robust.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/robust.ts)
+
+- `Constraint relaxation engine`
+  Evaluates operationally useful constraint softening and its cost/risk impact.
+  Module: [src/lib/relaxation.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/relaxation.ts)
+
+- `Sensitivity analysis`
+  Finite-difference style perturbation analysis over mission parameters.
+  Module: [src/lib/sensitivity.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/sensitivity.ts)
+
+- `Mission robustness score`
+  Converts scenario/output variance into a robustness metric.
+  Module: [src/lib/robustness.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/robustness.ts)
+
+- `AI recommendation layer`
+  Heuristic recommendation engine for shielding, weights, and policy profile.
+  Module: [src/lib/recommender.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/recommender.ts)
+
+- `Cross-system coupling model`
+  Makes mass, delta-v, delay, dose, and cost coupling explicit.
+  Module: [src/lib/coupling.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/coupling.ts)
+
+### Flight Dynamics and Orbital Operations
+
+- `SPICE / Horizons ephemeris ingestion`
+  JPL Horizons is integrated through the backend, not directly from the browser.
+  Modules/routes:
+  - [src/lib/horizons.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/horizons.ts)
+  - [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
+
+- `Solar-system catalog and metadata`
+  Solar System OpenData ingestion plus local fallback body catalog.
+  Module: [src/lib/solarSystem.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/solarSystem.ts)
+
+- `SGP4 for Earth-orbiting objects`
+  Uses `satellite.js` propagation for TLE-driven orbital state propagation.
+  Module: [src/lib/sgp4Ops.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/sgp4Ops.ts)
+
+- `State covariance propagation`
+  Includes modeled linearized covariance growth and 95% miss-distance estimation.
+  Module: [src/lib/covariance.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/covariance.ts)
+
+- `Real conjunction screening and TCA workflow`
+  Performs propagated closest-approach screening with covariance-informed collision probability proxies.
+
+- `Maneuver design and targeting`
+  Computes impulsive targeting delta-v vector, burn duration, closing velocity, and arrival error estimate.
+  Module: [src/lib/maneuverTargeting.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/maneuverTargeting.ts)
+
+- `Navigation residual / orbit-determination support views`
+  Compares predicted vs observed state vectors for residual analysis.
+
+- `Gravity influence assessment`
+  Detects whether a planned path meaningfully enters another body’s gravitational influence regime and feeds that into optimizer and replanner.
+  Modules:
+  - [src/lib/gravityInfluence.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/gravityInfluence.ts)
+  - [src/lib/gravityRisk.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/gravityRisk.ts)
+
+### Vehicle Engineering
+
+- `True multi-stage rocket model`
+  Stage-by-stage rocket-equation analysis with stack mass propagation.
+
+- `Stage-by-stage separation logic`
+  Carries ignition, burnout, and separation masses for each stage.
+
+- `Engine-out / thrust-dispersion cases`
+  Computes degraded performance under engine-out assumptions.
+
+- `Thermal loads and TPS estimates`
+  Uses a Sutton-Graves-style estimate for peak heat flux.
+
+- `Better structural estimation from geometry`
+  Uses STL-derived surface-area/volume ratios and mesh characteristics to influence structural index.
+
+- `Tank mass fraction, CG shift, and controllability through burn`
+  Computes CG shift and controllability index stage by stage.
+
+- `STL-based aerodynamic and geometry workflow`
+  Parses user STL geometry, derives:
   - frontal area
-  - volume and surface area
-  - estimated drag coefficient
-  - center of mass / center of pressure heuristics
-  - principal axis and projected areas
-  - coarse mesh-panel loads and stress estimates
-- Feeds the derived geometry into the ascent solver so the uploaded vehicle affects drag, stability, and the optimized ascent profile.
+  - drag coefficient estimate
+  - volume
+  - surface area
+  - estimated mass
+  - principal axis
+  - center of pressure
+  - panel-load / stress-like mesh metrics
 
-### Data sources
-- Surface weather via OpenWeatherMap.
-- Space weather via NASA DONKI.
-- Solar-system body positions from the app’s internal lightweight ephemeris model.
-- Local gravity adjusted by body, latitude, altitude, date, and longitude using reduced-order body/rotation/tidal terms.
+  Modules:
+  - [src/lib/stlAnalyzer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/stlAnalyzer.ts)
+  - [src/components/AeroDynamicsVisualizer.tsx](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/components/AeroDynamicsVisualizer.tsx)
 
-### Visualization
-- 3D mission scene with launch body, target body, additional solar-system bodies, transfer paths, and radiation overlays.
-- Vehicle-page ascent visualizer driven from the actual ascent result returned by `/api/simulate`.
-- Flight-sequence panels derived from computed mission / ascent events rather than hard-coded percentages.
+### Ascent and Launch Vehicle Studies
 
-### Quantum optimization
-- Builds a reduced mission-routing QUBO from node, edge, continuity, and feasibility penalties.
-- Runs a simulated QAOA backend over a reduced binary basis for the selected route length.
-- Uses explicit complex amplitudes and a deterministic statevector evolution instead of the older display-only heuristic.
-- Exposes:
-  - layer-wise `gamma` / `beta`
-  - expected energy
-  - layer entropy and participation ratio
-  - final basis-state probability distribution
-  - qubit occupation probabilities
-  - nearest-neighbor `ZZ` correlations
-  - deterministic shot-style counts sampled from the final probability mass
-  - circuit visualization for the synthesized cost and mixer layers
-- Keeps the classical simulated annealer as the main route search engine and uses simulated QAOA for quantum-side diagnostics and comparison.
+- `Reduced-order ascent dynamics`
+  Includes atmosphere, drag, dynamic pressure, thrust-to-mass evolution, burnout, apogee, downrange, and stability scoring.
+
+- `Launch/ascent flight-path optimization`
+  Sweeps ascent profiles and returns the best candidate under max-Q and stability constraints.
+
+- `Upper-atmosphere and launch commit constraints`
+  Combines surface weather with modeled density-at-max-Q analysis.
+  Module: [src/lib/launchConstraints.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/launchConstraints.ts)
+
+### Operations
+
+- `Timeline editor with constraints and dependencies`
+  Editable task list with dependency solving, resource locking, critical-path marking, and latest-finish violation checks.
+  Module: [src/lib/missionTimeline.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/missionTimeline.ts)
+
+- `Consumables tracking: power, thermal, comm, prop, crew`
+  Tracks depletion over time.
+  Module: [src/lib/consumables.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/consumables.ts)
+
+- `Fault detection / anomaly flags`
+  FDI outputs are used to seed decision and console states.
+
+- `Go/no-go rules engine`
+  Implemented in crewed cislunar operations logic and launch constraints.
+
+- `Console for live mission status and alarms`
+  Builds alarms from anomalies, rules, consumables, and telemetry context.
+  Module: [src/lib/opsConsole.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/opsConsole.ts)
+
+- `Report generation for flight reviews`
+  Mission report and flight-review synthesis are both present.
+  Modules:
+  - [src/lib/report.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/report.ts)
+  - [src/lib/flightReview.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/flightReview.ts)
+
+### Environment and Radiation
+
+- `Radiation dose along trajectory, not just shells`
+  Includes trajectory dose accumulation, not just visual Van Allen overlays.
+  Module: [src/lib/cislunarOps.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/cislunarOps.ts)
+
+- `Earth Van Allen belt zone overlay`
+  Uses live NOAA/DONKI context with modeled zone structure.
+
+- `Trajectory intersection scoring against those zones`
+  Computes in-zone distance, crossings, weighted exposure, and normalized risk.
+  Module: [src/lib/radiationIntersection.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/radiationIntersection.ts)
+
+- `Eclipse / lighting / beta-angle analysis`
+  Included in crewed cislunar ops.
+
+- `Comms visibility to DSN / relay assets`
+  Modeled DSN visibility using station geometry and Horizons target states.
+  Module: [src/lib/groundStations.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/groundStations.ts)
+
+- `Weather and upper-atmosphere launch constraints`
+  Uses NOAA/Open-Meteo plus modeled atmosphere penalties.
+
+- `Surface environment support for Moon/Mars ops`
+  Computes local solar hour, solar elevation, gravity, temperature estimate, and dust/regolith risk.
+  Module: [src/lib/surfaceOps.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/surfaceOps.ts)
+
+### Crewed Mission Support
+
+- `Crew dose accumulation`
+- `Safe-haven logic`
+- `EVA planning constraints`
+- `Life-support margins`
+- `Entry, landing, recovery constraints`
+
+These are primarily implemented in:
+
+- [src/lib/cislunarOps.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/cislunarOps.ts)
+- [src/lib/eva.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/eva.ts)
+- [src/lib/reentry.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/reentry.ts)
+
+### Ground Systems
+
+- `Launch site database`
+- `Pad / range availability`
+- `Keep-out zones`
+- `Recovery corridor planning`
+- `Airspace / maritime exclusion integration`
+
+Implemented in:
+
+- [src/lib/groundSystems.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/groundSystems.ts)
+
+### Data Workflow
+
+- `Import/export CCSDS/OEM/OPM-like formats`
+- `Mission config versioning`
+- `Compare runs and baselines`
+- `Provenance and traceability on every output`
+
+Implemented in:
+
+- [src/lib/ccsds.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/ccsds.ts)
+- [src/App.tsx](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/App.tsx)
+
+### Quantum / Routing Layer
+
+- classical simulated annealing route search
+- QUBO construction
+- simulated QAOA diagnostics
+- circuit visualization
+- state distribution view
+
+Core implementation:
+
+- [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
+
+## Live Data Integrations
+
+### JPL Horizons
+
+Used for:
+
+- observer/vector ephemerides
+- major-body state vectors
+- system ephemerides
+- backend trajectory generation
+- launch-window geometry support
+
+### NOAA
+
+Used for:
+
+- surface weather
+- GOES proton/electron context
+- SWPC space-weather summary
+
+### NASA DONKI
+
+Used for:
+
+- flare/CME/SEP event context
+- live event-driven radiation context
+
+### Solar System OpenData
+
+Used for:
+
+- body metadata
+- catalog browsing
+- optional sky-position support
+
+### CelesTrak
+
+Used for:
+
+- Earth-orbit object data
+- external traffic screening support
+
+### EONET
+
+Used for:
+
+- Earth-event overlays relevant to range/recovery context
+
+### WebGeoCalc / SPICE Proxy
+
+Used for:
+
+- SPICE-style geometry workflow proxying where available
+
+## Frontend Surfaces
+
+The app is organized into:
+
+- `mission`
+- `physics`
+- `vehicle`
+- `quantum`
+
+Key mission panels include:
+
+- Mission Controls
+- Flight Sequence
+- Route Output
+- Body & Environment
+- Gravity Influence
+- Crewed Cislunar Ops
+- Trajectory Design
+- Timeline Editor
+- Ground Range & Recovery
+- Consumables, Surface & Console
+- Crew EVA & Flight Review
+- CCSDS & Baselines
+- Provenance Audit
+
+Physics panels include:
+
+- Keplerian Controls
+- Orbital Physics
+- Conjunction Panel
+- SGP4 Orbital Ops
+- Navigation Residuals & Launch Commit
+- Covariance & Targeting
+- Fuel Calculator
+
+Vehicle panels include:
+
+- STL Aerodynamics Visualizer
+- Vehicle Inputs
+- STL-Derived Geometry
+- Multi-Stage Vehicle
+- Best Flight Path
+- Ascent Trace
+- Stability & AI Summary
+
+## Backend Routes
+
+### Core
+
+- `POST /api/optimize`
+- `POST /api/qaoa`
+- `POST /api/simulate`
+
+### Ephemerides / astronomy
+
+- `GET /api/horizons`
+- `GET /api/horizons/trajectory`
+- `GET /api/ephemeris`
+- `GET /api/ephemeris/system`
+- `GET /api/bodies`
+- `GET /api/body/:id`
+- `GET /api/sky-positions`
+
+### Environment / radiation
+
+- `GET /api/weather`
+- `GET /api/noaa/weather`
+- `GET /api/openmeteo/weather`
+- `GET /api/space-weather`
+- `GET /api/noaa/space-weather`
+- `GET /api/donki/space-weather`
+- `GET /api/radiation/near-earth`
+- `GET /api/radiation/live`
+- `GET /api/radiation/live/latest`
+- `GET /api/radiation/live/history`
+- `POST /api/radiation/intersections`
+
+### Trajectory / orbital ops
+
+- `POST /api/trajectory/design`
+- `POST /api/sgp4/propagate`
+- `POST /api/sgp4/conjunctions`
+- `POST /api/sgp4/residuals`
+- `POST /api/sgp4/covariance`
+- `POST /api/maneuver/target`
+
+### Vehicle / launch
+
+- `POST /api/vehicle/multistage`
+- `POST /api/launch/constraints`
+
+### Ground / operations
+
+- `GET /api/ground/launch-sites`
+- `POST /api/ground/constraints`
+- `POST /api/timeline/solve`
+- `POST /api/consumables/analyze`
+- `POST /api/surface/environment`
+- `POST /api/ops/console`
+- `POST /api/eva/plan`
+- `POST /api/reports/flight-review`
+- `GET /api/dsn/visibility`
+
+### Data workflow
+
+- `POST /api/ccsds/oem`
+- `POST /api/ccsds/opm`
+- `POST /api/ccsds/import`
+- `POST /api/baselines/compare`
 
 ## Architecture
 
 ### Frontend
+
 - React
 - TypeScript
-- `@react-three/fiber` / `@react-three/drei`
+- `@react-three/fiber`
+- `@react-three/drei`
 - Recharts
 - Tailwind utilities
 
 ### Backend
-- Express server in [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
-- API endpoints for:
-  - `/api/weather`
-  - `/api/space-weather`
-  - `/api/simulate`
-  - `/api/optimize`
-  - `/api/qaoa`
 
-### Core libraries
-- Orbital mechanics and transfer visualization:
+- Express
+- TypeScript
+- Vite-integrated dev server flow through [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
+
+### Key Libraries
+
+- orbital mechanics:
   [src/lib/orbital.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/orbital.ts)
-- Celestial bodies / ephemeris helpers:
-  [src/lib/celestial.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/celestial.ts)
-- Ascent solver:
+- optimizer / QUBO / QAOA / mission logic:
+  [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
+- ascent solver:
   [src/lib/simulator.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/simulator.ts)
-- Ascent aero / stability helpers:
-  [src/lib/ascentDynamics.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/ascentDynamics.ts)
 - STL analysis:
   [src/lib/stlAnalyzer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/stlAnalyzer.ts)
-- Imported mission graph generation / conjunction:
+- imported graph / conjunction helpers:
   [src/lib/missionPlanner.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/missionPlanner.ts)
-- Mission optimization / simulated QAOA:
-  [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
 
-## Real vs Simulated
+## Mathematical / Physical Basis
 
-### Formula-driven today
-- Hohmann transfer and classical orbital math
-- Keplerian state propagation
-- Reduced-order ascent dynamics
-- Max Q, drag, Mach-regime Cd adjustment
-- Rocket-equation-linked fuel sizing
-- Body-aware gravity and atmosphere handling
-- STL-derived geometry metrics and panel-load estimates
-- Simulated statevector QAOA evolution on reduced mission Hamiltonians
+ARTEMIS-Q uses explicit mathematical models throughout the stack, including:
 
-### Still approximate
-- Planetary positions use a lightweight internal ephemeris, not JPL SPICE kernels.
-- Imported TLE handling is approximate and not a full SGP4 pipeline.
-- Conjunction analysis is materially better than the original shell heuristic, but it is still not full operational OD / covariance tooling.
-- STL structural and aerodynamic analysis is reduced-order engineering estimation, not CFD or FEA.
-- The quantum / QAOA layer is still simulated and not connected to hardware backends such as IBM Quantum, IonQ, Braket, or D-Wave.
+- rocket equation / propellant mass relationships
+- universal-variable Lambert solving
+- patched-conic departure/capture estimates
+- SGP4 propagation
+- residual / covariance growth calculations
+- dynamic pressure and drag
+- exponential atmosphere
+- radiation dose accumulation
+- eclipse and shadow geometry
+- range/exclusion and corridor geometry
+- multi-stage mass propagation and TPS heat-flux estimation
 
-## Quantum Model
+Not every subsystem is high-fidelity flight software. The code uses a mix of:
 
-The quantum layer is implemented as a simulated backend, not a placeholder animation.
+- live upstream data where available
+- reduced-order but explicit physics
+- mission-analysis heuristics where a public operational feed does not exist
 
-### What is encoded
-- A reduced mission-routing objective is mapped into a QUBO-style binary energy model.
-- Basis states represent reduced binary occupancy / path selections over the chosen route horizon.
-- Infeasible states receive a large penalty so they are suppressed in the simulated distribution.
+## Realism Boundary
 
-### What the simulator does
-- Starts from a uniform superposition over the reduced basis.
-- Applies a diagonal cost phase:
-  `exp(-i * gamma * C(z))`
-- Applies mixer rotations as repeated single-qubit X-rotations:
-  `exp(-i * beta * X)`
-- Performs a small grid search over `gamma` and `beta` per layer.
-- Computes the final expectation value from the statevector probabilities.
-- Tracks per-layer entropy and participation ratio to show how concentrated or spread the simulated wavefunction is.
-- Computes qubit marginals `P(|1>)` for each reduced qubit.
-- Computes nearest-neighbor `⟨ZiZj⟩` correlations from the final state distribution.
-- Converts final probabilities into deterministic shot-like counts for UI display.
+What is real and implemented:
 
-### What it does not do
-- No real quantum hardware execution
-- No noise model
-- No pulse-level control
-- No provider SDK such as Qiskit, Cirq, Braket, or PennyLane
-- No claim of quantum speedup
+- actual backend routes
+- actual mathematical models
+- actual live data integrations
+- actual UI wiring to those routes
+- actual type-checked and buildable code
 
-### Where it lives
-- Core implementation:
-  [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
-- Backend API wiring:
-  [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
-- Quantum UI:
-  [src/App.tsx](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/App.tsx)
+What remains modeled rather than flight-certified:
 
-### Reported metrics
-- `Approx Ratio`: final simulated QAOA energy divided by the best feasible basis energy in the reduced model
-- `Optimal Mass`: probability mass assigned to the best feasible basis state
-- `Expected Saving`: simulated QAOA energy improvement relative to the naive route baseline
-- `Entropy`: Shannon entropy of the final basis-state distribution
-- `Participation Ratio`: effective number of basis states carrying meaningful probability mass
-- `Avg Weight`: expected Hamming weight of sampled reduced-basis states
-- `Qubit Marginals`: probability that each reduced qubit is measured as `1`
-- `ZZ Correlations`: nearest-neighbor computational-basis correlations across reduced qubits
-- `Shots`: deterministic sample counts derived from the final statevector distribution for visualization only
+- DSN visibility is modeled from station geometry and Horizons states, not official DSN scheduling
+- covariance propagation is reduced-order, not a full OD covariance engine
+- maneuver targeting is impulsive/reduced-order, not a full finite-burn targeting suite
+- structural/aero estimates from STL are engineering approximations, not CFD or FEA
+- surface environment and range scheduling are physically informed but not mission-authority systems
+- quantum routing remains simulated, not hardware execution
 
-## Setup
+## Environment Variables
 
-### Prerequisites
-- Node.js 18+
-- npm
+Create a `.env` file in the project root as needed.
 
-### Environment variables
-Create a `.env` file in the project root with:
+Useful variables:
 
 ```bash
-NASA_API_KEY=your_nasa_key
-OPENWEATHER_API_KEY=your_openweather_key
 PORT=3000
+NASA_API_KEY=your_donki_key
+SOLAR_SYSTEM_OPENDATA_TOKEN=your_token_if_required
+NOAA_USER_AGENT=ARTEMIS-Q/1.0 (local mission console)
 ```
 
-If the API keys are missing, live endpoints should report unavailable / upstream errors rather than silently returning fake weather.
+Notes:
 
-## Run
+- JPL Horizons does not require an API key for the public query flow used here.
+- NOAA NWS / SWPC routes do not require an API key in the current integration.
+- DONKI uses `NASA_API_KEY` when configured.
+- Solar System OpenData may require a bearer token depending on current service policy.
+
+## Setup
 
 Install dependencies:
 
@@ -186,45 +537,23 @@ Install dependencies:
 npm install
 ```
 
-Start the app:
+Run the app:
 
 ```bash
 npm run dev
 ```
 
-Build for production:
+Build:
 
 ```bash
 npm run build
 ```
 
-Type-check / lint:
+Type-check:
 
 ```bash
 npm run lint
 ```
-
-## Vehicle Workflow
-
-1. Open the `Vehicle` tab.
-2. Upload an STL.
-3. Review mesh-derived area, Cd, mass estimate, and stability hints.
-4. Run `Run STL-Based Ascent Optimization`.
-5. Inspect:
-   - ascent path
-   - Max Q
-   - MECO
-   - telemetry
-   - stability score
-   - stress / load outputs
-
-If no STL is uploaded, the app falls back to a reference vehicle so the ascent solver can still run.
-
-## Accuracy Notes
-
-- The app now places ascent and mission stage markers from computed event times rather than arbitrary progress fractions.
-- The vehicle visualizer is driven by the ascent solution returned from the backend, including STL-derived geometry inputs.
-- The tool is intended for concept exploration and interactive trade studies. It should not be used as a substitute for SPICE-based flight design, SGP4-grade space surveillance workflows, CFD, or FEA.
 
 ## Verification
 
@@ -235,4 +564,30 @@ npm run lint
 npm run build
 ```
 
-Both should pass. The current production build may still emit a large bundle-size warning from Vite.
+These should pass.
+
+The production build may still emit a Vite large-bundle warning.
+
+## Recommended Next Work
+
+If the goal is to keep increasing realism instead of broadening scope, the next upgrades should be:
+
+1. higher-fidelity official contact/scheduling data for DSN or relay assets
+2. deeper orbit-determination / covariance modeling
+3. finite-burn maneuver targeting
+4. richer launch-range scheduling and geospatial exclusion layers
+5. formal runtime resilience for live upstream feeds
+
+## Summary
+
+ARTEMIS-Q is no longer just a mission-route visualizer. It is now a broad mission-intelligence workbench covering:
+
+- mission planning and transfer design
+- orbital operations and conjunction support
+- crew-aware cislunar operations
+- vehicle and ascent trade studies
+- ground/range and recovery planning
+- live environmental context
+- traceable import/export and baseline comparison
+
+with explicit mathematical/physics logic and live-data integration where practical.
