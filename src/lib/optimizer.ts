@@ -130,6 +130,8 @@ export interface QAOALayer {
   gamma: number;
   beta: number;
   energyExpectation: number;
+  entropyBits?: number;
+  participationRatio?: number;
 }
 
 export interface DistributionEntry {
@@ -137,6 +139,7 @@ export interface DistributionEntry {
   probability: number;
   energy: number;
   isOptimal: boolean;
+  shotCount?: number;
 }
 
 export interface QAOAResult {
@@ -147,6 +150,22 @@ export interface QAOAResult {
   qaoaMatchPct?: number;
   classicalSAImprovement_pct?: number;
   distribution?: DistributionEntry[];
+  simulation?: {
+    backend: 'statevector';
+    shots: number;
+    qubits: number;
+    basisStates: number;
+    optimalProbabilityPct: number;
+    gammaGridSteps: number;
+    betaGridSteps: number;
+  };
+  diagnostics?: {
+    entropyBits: number;
+    participationRatio: number;
+    averageHammingWeight: number;
+    qubitMarginals: number[];
+    zzCorrelations: number[];
+  };
 }
 
 export interface TimeDependentNodeState {
@@ -551,20 +570,30 @@ export function buildFormalMissionQUBO(
   return { matrix: Q, nonZeroTerms };
 }
 
+interface ComplexAmplitude {
+  re: number;
+  im: number;
+}
+
+const QAOA_GAMMA_STEPS = 14;
+const QAOA_BETA_STEPS = 12;
+const SIMULATED_QAOA_SHOTS = 2048;
+
+/**
+ * Simulated QAOA using an explicit complex statevector on a reduced basis.
+ * The cost unitary is applied as a diagonal phase e^{-i gamma C(z)} and the
+ * mixer unitary is approximated by successive single-qubit X-rotations.
+ */
 function simulateQAOA(energies: number[], nQubits: number, p: number = 3): {
   layers: QAOALayer[];
   finalEnergy: number;
-  optGamma: number[];
-  optBeta: number[];
-  finalAmps: number[];
+  finalProbabilities: number[];
 } {
   const dim = Math.pow(2, nQubits);
   const actualDim = Math.min(dim, energies.length);
-  let amps = new Array(actualDim).fill(1 / Math.sqrt(actualDim));
+  let state = buildUniformState(actualDim);
 
   const layers: QAOALayer[] = [];
-  const optGamma: number[] = [];
-  const optBeta: number[] = [];
   let bestEnergy = Infinity;
 
   for (let layer = 0; layer < p; layer++) {
@@ -572,12 +601,12 @@ function simulateQAOA(energies: number[], nQubits: number, p: number = 3): {
     let bestB = 0;
     let bestE = Infinity;
 
-    for (let gi = 0; gi <= 8; gi++) {
-      for (let bi = 0; bi <= 8; bi++) {
-        const gamma = (gi / 8) * Math.PI;
-        const beta = (bi / 8) * (Math.PI / 2);
-        const testAmps = applyQAOALayer([...amps], energies, gamma, beta, nQubits, actualDim);
-        const E = expectationValue(testAmps, energies);
+    for (let gi = 0; gi <= QAOA_GAMMA_STEPS; gi++) {
+      for (let bi = 0; bi <= QAOA_BETA_STEPS; bi++) {
+        const gamma = (gi / QAOA_GAMMA_STEPS) * Math.PI;
+        const beta = (bi / QAOA_BETA_STEPS) * (Math.PI / 2);
+        const testState = applyQAOALayer(state, energies, gamma, beta, nQubits, actualDim);
+        const E = expectationValue(testState, energies);
         if (E < bestE) {
           bestE = E;
           bestG = gamma;
@@ -586,41 +615,157 @@ function simulateQAOA(energies: number[], nQubits: number, p: number = 3): {
       }
     }
 
-    amps = applyQAOALayer(amps, energies, bestG, bestB, nQubits, actualDim);
-    const E = expectationValue(amps, energies);
-    optGamma.push(bestG);
-    optBeta.push(bestB);
-    layers.push({ gamma: bestG, beta: bestB, energyExpectation: E });
+    state = applyQAOALayer(state, energies, bestG, bestB, nQubits, actualDim);
+    const probabilities = state.map(probabilityAmplitude);
+    const E = expectationValue(state, energies);
+    layers.push({
+      gamma: bestG,
+      beta: bestB,
+      energyExpectation: E,
+      entropyBits: shannonEntropyBits(probabilities),
+      participationRatio: participationRatio(probabilities),
+    });
     if (E < bestEnergy) bestEnergy = E;
   }
 
-  return { layers, finalEnergy: bestEnergy, optGamma, optBeta, finalAmps: amps };
+  return {
+    layers,
+    finalEnergy: bestEnergy,
+    finalProbabilities: state.map(probabilityAmplitude),
+  };
 }
 
-function applyQAOALayer(amps: number[], energies: number[], gamma: number, beta: number, nQubits: number, dim: number): number[] {
-  const phasedAmps = amps.map((amplitude, index) => amplitude * Math.abs(Math.cos(gamma * (energies[index] ?? 0))));
-  let result = [...phasedAmps];
+function buildUniformState(dim: number): ComplexAmplitude[] {
+  const amplitude = 1 / Math.sqrt(Math.max(1, dim));
+  return Array.from({ length: dim }, () => ({ re: amplitude, im: 0 }));
+}
 
-  for (let q = 0; q < Math.min(nQubits, 6); q++) {
-    const newAmps = new Array(dim).fill(0);
-    for (let x = 0; x < dim; x++) {
-      const flipped = x ^ (1 << q);
-      if (flipped < dim) {
-        newAmps[x] += result[x] * Math.cos(beta);
-        newAmps[x] += result[flipped] * (-Math.sin(beta));
-      } else {
-        newAmps[x] = result[x];
-      }
-    }
-    const norm = Math.sqrt(newAmps.reduce((sum, amplitude) => sum + amplitude * amplitude, 0)) || 1;
-    result = newAmps.map((amplitude) => amplitude / norm);
+function applyQAOALayer(
+  state: ComplexAmplitude[],
+  energies: number[],
+  gamma: number,
+  beta: number,
+  nQubits: number,
+  dim: number,
+): ComplexAmplitude[] {
+  const phased = state.map((amp, index) => applyPhase(amp, -(gamma * (energies[index] ?? 0))));
+  let result = phased;
+  for (let q = 0; q < nQubits; q++) {
+    result = applyMixerRotation(result, q, beta, dim);
+  }
+  return normalizeState(result);
+}
+
+function applyPhase(amplitude: ComplexAmplitude, angle: number): ComplexAmplitude {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return {
+    re: amplitude.re * c - amplitude.im * s,
+    im: amplitude.re * s + amplitude.im * c,
+  };
+}
+
+function applyMixerRotation(state: ComplexAmplitude[], qubit: number, beta: number, dim: number): ComplexAmplitude[] {
+  const result = state.map((amp) => ({ ...amp }));
+  const c = Math.cos(beta);
+  const s = Math.sin(beta);
+
+  for (let base = 0; base < dim; base++) {
+    if (((base >> qubit) & 1) === 1) continue;
+    const flipped = base | (1 << qubit);
+    if (flipped >= dim) continue;
+    const a0 = state[base];
+    const a1 = state[flipped];
+    result[base] = {
+      re: c * a0.re + s * a1.im,
+      im: c * a0.im - s * a1.re,
+    };
+    result[flipped] = {
+      re: s * a0.im + c * a1.re,
+      im: -s * a0.re + c * a1.im,
+    };
   }
 
   return result;
 }
 
-function expectationValue(amps: number[], energies: number[]): number {
-  return amps.reduce((sum, amplitude, index) => sum + amplitude * amplitude * (energies[index] ?? 0), 0);
+function normalizeState(state: ComplexAmplitude[]): ComplexAmplitude[] {
+  const norm = Math.sqrt(state.reduce((sum, amp) => sum + probabilityAmplitude(amp), 0)) || 1;
+  return state.map((amp) => ({
+    re: amp.re / norm,
+    im: amp.im / norm,
+  }));
+}
+
+function probabilityAmplitude(amplitude: ComplexAmplitude): number {
+  return amplitude.re * amplitude.re + amplitude.im * amplitude.im;
+}
+
+function expectationValue(state: ComplexAmplitude[], energies: number[]): number {
+  return state.reduce((sum, amplitude, index) => sum + probabilityAmplitude(amplitude) * (energies[index] ?? 0), 0);
+}
+
+function deterministicShotCounts(probabilities: number[], shots: number): number[] {
+  const raw = probabilities.map((probability) => probability * shots);
+  const counts = raw.map((value) => Math.floor(value));
+  let remaining = shots - counts.reduce((sum, value) => sum + value, 0);
+  const order = raw
+    .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let i = 0; i < order.length && remaining > 0; i++, remaining--) {
+    counts[order[i].index] += 1;
+  }
+  return counts;
+}
+
+function shannonEntropyBits(probabilities: number[]): number {
+  return probabilities.reduce((sum, p) => (p > 1e-12 ? sum - p * Math.log2(p) : sum), 0);
+}
+
+function participationRatio(probabilities: number[]): number {
+  const inverse = probabilities.reduce((sum, p) => sum + p * p, 0);
+  return inverse > 1e-12 ? 1 / inverse : 0;
+}
+
+function averageHammingWeight(probabilities: number[], nQubits: number): number {
+  let total = 0;
+  for (let state = 0; state < probabilities.length; state++) {
+    total += probabilities[state] * bitCount(state & ((1 << nQubits) - 1));
+  }
+  return total;
+}
+
+function computeQubitMarginals(probabilities: number[], nQubits: number): number[] {
+  return Array.from({ length: nQubits }, (_, qubit) => {
+    let p1 = 0;
+    for (let state = 0; state < probabilities.length; state++) {
+      if ((state >> qubit) & 1) p1 += probabilities[state];
+    }
+    return p1;
+  });
+}
+
+function computeZZCorrelations(probabilities: number[], nQubits: number): number[] {
+  const pairs = Math.max(0, nQubits - 1);
+  return Array.from({ length: pairs }, (_, qubit) => {
+    let expectation = 0;
+    for (let state = 0; state < probabilities.length; state++) {
+      const zi = ((state >> qubit) & 1) === 1 ? -1 : 1;
+      const zj = ((state >> (qubit + 1)) & 1) === 1 ? -1 : 1;
+      expectation += probabilities[state] * zi * zj;
+    }
+    return expectation;
+  });
+}
+
+function bitCount(value: number): number {
+  let count = 0;
+  let x = value;
+  while (x) {
+    x &= x - 1;
+    count++;
+  }
+  return count;
 }
 
 export class SimulatedAnnealer {
@@ -1251,27 +1396,34 @@ export class SimulatedAnnealer {
     const nQubits = Math.min(bestPath.length, 6);
     const dim = Math.pow(2, nQubits);
 
-    const basisEnergies = Array.from({ length: dim }, (_, x) => {
-      let energy = 0;
-      for (let q = 0; q < nQubits; q++) {
-        if (x & (1 << q)) energy += bestCost.timeline[q]?.stepCost ?? 0;
-      }
-      return energy;
-    });
+    const infeasiblePenalty = 1e6;
+    const basisEnergies = this.buildBasisEnergiesFromTimeline(bestCost.timeline, nQubits, dim, infeasiblePenalty);
 
     const qaoa = simulateQAOA(basisEnergies, nQubits, qaoaDepth);
-    const classicalMin = Math.min(...basisEnergies);
+    const feasibleEnergies = basisEnergies.filter((energy) => energy < infeasiblePenalty);
+    const classicalMin = Math.min(...feasibleEnergies);
     const approxRatio = classicalMin !== 0 ? qaoa.finalEnergy / classicalMin : 1.0;
-    const quantumAdvantage_pct = Math.max(0, (1 - bestCost.total / Math.max(naiveCost, 1e-9)) * 100);
+    const quantumAdvantage_pct = Math.max(0, (1 - qaoa.finalEnergy / Math.max(naiveCost, 1e-9)) * 100);
     const optimalIdx = basisEnergies.reduce((best, energy, index) => (
       energy < basisEnergies[best] ? index : best
     ), 0);
+    const optimalProbability = qaoa.finalProbabilities[optimalIdx] ?? 0;
+    const shotCounts = deterministicShotCounts(qaoa.finalProbabilities, SIMULATED_QAOA_SHOTS);
+    const diagnostics = {
+      entropyBits: shannonEntropyBits(qaoa.finalProbabilities),
+      participationRatio: participationRatio(qaoa.finalProbabilities),
+      averageHammingWeight: averageHammingWeight(qaoa.finalProbabilities, nQubits),
+      qubitMarginals: computeQubitMarginals(qaoa.finalProbabilities, nQubits),
+      zzCorrelations: computeZZCorrelations(qaoa.finalProbabilities, nQubits),
+    };
     const distribution: DistributionEntry[] = Array.from({ length: dim }, (_, x) => ({
       state: x.toString(2).padStart(nQubits, '0'),
-      probability: qaoa.finalAmps[x] ? qaoa.finalAmps[x] ** 2 : 0,
+      probability: qaoa.finalProbabilities[x] ?? 0,
       energy: basisEnergies[x],
       isOptimal: x === optimalIdx,
+      shotCount: shotCounts[x] ?? 0,
     }))
+      .filter((entry) => entry.energy < infeasiblePenalty)
       .sort((a, b) => b.probability - a.probability)
       .slice(0, 16);
     const fullCircuit = qaoa.layers.flatMap((layer, index) =>
@@ -1926,9 +2078,19 @@ export class SimulatedAnnealer {
         finalEnergy: qaoa.finalEnergy,
         approximationRatio: approxRatio,
         quantumAdvantage_pct,
-        qaoaMatchPct: approxRatio > 0 ? Math.min(100, 100 / approxRatio) : 100,
-        classicalSAImprovement_pct: quantumAdvantage_pct,
+        qaoaMatchPct: optimalProbability * 100,
+        classicalSAImprovement_pct: Math.max(0, (1 - bestCost.total / Math.max(naiveCost, 1e-9)) * 100),
         distribution,
+        simulation: {
+          backend: 'statevector',
+          shots: SIMULATED_QAOA_SHOTS,
+          qubits: nQubits,
+          basisStates: dim,
+          optimalProbabilityPct: optimalProbability * 100,
+          gammaGridSteps: QAOA_GAMMA_STEPS + 1,
+          betaGridSteps: QAOA_BETA_STEPS + 1,
+        },
+        diagnostics,
       },
       physics: {
         hohmannDeltaV: hohmann.dvTotal,
@@ -2115,11 +2277,21 @@ export class SimulatedAnnealer {
     const optimalIdx = basisEnergies.reduce((best, energy, index) => (
       energy < basisEnergies[best] ? index : best
     ), 0);
+    const optimalProbability = qaoa.finalProbabilities[optimalIdx] ?? 0;
+    const shotCounts = deterministicShotCounts(qaoa.finalProbabilities, SIMULATED_QAOA_SHOTS);
+    const diagnostics = {
+      entropyBits: shannonEntropyBits(qaoa.finalProbabilities),
+      participationRatio: participationRatio(qaoa.finalProbabilities),
+      averageHammingWeight: averageHammingWeight(qaoa.finalProbabilities, nQubits),
+      qubitMarginals: computeQubitMarginals(qaoa.finalProbabilities, nQubits),
+      zzCorrelations: computeZZCorrelations(qaoa.finalProbabilities, nQubits),
+    };
     const distribution: DistributionEntry[] = Array.from({ length: dim }, (_, x) => ({
       state: x.toString(2).padStart(nQubits, '0'),
-      probability: qaoa.finalAmps[x] ? qaoa.finalAmps[x] ** 2 : 0,
+      probability: qaoa.finalProbabilities[x] ?? 0,
       energy: basisEnergies[x],
       isOptimal: x === optimalIdx,
+      shotCount: shotCounts[x] ?? 0,
     }))
       .filter((entry) => entry.energy < infeasiblePenalty)
       .sort((a, b) => b.probability - a.probability)
@@ -2131,9 +2303,19 @@ export class SimulatedAnnealer {
         finalEnergy: qaoa.finalEnergy,
         approximationRatio: approxRatio,
         quantumAdvantage_pct: 0,
-        qaoaMatchPct: approxRatio > 0 ? Math.min(100, 100 / approxRatio) : 100,
+        qaoaMatchPct: optimalProbability * 100,
         classicalSAImprovement_pct: 0,
         distribution,
+        simulation: {
+          backend: 'statevector',
+          shots: SIMULATED_QAOA_SHOTS,
+          qubits: nQubits,
+          basisStates: dim,
+          optimalProbabilityPct: optimalProbability * 100,
+          gammaGridSteps: QAOA_GAMMA_STEPS + 1,
+          betaGridSteps: QAOA_BETA_STEPS + 1,
+        },
+        diagnostics,
       },
       circuitMap: qaoa.layers.flatMap((layer, index) =>
         this.generateQAOACircuit(path, syntheticTimeline, layer.gamma, layer.beta, index),

@@ -6,10 +6,13 @@ import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
 import { fetchCelestrakGp, fetchCelestrakTrafficAssessment } from "./src/lib/celestrak.ts";
+import { compareMissionBaselines, exportOem, exportOpm, importOemLike, versionMissionConfig } from "./src/lib/ccsds.ts";
 import { analyzeCrewedCislunarMissionOps } from "./src/lib/cislunarOps.ts";
+import { analyzeConsumables } from "./src/lib/consumables.ts";
 import { fetchDonkiSpaceWeatherSummary } from "./src/lib/donki.ts";
 import { fetchEonetEvents } from "./src/lib/eonet.ts";
 import { assessTrajectoryGravityInfluence } from "./src/lib/gravityInfluence.ts";
+import { assessGroundConstraints, LAUNCH_SITES } from "./src/lib/groundSystems.ts";
 import { computeDsnVisibility } from "./src/lib/groundStations.ts";
 import {
   buildHorizonsTrajectory,
@@ -19,14 +22,31 @@ import {
   fetchHorizonsTransferEstimate,
   getHorizonsMajorBodyId,
 } from "./src/lib/horizons.ts";
+import { analyzeLaunchConstraints } from "./src/lib/launchConstraints.ts";
+import { solveMissionTimeline } from "./src/lib/missionTimeline.ts";
 import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
 import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
+import { buildOpsConsole } from "./src/lib/opsConsole.ts";
 import { getLatestRadiationSnapshot, getRadiationSnapshotHistory, ingestLiveRadiationSnapshot } from "./src/lib/radiationIngest.ts";
 import { assessTrajectoryRadiationIntersections } from "./src/lib/radiationIntersection.ts";
 import { buildNearEarthRadiationEnvironment } from "./src/lib/radiationModel.ts";
 import { fetchSolarBodies, fetchSolarBody, fetchSolarSkyPositions, mergeCelestialFallback } from "./src/lib/solarSystem.ts";
+import { analyzeMultiStageVehicle } from "./src/lib/multiStage.ts";
+import { analyzeSurfaceEnvironment } from "./src/lib/surfaceOps.ts";
 import { fetchGoesRadiationSummary } from "./src/lib/swpcGoes.ts";
+import { computeNavigationResiduals, propagateTles, screenSgp4Conjunctions } from "./src/lib/sgp4Ops.ts";
 import { getLatestTelemetryFrame, getTelemetryHistory, ingestTelemetryFrame } from "./src/lib/telemetryHub.ts";
+import {
+  buildAbortTrajectoryBranches,
+  computeReservePolicy,
+  estimatePatchedConicTransfer,
+  inferBodyParkingRadiusKm,
+  inferTransferTimeDaysFromDistance,
+  optimizePlaneChangeAndPhasing,
+  sequenceGravityAssists,
+  solveLambertUniversal,
+  solveLaunchWindowsWithConstraints,
+} from "./src/lib/trajectoryDesign.ts";
 import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webgeocalc.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -409,6 +429,312 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Cislunar ops analysis failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.post("/api/trajectory/design", async (req, res) => {
+    try {
+      const launchDate = String(req.body?.launchDate || '');
+      const launchBodyId = String(req.body?.launchBodyId || 'earth').toLowerCase();
+      const targetBodyId = String(req.body?.targetBodyId || 'moon').toLowerCase();
+      const arrivalDate = String(req.body?.arrivalDate || '');
+      const departureAltitudeKm = Number(req.body?.departureAltitudeKm ?? 400);
+      const arrivalAltitudeKm = Number(req.body?.arrivalAltitudeKm ?? 100);
+      const offsetsHours = Array.isArray(req.body?.offsetsHours) ? req.body.offsetsHours.map(Number) : [0, 6, 12, 24, 36];
+      const gravityAssistCandidates = Array.isArray(req.body?.gravityAssistCandidates) ? req.body.gravityAssistCandidates.map(String) : ['venus', 'earth', 'moon', 'mars'];
+      if (!launchDate) {
+        return res.status(400).json({ error: 'launchDate is required' });
+      }
+
+      const departure = await fetchHorizonsVectors({
+        COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
+        CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
+        START_TIME: `'${launchDate}'`,
+        STOP_TIME: `'${launchDate}'`,
+        STEP_SIZE: `'1 d'`,
+      });
+      const distanceKm = Math.hypot(departure[0]?.x ?? 384400, departure[0]?.y ?? 0, departure[0]?.z ?? 0);
+      const transferDays = arrivalDate
+        ? Math.max(1, (Date.parse(arrivalDate) - Date.parse(launchDate)) / 86400000)
+        : inferTransferTimeDaysFromDistance(distanceKm, targetBodyId === 'moon' ? 1.1 : 24);
+      const arrivalEpoch = new Date(Date.parse(launchDate) + transferDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+      const arrival = await fetchHorizonsVectors({
+        COMMAND: `'${getHorizonsMajorBodyId(targetBodyId)}'`,
+        CENTER: `'500@${getHorizonsMajorBodyId(launchBodyId)}'`,
+        START_TIME: `'${arrivalEpoch}'`,
+        STOP_TIME: `'${arrivalEpoch}'`,
+        STEP_SIZE: `'1 d'`,
+      });
+
+      const lambert = solveLambertUniversal({
+        r1Km: [departure[0]?.x ?? 0, departure[0]?.y ?? 0, departure[0]?.z ?? 0],
+        r2Km: [arrival[0]?.x ?? distanceKm, arrival[0]?.y ?? 0, arrival[0]?.z ?? 0],
+        tofSec: transferDays * 86400,
+        muKm3S2: launchBodyId === 'earth' && targetBodyId === 'moon' ? 398600.4418 : 132712440018,
+      });
+      const patchedConic = estimatePatchedConicTransfer({
+        lambert,
+        departureBodyMuKm3S2: launchBodyId === 'earth' ? 398600.4418 : 4902.8001,
+        arrivalBodyMuKm3S2: targetBodyId === 'moon' ? 4902.8001 : 42828.37,
+        departureParkingRadiusKm: inferBodyParkingRadiusKm(launchBodyId, departureAltitudeKm),
+        arrivalParkingRadiusKm: inferBodyParkingRadiusKm(targetBodyId, arrivalAltitudeKm),
+      });
+      const phasing = optimizePlaneChangeAndPhasing({
+        fromInclinationDeg: Number(req.body?.fromInclinationDeg ?? 28.5),
+        toInclinationDeg: Number(req.body?.toInclinationDeg ?? 90),
+        orbitalSpeedKmS: Math.max(lambert.departureSpeedKmS, 7.7),
+        currentPhaseAngleDeg: Number(req.body?.currentPhaseAngleDeg ?? 0),
+        targetPhaseAngleDeg: Number(req.body?.targetPhaseAngleDeg ?? 35),
+        originPeriodDays: 365.256,
+        targetPeriodDays: targetBodyId === 'moon' ? 27.32 : targetBodyId === 'mars' ? 686.98 : 224.701,
+      });
+      const assists = sequenceGravityAssists({
+        originId: launchBodyId,
+        destinationId: targetBodyId,
+        candidates: gravityAssistCandidates,
+      });
+      const abortBranches = buildAbortTrajectoryBranches({
+        currentDistanceKm: distanceKm,
+        currentSpeedKmS: Math.max(lambert.departureSpeedKmS, 1),
+        returnBodyMuKm3S2: launchBodyId === 'earth' ? 398600.4418 : 4902.8001,
+      });
+      const reservePolicy = computeReservePolicy({
+        nominalDeltaVKmS: patchedConic.totalDeltaVKmS,
+        contingencyDeltaVKmS: Math.max(...abortBranches.map((item) => item.deltaVKmS)),
+        missionDurationDays: transferDays * 2,
+        radiationIndex: Number(req.body?.radiationIndex ?? 1.2),
+        crewed: Boolean(req.body?.crewed ?? true),
+      });
+      const launchWindows = solveLaunchWindowsWithConstraints({
+        transferDays,
+        deltaVKmS: patchedConic.totalDeltaVKmS,
+        weatherWindKmh: Number(req.body?.weatherWindKmh ?? 15),
+        precipitationMm: Number(req.body?.precipitationMm ?? 0),
+        radiationIndex: Number(req.body?.radiationIndex ?? 1.2),
+        dsnCoverage: Number(req.body?.dsnCoverage ?? 0.7),
+        offsetsHours,
+      });
+
+      res.json({
+        lambert,
+        patchedConic,
+        phasing,
+        gravityAssistSequences: assists,
+        abortBranches,
+        reservePolicy,
+        launchWindows,
+        source: 'LIVE · Horizons geometry + formula-driven trajectory design',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Trajectory design analysis failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.post("/api/sgp4/propagate", (req, res) => {
+    try {
+      const records = Array.isArray(req.body?.records) ? req.body.records : [];
+      const epoch = new Date(String(req.body?.epoch || new Date().toISOString()));
+      res.json({
+        states: propagateTles(records, epoch),
+        source: 'FORMULA-DRIVEN · SGP4 propagation',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'SGP4 propagation failed' });
+    }
+  });
+
+  app.post("/api/sgp4/conjunctions", (req, res) => {
+    try {
+      const records = Array.isArray(req.body?.records) ? req.body.records : [];
+      const conjunctions = screenSgp4Conjunctions({
+        records,
+        startTime: String(req.body?.startTime || new Date().toISOString()),
+        horizonMinutes: Number(req.body?.horizonMinutes ?? 24 * 60),
+        stepSeconds: Number(req.body?.stepSeconds ?? 60),
+      });
+      res.json({
+        conjunctions,
+        source: 'FORMULA-DRIVEN · SGP4 conjunction screening / TCA workflow',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'SGP4 conjunction screening failed' });
+    }
+  });
+
+  app.post("/api/sgp4/residuals", (req, res) => {
+    try {
+      const predicted = Array.isArray(req.body?.predicted) ? req.body.predicted : [];
+      const observed = Array.isArray(req.body?.observed) ? req.body.observed : [];
+      res.json({
+        residuals: computeNavigationResiduals({ predicted, observed }),
+        source: 'FORMULA-DRIVEN · Navigation residual support',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Residual computation failed' });
+    }
+  });
+
+  app.post("/api/vehicle/multistage", (req, res) => {
+    try {
+      const stages = Array.isArray(req.body?.stages) ? req.body.stages : [];
+      const payloadMassKg = Number(req.body?.payloadMassKg ?? 0);
+      const entryVelocityKmS = Number(req.body?.entryVelocityKmS ?? 11.1);
+      const noseRadiusM = Number(req.body?.noseRadiusM ?? 1.2);
+      const stlAnalysis = req.body?.stlAnalysis ?? null;
+      res.json(analyzeMultiStageVehicle({ stages, payloadMassKg, entryVelocityKmS, noseRadiusM, stlAnalysis }));
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Multi-stage analysis failed' });
+    }
+  });
+
+  app.post("/api/ccsds/oem", (req, res) => {
+    try {
+      const points = Array.isArray(req.body?.points) ? req.body.points : [];
+      const metadata = req.body?.metadata ?? { objectName: 'ARTEMIS-Q', objectId: 'ARTEMISQ-001' };
+      const text = exportOem(points, metadata);
+      res.type('text/plain').send(text);
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'OEM export failed' });
+    }
+  });
+
+  app.post("/api/ccsds/opm", (req, res) => {
+    try {
+      const state = req.body?.state;
+      const epochIso = String(req.body?.epochIso || new Date().toISOString());
+      const metadata = req.body?.metadata ?? { objectName: 'ARTEMIS-Q', objectId: 'ARTEMISQ-001' };
+      const text = exportOpm(state, epochIso, metadata);
+      res.type('text/plain').send(text);
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'OPM export failed' });
+    }
+  });
+
+  app.post("/api/ccsds/import", (req, res) => {
+    try {
+      const text = String(req.body?.text || '');
+      res.json(importOemLike(text));
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'CCSDS import failed' });
+    }
+  });
+
+  app.post("/api/baselines/compare", (req, res) => {
+    try {
+      const before = req.body?.before ?? {};
+      const after = req.body?.after ?? {};
+      res.json({
+        comparison: compareMissionBaselines(before, after),
+        beforeVersion: versionMissionConfig(before),
+        afterVersion: versionMissionConfig(after),
+        source: 'FORMULA-DRIVEN · Mission baseline comparison',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Baseline comparison failed' });
+    }
+  });
+
+  // ── Ground / Timeline / Ops Utilities ──────────────────────────────────────
+  app.get("/api/ground/launch-sites", (_req, res) => {
+    res.json({
+      sites: LAUNCH_SITES,
+      source: 'FORMULA-DRIVEN · Launch site database',
+    });
+  });
+
+  app.post("/api/ground/constraints", async (req, res) => {
+    try {
+      const lat = Number(req.body?.lat ?? 28.5729);
+      const lon = Number(req.body?.lon ?? -80.649);
+      const eonet = await fetchEonetEvents({ status: 'open', limit: 10, days: 14 }).catch(() => null);
+      const weather = await fetchNoaaSurfaceWeather(lat, lon).catch(() => null);
+      const analysis = assessGroundConstraints({
+        launchSiteId: String(req.body?.launchSiteId || 'ksc'),
+        vehicleName: String(req.body?.vehicleName || 'Artemis'),
+        launchAzimuthDeg: Number(req.body?.launchAzimuthDeg ?? 72),
+        weatherWindKmh: weather?.wind_speed ?? Number(req.body?.weatherWindKmh ?? 0),
+        precipitationMm: weather?.precipitation ?? Number(req.body?.precipitationMm ?? 0),
+        missionType: req.body?.missionType,
+        eonet,
+        launchDate: req.body?.launchDate,
+      });
+      res.json({
+        analysis,
+        source: `FORMULA-DRIVEN · Ground systems${weather?.source ? ` + ${weather.source}` : ''}${eonet?.source ? ` + ${eonet.source}` : ''}`,
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Ground constraint analysis failed' });
+    }
+  });
+
+  app.post("/api/timeline/solve", (req, res) => {
+    try {
+      const tasks = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+      res.json({
+        timeline: solveMissionTimeline(tasks),
+        source: 'FORMULA-DRIVEN · Timeline dependency solver',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Timeline solve failed' });
+    }
+  });
+
+  app.post("/api/consumables/analyze", (req, res) => {
+    try {
+      res.json({
+        analysis: analyzeConsumables(req.body),
+        source: 'FORMULA-DRIVEN · Consumables tracking',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Consumables analysis failed' });
+    }
+  });
+
+  app.post("/api/surface/environment", (req, res) => {
+    try {
+      res.json(analyzeSurfaceEnvironment({
+        bodyId: String(req.body?.bodyId || 'moon'),
+        latitudeDeg: Number(req.body?.latitudeDeg ?? -89.5),
+        longitudeDeg: Number(req.body?.longitudeDeg ?? 0),
+        altitudeKm: Number(req.body?.altitudeKm ?? 0),
+        dateIso: String(req.body?.dateIso || new Date().toISOString()),
+      }));
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Surface environment analysis failed' });
+    }
+  });
+
+  app.post("/api/launch/constraints", async (req, res) => {
+    try {
+      const lat = Number(req.body?.lat ?? 28.5729);
+      const lon = Number(req.body?.lon ?? -80.649);
+      const weather = await fetchNoaaSurfaceWeather(lat, lon).catch(() => null);
+      res.json({
+        analysis: analyzeLaunchConstraints({
+          weather,
+          maxQAltitudeKm: Number(req.body?.maxQAltitudeKm ?? 11),
+          atmosphereScaleHeightKm: Number(req.body?.atmosphereScaleHeightKm ?? 8.5),
+        }),
+        source: `FORMULA-DRIVEN · Launch constraints${weather?.source ? ` + ${weather.source}` : ''}`,
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Launch constraint analysis failed' });
+    }
+  });
+
+  app.post("/api/ops/console", (req, res) => {
+    try {
+      res.json({
+        console: buildOpsConsole({
+          anomalies: req.body?.anomalies,
+          goNoGoRules: req.body?.goNoGoRules,
+          consumablesDepletions: req.body?.consumablesDepletions,
+          telemetryFrame: req.body?.telemetryFrame,
+        }),
+        source: 'FORMULA-DRIVEN · Mission status / alarm console',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Ops console build failed' });
     }
   });
 

@@ -45,6 +45,18 @@ The current codebase is aimed at fast, physically credible analysis in real time
 - Vehicle-page ascent visualizer driven from the actual ascent result returned by `/api/simulate`.
 - Flight-sequence panels derived from computed mission / ascent events rather than hard-coded percentages.
 
+### Quantum optimization
+- Builds a reduced mission-routing QUBO from node, edge, continuity, and feasibility penalties.
+- Runs a simulated QAOA backend over a reduced binary basis for the selected route length.
+- Uses explicit complex amplitudes and a deterministic statevector evolution instead of the older display-only heuristic.
+- Exposes:
+  - layer-wise `gamma` / `beta`
+  - expected energy
+  - final basis-state probability distribution
+  - deterministic shot-style counts sampled from the final probability mass
+  - circuit visualization for the synthesized cost and mixer layers
+- Keeps the classical simulated annealer as the main route search engine and uses simulated QAOA for quantum-side diagnostics and comparison.
+
 ## Architecture
 
 ### Frontend
@@ -76,6 +88,8 @@ The current codebase is aimed at fast, physically credible analysis in real time
   [src/lib/stlAnalyzer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/stlAnalyzer.ts)
 - Imported mission graph generation / conjunction:
   [src/lib/missionPlanner.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/missionPlanner.ts)
+- Mission optimization / simulated QAOA:
+  [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
 
 ## Real vs Simulated
 
@@ -87,13 +101,54 @@ The current codebase is aimed at fast, physically credible analysis in real time
 - Rocket-equation-linked fuel sizing
 - Body-aware gravity and atmosphere handling
 - STL-derived geometry metrics and panel-load estimates
+- Simulated statevector QAOA evolution on reduced mission Hamiltonians
 
 ### Still approximate
 - Planetary positions use a lightweight internal ephemeris, not JPL SPICE kernels.
 - Imported TLE handling is approximate and not a full SGP4 pipeline.
 - Conjunction analysis is materially better than the original shell heuristic, but it is still not full operational OD / covariance tooling.
 - STL structural and aerodynamic analysis is reduced-order engineering estimation, not CFD or FEA.
-- The quantum / QAOA layer remains simulated and explanatory rather than actual quantum execution.
+- The quantum / QAOA layer is still simulated and not connected to hardware backends such as IBM Quantum, IonQ, Braket, or D-Wave.
+
+## Quantum Model
+
+The quantum layer is implemented as a simulated backend, not a placeholder animation.
+
+### What is encoded
+- A reduced mission-routing objective is mapped into a QUBO-style binary energy model.
+- Basis states represent reduced binary occupancy / path selections over the chosen route horizon.
+- Infeasible states receive a large penalty so they are suppressed in the simulated distribution.
+
+### What the simulator does
+- Starts from a uniform superposition over the reduced basis.
+- Applies a diagonal cost phase:
+  `exp(-i * gamma * C(z))`
+- Applies mixer rotations as repeated single-qubit X-rotations:
+  `exp(-i * beta * X)`
+- Performs a small grid search over `gamma` and `beta` per layer.
+- Computes the final expectation value from the statevector probabilities.
+- Converts final probabilities into deterministic shot-like counts for UI display.
+
+### What it does not do
+- No real quantum hardware execution
+- No noise model
+- No pulse-level control
+- No provider SDK such as Qiskit, Cirq, Braket, or PennyLane
+- No claim of quantum speedup
+
+### Where it lives
+- Core implementation:
+  [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
+- Backend API wiring:
+  [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
+- Quantum UI:
+  [src/App.tsx](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/App.tsx)
+
+### Reported metrics
+- `Approx Ratio`: final simulated QAOA energy divided by the best feasible basis energy in the reduced model
+- `Optimal Mass`: probability mass assigned to the best feasible basis state
+- `Expected Saving`: simulated QAOA energy improvement relative to the naive route baseline
+- `Shots`: deterministic sample counts derived from the final statevector distribution for visualization only
 
 ## Setup
 

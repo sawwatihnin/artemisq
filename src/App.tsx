@@ -243,6 +243,250 @@ interface GravityInfluenceFeed {
   source: string;
 }
 
+interface LaunchSiteFeed {
+  sites: Array<{
+    id: string;
+    name: string;
+    lat: number;
+    lon: number;
+    country: string;
+    pads: Array<{ id: string; name: string; supportedVehicles: string[] }>;
+  }>;
+  source: string;
+}
+
+interface TrajectoryDesignFeed {
+  lambert: {
+    departureSpeedKmS: number;
+    arrivalSpeedKmS: number;
+    c3Km2S2: number;
+    solved: boolean;
+    iterations: number;
+  };
+  patchedConic: {
+    departureDeltaVKmS: number;
+    arrivalDeltaVKmS: number;
+    totalDeltaVKmS: number;
+  };
+  phasing: {
+    bestDelayHours: number;
+    residualDeg: number;
+    synodicPeriodDays: number;
+  };
+  gravityAssistSequences: Array<{
+    sequence: string[];
+    score: number;
+    estimatedDeltaVGainKmS: number;
+    estimatedTimeDays: number;
+  }>;
+  abortBranches: Array<{
+    label: string;
+    branchType: 'FREE_RETURN' | 'DIRECT_RETURN' | 'SAFE_HAVEN';
+    deltaVKmS: number;
+    timeToRecoveryDays: number;
+    riskModifier: number;
+  }>;
+  reservePolicy: {
+    propellantReservePct: number;
+    reserveDeltaVKmS: number;
+    rationale: string;
+  };
+  launchWindows: Array<{
+    offsetHours: number;
+    score: number;
+    deltaVKmS: number;
+    weatherScore: number;
+    radiationScore: number;
+    commScore: number;
+  }>;
+  source: string;
+}
+
+interface GroundConstraintFeed {
+  analysis: {
+    launchSite: LaunchSiteFeed['sites'][number];
+    padStatus: Array<{ padId: string; available: boolean; rationale: string }>;
+    keepOutZones: Array<{ label: string; radiusKm: number; azimuthCenterDeg: number; azimuthHalfWidthDeg: number }>;
+    recoveryCorridors: Array<{ label: string; headingDeg: number; lengthKm: number; widthKm: number }>;
+    airspaceMaritimeExclusions: Array<{ label: string; footprintKm2: number; active: boolean }>;
+    rangeGo: boolean;
+    rationale: string;
+  };
+  source: string;
+}
+
+interface TimelineTaskInput {
+  id: string;
+  name: string;
+  durationHours: number;
+  earliestStartHour?: number;
+  latestFinishHour?: number;
+  dependencies?: string[];
+  resource?: string;
+}
+
+interface TimelineSolveFeed {
+  timeline: {
+    tasks: Array<TimelineTaskInput & {
+      scheduledStartHour: number;
+      scheduledFinishHour: number;
+      slackHours: number;
+      critical: boolean;
+    }>;
+    totalDurationHours: number;
+    criticalPath: string[];
+    violations: string[];
+  };
+  source: string;
+}
+
+interface ConsumablesFeed {
+  analysis: {
+    timeline: Array<{
+      timeHour: number;
+      state: {
+        powerKWh: number;
+        thermalMarginC: number;
+        commMinutes: number;
+        propellantKg: number;
+        crewHours: number;
+        oxygenKg: number;
+        waterKg: number;
+      };
+    }>;
+    depleted: Array<{ resource: string; timeHour: number }>;
+    finalState: {
+      powerKWh: number;
+      thermalMarginC: number;
+      commMinutes: number;
+      propellantKg: number;
+      crewHours: number;
+      oxygenKg: number;
+      waterKg: number;
+    };
+  };
+  source: string;
+}
+
+interface SurfaceEnvironmentFeed {
+  bodyId: string;
+  localSolarHour: number;
+  solarElevationDeg: number;
+  localGravityMs2: number;
+  estimatedSurfaceTempC: number;
+  daylight: boolean;
+  dustOrRegolithRisk: 'LOW' | 'MODERATE' | 'HIGH';
+  source: string;
+}
+
+interface LaunchConstraintFeed {
+  analysis: {
+    densityAtMaxQKgM3: number;
+    windConstraintScore: number;
+    precipitationConstraintScore: number;
+    upperAtmospherePenalty: number;
+    goForLaunch: boolean;
+    rationale: string;
+  };
+  source: string;
+}
+
+interface OpsConsoleFeed {
+  console: {
+    status: 'NOMINAL' | 'WATCH' | 'ALERT';
+    alarms: Array<{ title: string; severity: 'INFO' | 'WATCH' | 'ALERT'; detail: string }>;
+  };
+  source: string;
+}
+
+interface Sgp4State {
+  id: string;
+  name: string;
+  epoch: string;
+  positionKm: [number, number, number];
+  velocityKmS: [number, number, number];
+}
+
+interface Sgp4PropagateFeed {
+  states: Sgp4State[];
+  source: string;
+}
+
+interface Sgp4ConjunctionFeed {
+  conjunctions: Array<{
+    objectA: string;
+    objectB: string;
+    tcaIso: string;
+    tcaSeconds: number;
+    closestApproachKm: number;
+    relativeVelocityKmS: number;
+    collisionProbability: number;
+  }>;
+  source: string;
+}
+
+interface Sgp4ResidualFeed {
+  residuals: Array<{
+    id: string;
+    observedMinusPredictedKm: [number, number, number];
+    observedMinusPredictedKmS: [number, number, number];
+    positionResidualKm: number;
+    velocityResidualKmS: number;
+  }>;
+  source: string;
+}
+
+interface StageConfig {
+  name: string;
+  dryMassKg: number;
+  propellantMassKg: number;
+  thrustVacN: number;
+  thrustSlN: number;
+  ispVacS: number;
+  ispSlS: number;
+  engineCount: number;
+  engineOutCount?: number;
+  tankCgMeters?: number;
+}
+
+interface MultiStageAssessment {
+  totalDeltaVKmS: number;
+  stageAnalyses: Array<{
+    stageName: string;
+    ignitionMassKg: number;
+    burnoutMassKg: number;
+    separationMassKg: number;
+    deltaVKmS: number;
+    burnTimeS: number;
+    thrustToWeightVac: number;
+    thrustToWeightSl: number;
+    cgShiftMeters: number;
+    controllabilityIndex: number;
+    engineOutDeltaVKmS: number;
+  }>;
+  tpsPeakHeatFluxKwM2: number;
+  structuralIndex: number;
+  source: string;
+}
+
+interface ImportedCcsdsFeed {
+  metadata: Record<string, string>;
+  points: TrajectoryPoint[];
+}
+
+interface BaselineCompareFeed {
+  comparison: {
+    addedKeys: string[];
+    removedKeys: string[];
+    changedValues: Array<{ path: string; before: string; after: string }>;
+    versionHashBefore: string;
+    versionHashAfter: string;
+  };
+  beforeVersion: { versionHash: string; stablePayload: string };
+  afterVersion: { versionHash: string; stablePayload: string };
+  source: string;
+}
+
 interface PropellantType {
   name: FuelType;
   isp_vac: number;
@@ -268,13 +512,29 @@ interface OptimizationResult {
   propellantFraction: number;
   annealingHistory: { step: number; temperature: number; energy: number }[];
   qaoa: {
-    layers: Array<{ gamma: number; beta: number; energyExpectation: number }>;
+    layers: Array<{ gamma: number; beta: number; energyExpectation: number; entropyBits?: number; participationRatio?: number }>;
     finalEnergy: number;
     approximationRatio: number;
     quantumAdvantage_pct: number;
     qaoaMatchPct?: number;
     classicalSAImprovement_pct?: number;
-    distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean }>;
+    distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean; shotCount?: number }>;
+    simulation?: {
+      backend: 'statevector';
+      shots: number;
+      qubits: number;
+      basisStates: number;
+      optimalProbabilityPct: number;
+      gammaGridSteps: number;
+      betaGridSteps: number;
+    };
+    diagnostics?: {
+      entropyBits: number;
+      participationRatio: number;
+      averageHammingWeight: number;
+      qubitMarginals: number[];
+      zzCorrelations: number[];
+    };
   };
   physics: { hohmannDeltaV: number; j2Correction: number; vanAllenDose: number; transferTime_days: number };
   stochastic?: { expectedCost: number; variance: number; successProbability: number; runs: number };
@@ -609,6 +869,28 @@ const MISSION_SCENARIOS = [
   { id: 'venus-orbit', name: 'Venus Orbital Insertion', target: 'venus', mode: 'orbital', fuel: 'RP-1', date: '2026-10-10', mass: 18000, thrust: 95000 },
 ];
 
+const DEFAULT_TIMELINE_TASKS: TimelineTaskInput[] = [
+  { id: 'launch_prep', name: 'Launch Prep', durationHours: 18, earliestStartHour: 0, latestFinishHour: 24, resource: 'ground' },
+  { id: 'ascent', name: 'Ascent / Parking Orbit', durationHours: 4, dependencies: ['launch_prep'], resource: 'vehicle' },
+  { id: 'tli', name: 'Transfer Injection', durationHours: 2, dependencies: ['ascent'], resource: 'vehicle' },
+  { id: 'lunar_ops', name: 'Lunar / Target Ops', durationHours: 36, dependencies: ['tli'], resource: 'crew' },
+  { id: 'return_commit', name: 'Return Commit', durationHours: 3, dependencies: ['lunar_ops'], resource: 'vehicle' },
+  { id: 'recovery', name: 'Recovery', durationHours: 8, dependencies: ['return_commit'], latestFinishHour: 96, resource: 'ground' },
+];
+
+const DEFAULT_STAGE_CONFIGS: StageConfig[] = [
+  { name: 'Booster', dryMassKg: 28500, propellantMassKg: 395000, thrustVacN: 7_600_000, thrustSlN: 6_900_000, ispVacS: 311, ispSlS: 282, engineCount: 9, engineOutCount: 1, tankCgMeters: 18 },
+  { name: 'Core Stage', dryMassKg: 8200, propellantMassKg: 112000, thrustVacN: 1_050_000, thrustSlN: 920_000, ispVacS: 365, ispSlS: 333, engineCount: 1, engineOutCount: 0, tankCgMeters: 9 },
+  { name: 'Trans-Lunar Stage', dryMassKg: 3400, propellantMassKg: 28000, thrustVacN: 115_000, thrustSlN: 95_000, ispVacS: 451, ispSlS: 380, engineCount: 1, engineOutCount: 0, tankCgMeters: 4.5 },
+];
+
+const DEFAULT_TLE_TEXT = `ISS
+1 25544U 98067A   26109.51851852  .00014215  00000-0  25562-3 0  9998
+2 25544  51.6404 121.6200 0004901 143.1129 328.0090 15.49799364501754
+HST
+1 20580U 90037B   26109.53125000  .00000822  00000-0  48511-4 0  9995
+2 20580  28.4697 168.1422 0002858  50.9986 309.1178 15.09186495801229`;
+
 const FLIGHT_SEQUENCE_TEMPLATE = [
   { label: 'Parking Orbit', phase: 'Launch and ascent', progress: 0.08, driver: 'Ascent energy is converted into a stable parking orbit before translunar commitment.' },
   { label: 'Transfer Burn', phase: 'Launch and ascent', progress: 0.16, driver: 'Primary outbound delta-v impulse commits the vehicle to the transfer trajectory.' },
@@ -622,6 +904,50 @@ const FLIGHT_SEQUENCE_TEMPLATE = [
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatHour(value: number): string {
+  return `T+${value.toFixed(1)} h`;
+}
+
+function parseTleText(text: string): Array<{ id: string; name: string; tle1: string; tle2: string; covarianceSigmaKm?: number }> {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const records: Array<{ id: string; name: string; tle1: string; tle2: string; covarianceSigmaKm?: number }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const maybeName = lines[i];
+    const line1 = lines[i + 1]?.startsWith('1 ') ? lines[i + 1] : lines[i];
+    const line2 = lines[i + 2]?.startsWith('2 ') ? lines[i + 2] : lines[i + 1];
+    const hasExplicitName = maybeName && !maybeName.startsWith('1 ');
+    if (line1?.startsWith('1 ') && line2?.startsWith('2 ')) {
+      const name = hasExplicitName ? maybeName : `TLE-${records.length + 1}`;
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      records.push({ id, name, tle1: line1, tle2: line2, covarianceSigmaKm: 1.5 });
+      i += hasExplicitName ? 3 : 2;
+      continue;
+    }
+    i += 1;
+  }
+  return records;
+}
+
+function parseObservedStateText(text: string): Array<{ id: string; positionKm: [number, number, number]; velocityKmS: [number, number, number] }> {
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => ({
+        id: String(item.id ?? ''),
+        positionKm: [Number(item.positionKm?.[0] ?? 0), Number(item.positionKm?.[1] ?? 0), Number(item.positionKm?.[2] ?? 0)] as [number, number, number],
+        velocityKmS: [Number(item.velocityKmS?.[0] ?? 0), Number(item.velocityKmS?.[1] ?? 0), Number(item.velocityKmS?.[2] ?? 0)] as [number, number, number],
+      }))
+      .filter((item) => item.id);
+  } catch {
+    return [];
+  }
 }
 
 function stageColor(label: string): string {
@@ -959,7 +1285,7 @@ function QuantumCircuit({ gates }: { gates: OptimizationResult['circuitMap'] }) 
   );
 }
 
-function QuantumDistribution({ distribution }: { distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean }> }) {
+function QuantumDistribution({ distribution }: { distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean; shotCount?: number }> }) {
   if (!distribution?.length) return <p className="text-sm text-slate-400">Probability distribution becomes available after optimization.</p>;
   return (
     <ResponsiveContainer width="100%" height={220}>
@@ -969,9 +1295,9 @@ function QuantumDistribution({ distribution }: { distribution?: Array<{ state: s
         <YAxis stroke="#64748b" tick={{ fontSize: 9 }} tickFormatter={(value) => `${(value * 100).toFixed(0)}%`} />
         <Tooltip
           contentStyle={{ background: '#020617', border: '1px solid #334155' }}
-          formatter={(value: number, _name, payload: { payload?: { energy: number; isOptimal: boolean } }) => [
+          formatter={(value: number, _name, payload: { payload?: { energy: number; isOptimal: boolean; shotCount?: number } }) => [
             `${(value * 100).toFixed(2)}%`,
-            `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}`,
+            `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}${payload.payload?.shotCount != null ? ` · ${payload.payload.shotCount} shots` : ''}`,
           ]}
         />
         <Bar dataKey="probability" radius={[3, 3, 0, 0]}>
@@ -1544,6 +1870,28 @@ export default function App() {
   const [telemetryFeed, setTelemetryFeed] = useState<ExternalTelemetryFeed | null>(null);
   const [dsnVisibility, setDsnVisibility] = useState<DsnVisibilityFeed | null>(null);
   const [webGeoCalcMeta, setWebGeoCalcMeta] = useState<{ source?: string; version?: string } | null>(null);
+  const [launchSites, setLaunchSites] = useState<LaunchSiteFeed | null>(null);
+  const [selectedLaunchSiteId, setSelectedLaunchSiteId] = useState('ksc');
+  const [trajectoryDesign, setTrajectoryDesign] = useState<TrajectoryDesignFeed | null>(null);
+  const [groundConstraints, setGroundConstraints] = useState<GroundConstraintFeed | null>(null);
+  const [timelineTasks, setTimelineTasks] = useState<TimelineTaskInput[]>(DEFAULT_TIMELINE_TASKS);
+  const [timelineSolution, setTimelineSolution] = useState<TimelineSolveFeed | null>(null);
+  const [consumablesAnalysis, setConsumablesAnalysis] = useState<ConsumablesFeed | null>(null);
+  const [surfaceEnvironment, setSurfaceEnvironment] = useState<SurfaceEnvironmentFeed | null>(null);
+  const [launchConstraintAnalysis, setLaunchConstraintAnalysis] = useState<LaunchConstraintFeed | null>(null);
+  const [opsConsole, setOpsConsole] = useState<OpsConsoleFeed | null>(null);
+  const [tleInputText, setTleInputText] = useState(DEFAULT_TLE_TEXT);
+  const [sgp4Propagation, setSgp4Propagation] = useState<Sgp4PropagateFeed | null>(null);
+  const [sgp4Conjunctions, setSgp4Conjunctions] = useState<Sgp4ConjunctionFeed | null>(null);
+  const [observedStateText, setObservedStateText] = useState('');
+  const [sgp4Residuals, setSgp4Residuals] = useState<Sgp4ResidualFeed | null>(null);
+  const [stageConfigs, setStageConfigs] = useState<StageConfig[]>(DEFAULT_STAGE_CONFIGS);
+  const [multistageAssessment, setMultistageAssessment] = useState<MultiStageAssessment | null>(null);
+  const [ccsdsImportText, setCcsdsImportText] = useState('');
+  const [ccsdsImportResult, setCcsdsImportResult] = useState<ImportedCcsdsFeed | null>(null);
+  const [oemPreview, setOemPreview] = useState('');
+  const [opmPreview, setOpmPreview] = useState('');
+  const [baselineComparison, setBaselineComparison] = useState<BaselineCompareFeed | null>(null);
   const [optResult, setOptResult] = useState<OptimizationResult | null>(null);
   const [importedMissionConfig, setImportedMissionConfig] = useState<ImportedMissionConfig | null>(null);
   const [importedGraph, setImportedGraph] = useState<{ nodes: GeneratedMissionNode[]; edges: any[] } | null>(null);
@@ -2117,6 +2465,20 @@ export default function App() {
   })) ?? [];
 
   const annealData = optResult?.annealingHistory ?? [];
+  const quantumLayerData = optResult?.qaoa.layers.map((layer, index) => ({
+    layer: index + 1,
+    energy: layer.energyExpectation,
+    entropy: layer.entropyBits ?? 0,
+    participation: layer.participationRatio ?? 0,
+  })) ?? [];
+  const quantumMarginalData = optResult?.qaoa.diagnostics?.qubitMarginals.map((p1, index) => ({
+    qubit: `q${index}`,
+    probabilityOne: p1,
+  })) ?? [];
+  const quantumZZData = optResult?.qaoa.diagnostics?.zzCorrelations.map((zz, index) => ({
+    pair: `Z${index}Z${index + 1}`,
+    correlation: zz,
+  })) ?? [];
 
   return (
     <div className="min-h-screen bg-[#050810] text-slate-100">
@@ -3147,17 +3509,20 @@ export default function App() {
 
               {activeTab === 'quantum' ? (
                 <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
-                  <DashboardCard title="Quantum Layer" icon={Atom} provenance="heuristic">
+                  <DashboardCard title="Quantum Layer" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
                     <div className="space-y-3 text-sm text-slate-300">
-                      <p>The route optimizer still uses a classical simulated annealer with a QAOA-style visualization layer. It is not quantum hardware, and its “advantage” metric is still a comparison against the greedy baseline on preset graphs.</p>
+                      <p>The quantum path now runs a simulated QAOA statevector evolution on a reduced mission cost Hamiltonian. It is still not hardware, but the amplitudes, phase evolution, and reported state distribution now come from an actual deterministic quantum simulation rather than a display-only heuristic.</p>
                       {optResult ? (
                         <div className="grid grid-cols-2 gap-2">
                           <MetricBadge label="QAOA Layers" value={String(optResult.qaoa.layers.length)} />
+                          <MetricBadge label="Backend" value={optResult.qaoa.simulation?.backend ?? 'statevector'} unit="simulated" tone="good" />
                           <MetricBadge label="Approx Ratio" value={optResult.qaoa.approximationRatio.toFixed(4)} />
                           <MetricBadge label="Final Energy" value={optResult.qaoa.finalEnergy.toFixed(4)} />
-                          <MetricBadge label="Displayed Saving" value={`${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}%`} tone="warn" />
-                          <MetricBadge label="QAOA Match" value={`${(optResult.qaoa.qaoaMatchPct ?? 0).toFixed(1)}%`} unit="feasible-optimality proxy" tone="good" />
+                          <MetricBadge label="Qubits" value={String(optResult.qaoa.simulation?.qubits ?? '--')} unit="reduced basis" />
+                          <MetricBadge label="Expected Saving" value={`${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}%`} unit="vs naive baseline" tone="warn" />
+                          <MetricBadge label="Optimal Mass" value={`${(optResult.qaoa.qaoaMatchPct ?? 0).toFixed(1)}%`} unit="probability mass" tone="good" />
                           <MetricBadge label="SA Improvement" value={`${(optResult.qaoa.classicalSAImprovement_pct ?? optResult.qaoa.quantumAdvantage_pct).toFixed(1)}%`} unit="vs baseline" />
+                          <MetricBadge label="Shots" value={String(optResult.qaoa.simulation?.shots ?? '--')} unit="deterministic sample" />
                         </div>
                       ) : null}
                       <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
@@ -3178,7 +3543,7 @@ export default function App() {
                           disabled={!optResult || qaoaRefreshing}
                         />
                         <p className="mt-2 text-xs text-slate-500">
-                          Uses the pulled `/api/qaoa` rerun path so QAOA diagnostics can update without re-running the full annealer.
+                          Uses the `/api/qaoa` rerun path so the simulated statevector layers can update without re-running the full annealer.
                         </p>
                       </div>
                     </div>
