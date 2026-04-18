@@ -118,6 +118,63 @@ interface DsnVisibilityFeed {
   source: string;
 }
 
+interface SolarBodyFeed {
+  id: string;
+  name?: string;
+  englishName?: string;
+  bodyType?: string;
+  gravity?: number;
+  meanRadius?: number;
+  semimajorAxis?: number;
+  sideralOrbit?: number;
+  sideralRotation?: number;
+  eccentricity?: number;
+  inclination?: number;
+  axialTilt?: number;
+  color?: string;
+  atmosphereScaleHeightKm?: number;
+}
+
+interface SolarBodiesFeed {
+  bodies: SolarBodyFeed[];
+  source: string;
+}
+
+interface SystemEphemerisFeed {
+  bodies: Array<{ id: string; x: number; y: number; z: number; jd: number }>;
+  centerBodyId: string;
+  date: string;
+  source: string;
+}
+
+interface NearEarthRadiationFeed {
+  environment: {
+    aggregateIndex: number;
+    zones: Array<{ label: string; innerRadiusKm: number; outerRadiusKm: number; severity: number; color: string }>;
+    notes: string[];
+    source: string;
+  };
+  goes?: {
+    stormLevel?: string;
+    protonFlux10MeV?: number;
+    electronFluxGeo?: number;
+  };
+  source: string;
+}
+
+interface GravityInfluenceFeed {
+  assessments: Array<{
+    bodyId: string;
+    bodyName: string;
+    closestApproachKm: number;
+    sphereOfInfluenceKm: number;
+    maxTidalAccelerationMs2: number;
+    influenceRatio: number;
+    willInfluence: boolean;
+  }>;
+  source: string;
+}
+
 interface PropellantType {
   name: FuelType;
   isp_vac: number;
@@ -968,12 +1025,22 @@ function RadiationOverlay({
   bodyRadius,
   atmosphereScaleHeightKm,
   isPrimary,
+  customZones,
+  kmPerUnit,
 }: {
   bodyRadius: number;
   atmosphereScaleHeightKm?: number;
   isPrimary?: boolean;
+  customZones?: Array<{ outerRadiusKm: number; severity: number; color: string }>;
+  kmPerUnit?: number;
 }) {
-  const zones = isPrimary
+  const zones = customZones?.length
+    ? customZones.map((zone) => ({
+        radius: zone.outerRadiusKm / Math.max(kmPerUnit ?? VIS_SCENE_KM_PER_UNIT, 1),
+        color: zone.color,
+        opacity: Math.min(0.12, 0.025 + zone.severity * 0.015),
+      }))
+    : isPrimary
     ? [
         { radius: bodyRadius + Math.max(10, bodyRadius * 0.8), color: '#f59e0b', opacity: 0.08 },
         { radius: bodyRadius + Math.max(22, bodyRadius * 1.5), color: '#ef4444', opacity: 0.06 },
@@ -1006,6 +1073,8 @@ function MissionGlobe({
   keplerEl,
   stageList,
   trajectory,
+  externalBodies,
+  radiationEnvironment,
 }: {
   launchDate: string;
   targetPlanetId: string;
@@ -1015,6 +1084,8 @@ function MissionGlobe({
   keplerEl: KeplerianElements;
   stageList: StageDisplay[];
   trajectory: TrajectoryPoint[];
+  externalBodies: Array<SolarBodyFeed & { pos?: [number, number, number] }>;
+  radiationEnvironment: NearEarthRadiationFeed | null;
 }) {
   const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
   const outboundTrajectory = useMemo(() => trajectory.slice(0, Math.max(2, Math.floor(trajectory.length * 0.55))), [trajectory]);
@@ -1026,17 +1097,33 @@ function MissionGlobe({
 
   const systemBodies = useMemo(() => {
     if (isCislunar) return [];
+    if (externalBodies.length) {
+      return externalBodies
+        .filter((body) => body.pos && body.id !== launchBodyId && body.bodyType?.toLowerCase().includes('planet'))
+        .map((body) => ({
+          id: body.id,
+          name: body.englishName ?? body.name ?? body.id,
+          radiusKm: body.meanRadius ?? 2500,
+          color: body.color ?? '#94a3b8',
+          atmosphereScaleHeightKm: body.atmosphereScaleHeightKm,
+          pos: body.pos!,
+        }));
+    }
     const earthHelio = getApproximateHeliocentricPosition(CELESTIAL_BODY_MAP.earth, sceneDate);
     return CELESTIAL_BODIES
       .filter((body) => body.orbit && body.id !== launchBodyId)
       .map((body) => {
         const p = getApproximateHeliocentricPosition(body, sceneDate);
         return {
-          ...body,
+          id: body.id,
+          name: body.name,
+          radiusKm: body.radiusKm,
+          color: body.color,
+          atmosphereScaleHeightKm: body.atmosphereScaleHeightKm,
           pos: [p[0] - earthHelio[0], p[1] - earthHelio[1], p[2] - earthHelio[2]] as [number, number, number],
         };
       });
-  }, [sceneDate, isCislunar, launchBodyId]);
+  }, [sceneDate, isCislunar, launchBodyId, externalBodies]);
 
   const moonScene = useMemo(() => {
     const km = moonGeocentricPositionKm(sceneDate);
@@ -1106,7 +1193,17 @@ function MissionGlobe({
   return (
     <group>
       <PrimaryBody3D bodyId={launchBody.id} color={launchBody.color} radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} />
-      <RadiationOverlay bodyRadius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} atmosphereScaleHeightKm={launchBody.atmosphereScaleHeightKm} isPrimary />
+      <RadiationOverlay
+        bodyRadius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)}
+        atmosphereScaleHeightKm={launchBody.atmosphereScaleHeightKm}
+        isPrimary
+        customZones={launchBodyId === 'earth' ? radiationEnvironment?.environment?.zones?.map((zone) => ({
+          outerRadiusKm: zone.outerRadiusKm,
+          severity: zone.severity,
+          color: zone.color,
+        })) : undefined}
+        kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
+      />
       <OrbitLine elements={keplerEl} kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT} lineWidth={isCislunar ? 2.4 : 1.5} />
       {isCislunar ? (
         <group position={moonScene.pos}>
@@ -1195,6 +1292,9 @@ function SourceStatus({
   weatherData,
   openMeteoWeather,
   nasaWeather,
+  solarBodies,
+  nearEarthRadiation,
+  gravityInfluence,
   eonetEvents,
   celestrakTraffic,
   telemetryFeed,
@@ -1206,6 +1306,9 @@ function SourceStatus({
   weatherData: any;
   openMeteoWeather: any;
   nasaWeather: any;
+  solarBodies: SolarBodiesFeed | null;
+  nearEarthRadiation: NearEarthRadiationFeed | null;
+  gravityInfluence: GravityInfluenceFeed | null;
   eonetEvents: ExternalEventFeed | null;
   celestrakTraffic: ExternalConjunctionFeed | null;
   telemetryFeed: ExternalTelemetryFeed | null;
@@ -1218,12 +1321,15 @@ function SourceStatus({
     { label: 'Surface weather', source: weatherData?.source ?? 'Unavailable', kind: weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Backup meteorology', source: openMeteoWeather?.source ?? 'Unavailable', kind: openMeteoWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Space weather', source: nasaWeather?.source ?? 'Unavailable', kind: nasaWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Body catalog', source: solarBodies?.source ?? 'Unavailable', kind: solarBodies?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Radiation zones', source: nearEarthRadiation?.environment?.source ?? 'Unavailable', kind: nearEarthRadiation?.environment?.source ? 'formula' : 'preset' },
     { label: 'Earth events', source: eonetEvents?.source ?? 'Unavailable', kind: eonetEvents?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Ascent dynamics', source: simResult ? 'In-browser 2D ascent solver' : 'Not run', kind: simResult ? 'formula' : 'preset' },
     { label: 'Vehicle geometry', source: stlAnalysis ? 'User STL-derived geometry' : 'No uploaded vehicle', kind: stlAnalysis ? 'formula' : 'preset' },
     { label: 'Mission graph', source: 'Scenario graph still uses preset nodes and edges', kind: 'preset' },
     { label: 'Conjunction panel', source: celestrakTraffic?.source ?? 'Imported-state propagation only', kind: celestrakTraffic?.source?.startsWith('LIVE') ? 'live-api' : 'heuristic' },
     { label: 'Ground stations', source: dsnVisibility?.source ?? 'Unavailable', kind: dsnVisibility?.source?.includes('DSN') ? 'formula' : 'preset' },
+    { label: 'Gravity influence', source: gravityInfluence?.source ?? 'Unavailable', kind: gravityInfluence?.source?.startsWith('FORMULA') ? 'formula' : 'preset' },
     { label: 'Telemetry ingest', source: telemetryFeed?.frame ? telemetryFeed.source : 'Awaiting external frames', kind: telemetryFeed?.frame ? 'live-api' : 'preset' },
     { label: 'SPICE verification', source: webGeoCalcMeta?.source ?? 'Unavailable', kind: webGeoCalcMeta?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
   ] as const;
@@ -1355,6 +1461,10 @@ export default function App() {
   const [weatherData, setWeatherData] = useState<any>(null);
   const [openMeteoWeather, setOpenMeteoWeather] = useState<any>(null);
   const [nasaWeather, setNasaWeather] = useState<any>(null);
+  const [solarBodies, setSolarBodies] = useState<SolarBodiesFeed | null>(null);
+  const [systemEphemeris, setSystemEphemeris] = useState<SystemEphemerisFeed | null>(null);
+  const [nearEarthRadiation, setNearEarthRadiation] = useState<NearEarthRadiationFeed | null>(null);
+  const [gravityInfluence, setGravityInfluence] = useState<GravityInfluenceFeed | null>(null);
   const [eonetEvents, setEonetEvents] = useState<ExternalEventFeed | null>(null);
   const [celestrakTraffic, setCelestrakTraffic] = useState<ExternalConjunctionFeed | null>(null);
   const [telemetryFeed, setTelemetryFeed] = useState<ExternalTelemetryFeed | null>(null);
@@ -1414,7 +1524,19 @@ export default function App() {
   const activeGraph = importedGraph ?? { nodes: preset.nodes, edges: preset.edges };
   const altitude = keplerEl.a - 6371;
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
-  const bodyMatches = useMemo(() => searchBodies(bodySearch), [bodySearch]);
+  const bodyCatalog = useMemo(() => (
+    solarBodies?.bodies?.length
+      ? solarBodies.bodies.map((body) => ({
+          id: body.id,
+          name: body.englishName ?? body.name ?? body.id,
+        }))
+      : CELESTIAL_BODIES.map((body) => ({ id: body.id, name: body.name }))
+  ), [solarBodies]);
+  const bodyMatches = useMemo(() => {
+    const normalized = bodySearch.trim().toLowerCase();
+    if (!normalized) return bodyCatalog;
+    return bodyCatalog.filter((body) => body.name.toLowerCase().includes(normalized) || body.id.includes(normalized));
+  }, [bodyCatalog, bodySearch]);
   const currentDose = vanAllenDose(altitude, keplerEl.i);
   const localGravity = getDateAdjustedLocalGravity(launchBody, launchLatitude, launchLongitude, launchAltitudeKm, new Date(launchDate));
   const targetBody = CELESTIAL_BODY_MAP[targetPlanet] ?? CELESTIAL_BODY_MAP.moon;
@@ -1424,10 +1546,13 @@ export default function App() {
       const isEarth = launchBodyId === 'earth';
       const weatherUrl = `/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
       const openMeteoUrl = `/api/openmeteo/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
-      const [wxResult, openMeteoResult, spaceResult, eonetResult, trafficResult, telemetryResult, wgcResult] = await Promise.allSettled([
+      const [wxResult, openMeteoResult, spaceResult, solarBodiesResult, ephemerisResult, radiationResult, eonetResult, trafficResult, telemetryResult, wgcResult] = await Promise.allSettled([
         isEarth ? fetch(weatherUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
         isEarth ? fetch(openMeteoUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
         fetch('/api/space-weather').then((res) => res.json()),
+        fetch('/api/bodies').then((res) => res.json()),
+        fetch(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`).then((res) => res.json()),
+        fetch('/api/radiation/near-earth?days=7').then((res) => res.json()),
         fetch('/api/eonet/events?status=open&limit=4&days=14').then((res) => res.json()),
         fetch('/api/celestrak/conjunctions?group=STATIONS&limit=10').then((res) => res.json()),
         fetch('/api/telemetry/latest').then((res) => res.json()),
@@ -1437,6 +1562,9 @@ export default function App() {
       const wx = wxResult.status === 'fulfilled' ? wxResult.value : { source: 'UNAVAILABLE' };
       const openMeteo = openMeteoResult.status === 'fulfilled' ? openMeteoResult.value : { source: 'UNAVAILABLE' };
       const nasa = spaceResult.status === 'fulfilled' ? spaceResult.value : { source: 'UNAVAILABLE' };
+      const bodies = solarBodiesResult.status === 'fulfilled' ? solarBodiesResult.value : null;
+      const ephemeris = ephemerisResult.status === 'fulfilled' ? ephemerisResult.value : null;
+      const radiation = radiationResult.status === 'fulfilled' ? radiationResult.value : null;
       const eonet = eonetResult.status === 'fulfilled' ? eonetResult.value : null;
       const traffic = trafficResult.status === 'fulfilled' ? trafficResult.value : null;
       const telemetry = telemetryResult.status === 'fulfilled' ? telemetryResult.value : null;
@@ -1445,6 +1573,9 @@ export default function App() {
       setWeatherData(wx);
       setOpenMeteoWeather(openMeteo);
       setNasaWeather(nasa);
+      setSolarBodies(bodies);
+      setSystemEphemeris(ephemeris);
+      setNearEarthRadiation(radiation);
       setEonetEvents(eonet);
       setCelestrakTraffic(traffic);
       setTelemetryFeed(telemetry);
@@ -1453,6 +1584,8 @@ export default function App() {
 
       addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
       addLog(`Space weather: ${nasa.source ?? 'UNAVAILABLE'}`);
+      if (ephemeris?.source) addLog(`Planet ephemerides: ${ephemeris.source}`);
+      if (radiation?.environment?.source) addLog(`Radiation belts: ${radiation.environment.source}`);
       if (traffic?.source) addLog(`Traffic screening: ${traffic.source}`);
       if (telemetry?.frame) addLog(`Telemetry ingest active: ${telemetry.frame.source}`);
       if (!isEarth) {
@@ -1512,7 +1645,7 @@ export default function App() {
           end: activeGraph.nodes[activeGraph.nodes.length - 1]?.id ?? preset.end,
           steps: Math.max(2, activeGraph.nodes.length),
           date: launchDate,
-          radiationIndex: nasaWeather?.radiationIndex || 1.0,
+          radiationIndex: Math.max(nasaWeather?.radiationIndex || 1.0, nearEarthRadiation?.environment?.aggregateIndex || 1.0),
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
@@ -1774,6 +1907,40 @@ export default function App() {
     () => horizonsTrajectory ?? calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
     [horizonsTrajectory, launchDate, targetPlanet, launchBodyId, keplerEl],
   );
+  useEffect(() => {
+    const analyzeGravity = async () => {
+      if (!systemEphemeris?.bodies?.length || !missionTrajectory.length) {
+        setGravityInfluence(null);
+        return;
+      }
+      try {
+        const response = await fetch('/api/gravity/influences', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trajectory: missionTrajectory.map((point) => ({
+              ...point,
+              pos: [
+                point.pos[0] * missionKmPerUnit,
+                point.pos[1] * missionKmPerUnit,
+                point.pos[2] * missionKmPerUnit,
+              ],
+            })),
+            bodyPositions: systemEphemeris.bodies.map((body) => ({
+              id: body.id,
+              name: body.id[0].toUpperCase() + body.id.slice(1),
+              posKm: [body.x, body.y, body.z],
+            })),
+          }),
+        });
+        const data = await response.json();
+        setGravityInfluence(data);
+      } catch {
+        setGravityInfluence(null);
+      }
+    };
+    analyzeGravity();
+  }, [systemEphemeris, missionTrajectory, missionKmPerUnit]);
   const missionStages = useMemo(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
     return derived.length
@@ -1859,7 +2026,24 @@ export default function App() {
                       <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
                       <ambientLight intensity={0.45} />
                       <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
-                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} stageList={missionStages} trajectory={missionTrajectory} />
+                      <MissionGlobe
+                        launchDate={launchDate}
+                        targetPlanetId={targetPlanet}
+                        launchBodyId={launchBodyId}
+                        preset={{ ...preset, nodes: activeGraph.nodes }}
+                        pathNodeIds={optResult?.path ?? []}
+                        keplerEl={keplerEl}
+                        stageList={missionStages}
+                        trajectory={missionTrajectory}
+                        externalBodies={(solarBodies?.bodies ?? []).map((body) => {
+                          const eph = systemEphemeris?.bodies?.find((item) => item.id === body.id);
+                          return {
+                            ...body,
+                            pos: eph ? [eph.x / VIS_SCENE_KM_PER_UNIT, eph.y / VIS_SCENE_KM_PER_UNIT, eph.z / VIS_SCENE_KM_PER_UNIT] as [number, number, number] : undefined,
+                          };
+                        })}
+                        radiationEnvironment={nearEarthRadiation}
+                      />
                     </Canvas>
                   </div>
                   <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
@@ -1947,12 +2131,20 @@ export default function App() {
                     <span>{nasaWeather?.radiationIndex?.toFixed?.(2) ?? '--'}x</span>
                   </div>
                   <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span>GOES Storm Level</span>
+                    <span>{nearEarthRadiation?.goes?.stormLevel ?? '--'}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
                     <span>Traffic Alerts</span>
                     <span>{celestrakTraffic?.conjunctions?.length ?? 0}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm text-slate-300">
                     <span>DSN Windows</span>
                     <span>{dsnVisibility?.windows?.length ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span>Gravity Triggers</span>
+                    <span>{gravityInfluence?.assessments?.filter((item) => item.willInfluence).length ?? 0}</span>
                   </div>
                   <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">{weatherData?.source ?? 'Weather unavailable'}</div>
                 </div>
@@ -2287,7 +2479,7 @@ export default function App() {
                         Search Launch Body
                         <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="text" list="body-suggestions" value={bodySearch} onChange={(event) => setBodySearch(event.target.value)} placeholder="Earth, Mars, Titan..." />
                         <datalist id="body-suggestions">
-                          {CELESTIAL_BODIES.map((body) => <option key={body.id} value={body.name} />)}
+                          {bodyCatalog.map((body) => <option key={body.id} value={body.name} />)}
                         </datalist>
                       </label>
                       <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
@@ -2309,7 +2501,7 @@ export default function App() {
                       <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
                         Target
                         <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={targetPlanet} onChange={(event) => setTargetPlanet(event.target.value)}>
-                          {CELESTIAL_BODIES.map((planet) => (
+                          {bodyCatalog.map((planet) => (
                             <option key={planet.id} value={planet.id}>{planet.name}</option>
                           ))}
                         </select>
@@ -2456,11 +2648,58 @@ export default function App() {
                     )}
                   </DashboardCard>
 
+                  <DashboardCard title="Body & Environment" icon={Globe} provenance={solarBodies?.source?.startsWith('LIVE') ? 'live-api' : 'formula'}>
+                    <div className="space-y-3">
+                      {(() => {
+                        const selectedBody = solarBodies?.bodies?.find((body) => body.id === targetPlanet) ?? null;
+                        return selectedBody ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            <MetricBadge label="Body" value={selectedBody.englishName ?? selectedBody.name ?? targetPlanet} unit={selectedBody.bodyType ?? 'body'} />
+                            <MetricBadge label="Radius" value={(selectedBody.meanRadius ?? targetBody.radiusKm).toFixed(0)} unit="km" />
+                            <MetricBadge label="Gravity" value={(selectedBody.gravity ?? targetBody.standardGravity).toFixed(2)} unit="m/s²" />
+                            <MetricBadge label="Orbital Period" value={(selectedBody.sideralOrbit ?? targetBody.orbit?.periodDays ?? 0).toFixed(1)} unit="days" />
+                          </div>
+                        ) : (
+                          <p className="text-sm text-slate-400">Selected body metadata unavailable.</p>
+                        );
+                      })()}
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                        <p>{nearEarthRadiation?.environment?.source ?? 'Radiation environment unavailable.'}</p>
+                        {nearEarthRadiation?.environment?.notes?.slice(0, 2).map((note, index) => (
+                          <p key={index} className="mt-1">{note}</p>
+                        ))}
+                      </div>
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Gravity Influence" icon={Rocket} provenance={gravityInfluence?.source?.startsWith('FORMULA') ? 'formula' : 'preset'}>
+                    <div className="space-y-2">
+                      {gravityInfluence?.assessments?.length ? gravityInfluence.assessments.slice(0, 4).map((item) => (
+                        <div key={item.bodyId} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
+                          <div className="flex items-center justify-between text-sm text-slate-200">
+                            <span>{item.bodyName}</span>
+                            <span className={item.willInfluence ? 'text-amber-200' : 'text-slate-400'}>
+                              {item.willInfluence ? 'Influential' : 'Minor'}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-400">
+                            Closest {item.closestApproachKm.toExponential(2)} km | SOI {item.sphereOfInfluenceKm.toExponential(2)} km | ratio {item.influenceRatio.toFixed(2)}
+                          </div>
+                        </div>
+                      )) : (
+                        <p className="text-sm text-slate-400">No planetary influence assessment is available for the current trajectory.</p>
+                      )}
+                    </div>
+                  </DashboardCard>
+
                   <DashboardCard title="Provenance Audit" icon={ShieldAlert}>
                     <SourceStatus
                       weatherData={weatherData}
                       openMeteoWeather={openMeteoWeather}
                       nasaWeather={nasaWeather}
+                      solarBodies={solarBodies}
+                      nearEarthRadiation={nearEarthRadiation}
+                      gravityInfluence={gravityInfluence}
                       eonetEvents={eonetEvents}
                       celestrakTraffic={celestrakTraffic}
                       telemetryFeed={telemetryFeed}

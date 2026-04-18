@@ -8,15 +8,21 @@ import { LaunchSimulator } from "./src/lib/simulator.ts";
 import { fetchCelestrakGp, fetchCelestrakTrafficAssessment } from "./src/lib/celestrak.ts";
 import { fetchDonkiSpaceWeatherSummary } from "./src/lib/donki.ts";
 import { fetchEonetEvents } from "./src/lib/eonet.ts";
+import { assessTrajectoryGravityInfluence } from "./src/lib/gravityInfluence.ts";
 import { computeDsnVisibility } from "./src/lib/groundStations.ts";
 import {
   buildHorizonsTrajectory,
   buildHorizonsUrl,
+  fetchHorizonsVectors,
   fetchHorizonsLaunchWindowEvaluations,
   fetchHorizonsTransferEstimate,
+  getHorizonsMajorBodyId,
 } from "./src/lib/horizons.ts";
 import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
 import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
+import { buildNearEarthRadiationEnvironment } from "./src/lib/radiationModel.ts";
+import { fetchSolarBodies, fetchSolarBody, fetchSolarSkyPositions, mergeCelestialFallback } from "./src/lib/solarSystem.ts";
+import { fetchGoesRadiationSummary } from "./src/lib/swpcGoes.ts";
 import { getLatestTelemetryFrame, getTelemetryHistory, ingestTelemetryFrame } from "./src/lib/telemetryHub.ts";
 import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webgeocalc.ts";
 
@@ -93,6 +99,105 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(502).json({ error: error?.message || "Horizons trajectory build failed" });
+    }
+  });
+
+  app.get("/api/ephemeris", async (req, res) => {
+    const bodyId = String(req.query.body || 'mars').toLowerCase();
+    const centerBodyId = String(req.query.centerBody || 'earth').toLowerCase();
+    const date = String(req.query.date || new Date().toISOString().slice(0, 10));
+    try {
+      const rows = await fetchHorizonsVectors({
+        COMMAND: `'${getHorizonsMajorBodyId(bodyId)}'`,
+        CENTER: `'500@${getHorizonsMajorBodyId(centerBodyId)}'`,
+        START_TIME: `'${date}'`,
+        STOP_TIME: `'${date}'`,
+        STEP_SIZE: `'1 d'`,
+      });
+      res.json({
+        bodyId,
+        centerBodyId,
+        row: rows[0] ?? null,
+        source: 'LIVE · JPL Horizons',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Horizons ephemeris fetch failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.get("/api/ephemeris/system", async (req, res) => {
+    const centerBodyId = String(req.query.centerBody || 'earth').toLowerCase();
+    const date = String(req.query.date || new Date().toISOString().slice(0, 10));
+    const bodyIds = ['mercury', 'venus', 'earth', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto'];
+    try {
+      const results = await Promise.all(bodyIds.map(async (bodyId) => {
+        const rows = await fetchHorizonsVectors({
+          COMMAND: `'${getHorizonsMajorBodyId(bodyId)}'`,
+          CENTER: `'500@${getHorizonsMajorBodyId(centerBodyId)}'`,
+          START_TIME: `'${date}'`,
+          STOP_TIME: `'${date}'`,
+          STEP_SIZE: `'1 d'`,
+        });
+        const row = rows[0];
+        return row ? {
+          id: bodyId,
+          x: row.x,
+          y: row.y,
+          z: row.z,
+          jd: row.jd,
+        } : null;
+      }));
+      res.json({
+        centerBodyId,
+        date,
+        bodies: results.filter(Boolean),
+        source: 'LIVE · JPL Horizons',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Horizons system ephemeris fetch failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  // ── Solar System OpenData ──────────────────────────────────────────────────
+  app.get("/api/bodies", async (_req, res) => {
+    try {
+      const bodies = await fetchSolarBodies();
+      res.json({
+        bodies: mergeCelestialFallback(bodies),
+        source: 'LIVE · Solar System OpenData',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Solar System OpenData fetch failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.get("/api/body/:id", async (req, res) => {
+    try {
+      const body = await fetchSolarBody(String(req.params.id));
+      res.json({
+        body,
+        source: 'LIVE · Solar System OpenData',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Solar System OpenData body fetch failed', source: 'UPSTREAM ERROR' });
+    }
+  });
+
+  app.get("/api/sky-positions", async (req, res) => {
+    try {
+      const positions = await fetchSolarSkyPositions({
+        lon: Number(req.query.lon ?? -74.006),
+        lat: Number(req.query.lat ?? 40.7128),
+        elev: Number(req.query.elev ?? 0),
+        datetime: String(req.query.datetime || new Date().toISOString().slice(0, 19)),
+        zone: Number(req.query.zone ?? 0),
+      });
+      res.json({
+        positions,
+        source: 'LIVE · Solar System OpenData /positions',
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Sky positions fetch failed', source: 'UPSTREAM ERROR' });
     }
   });
 
@@ -187,6 +292,24 @@ async function startServer() {
       res.json(donki);
     } catch (error: any) {
       res.status(502).json({ error: error?.message || "DONKI fetch failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.get("/api/radiation/near-earth", async (req, res) => {
+    try {
+      const [goes, donki] = await Promise.all([
+        fetchGoesRadiationSummary(),
+        fetchDonkiSpaceWeatherSummary(Number(req.query.days ?? 7)),
+      ]);
+      const environment = buildNearEarthRadiationEnvironment(goes, donki.radiationBoost);
+      res.json({
+        goes,
+        donki,
+        environment,
+        source: `${goes.source} + ${donki.source}`,
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Near-Earth radiation fetch failed', source: 'UPSTREAM ERROR' });
     }
   });
 
@@ -310,6 +433,20 @@ async function startServer() {
       res.json(summary);
     } catch (error: any) {
       res.status(502).json({ error: error?.message || "DSN visibility computation failed", source: "UPSTREAM ERROR" });
+    }
+  });
+
+  app.post("/api/gravity/influences", async (req, res) => {
+    try {
+      const trajectory = Array.isArray(req.body?.trajectory) ? req.body.trajectory : [];
+      const bodyPositions = Array.isArray(req.body?.bodyPositions) ? req.body.bodyPositions : [];
+      const assessments = assessTrajectoryGravityInfluence(trajectory, bodyPositions);
+      res.json({
+        assessments,
+        source: 'FORMULA · sphere-of-influence and tidal-acceleration screening',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Gravity influence analysis failed', source: 'UPSTREAM ERROR' });
     }
   });
 
