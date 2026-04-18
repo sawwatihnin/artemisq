@@ -7,10 +7,13 @@ import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
 import { fetchCelestrakGp, fetchCelestrakTrafficAssessment } from "./src/lib/celestrak.ts";
 import { compareMissionBaselines, exportOem, exportOpm, importOemLike, versionMissionConfig } from "./src/lib/ccsds.ts";
+import { propagateStateCovariance } from "./src/lib/covariance.ts";
 import { analyzeCrewedCislunarMissionOps } from "./src/lib/cislunarOps.ts";
 import { analyzeConsumables } from "./src/lib/consumables.ts";
 import { fetchDonkiSpaceWeatherSummary } from "./src/lib/donki.ts";
+import { evaluateEvaPlan } from "./src/lib/eva.ts";
 import { fetchEonetEvents } from "./src/lib/eonet.ts";
+import { buildFlightReviewReport } from "./src/lib/flightReview.ts";
 import { assessTrajectoryGravityInfluence } from "./src/lib/gravityInfluence.ts";
 import { assessGroundConstraints, LAUNCH_SITES } from "./src/lib/groundSystems.ts";
 import { computeDsnVisibility } from "./src/lib/groundStations.ts";
@@ -23,6 +26,7 @@ import {
   getHorizonsMajorBodyId,
 } from "./src/lib/horizons.ts";
 import { analyzeLaunchConstraints } from "./src/lib/launchConstraints.ts";
+import { designTargetingManeuver } from "./src/lib/maneuverTargeting.ts";
 import { solveMissionTimeline } from "./src/lib/missionTimeline.ts";
 import { fetchNoaaSpaceWeather, fetchNoaaSurfaceWeather } from "./src/lib/noaa.ts";
 import { fetchOpenMeteoWeather } from "./src/lib/openMeteo.ts";
@@ -574,6 +578,41 @@ async function startServer() {
     }
   });
 
+  app.post("/api/sgp4/covariance", (req, res) => {
+    try {
+      res.json({
+        propagation: propagateStateCovariance({
+          state: req.body?.state,
+          horizonMinutes: Number(req.body?.horizonMinutes ?? 90),
+          processNoisePositionKm: Number(req.body?.processNoisePositionKm ?? 0.02),
+          processNoiseVelocityKmS: Number(req.body?.processNoiseVelocityKmS ?? 0.00002),
+        }),
+        source: 'FORMULA-DRIVEN · State covariance propagation',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Covariance propagation failed' });
+    }
+  });
+
+  app.post("/api/maneuver/target", (req, res) => {
+    try {
+      res.json({
+        targeting: designTargetingManeuver({
+          currentPositionKm: req.body?.currentPositionKm,
+          currentVelocityKmS: req.body?.currentVelocityKmS,
+          targetPositionKm: req.body?.targetPositionKm,
+          targetVelocityKmS: req.body?.targetVelocityKmS,
+          timeToGoHours: Number(req.body?.timeToGoHours ?? 6),
+          thrustN: Number(req.body?.thrustN ?? 100000),
+          massKg: Number(req.body?.massKg ?? 25000),
+        }),
+        source: 'FORMULA-DRIVEN · Maneuver design and targeting',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Maneuver targeting failed' });
+    }
+  });
+
   app.post("/api/vehicle/multistage", (req, res) => {
     try {
       const stages = Array.isArray(req.body?.stages) ? req.body.stages : [];
@@ -735,6 +774,35 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(400).json({ error: error?.message || 'Ops console build failed' });
+    }
+  });
+
+  app.post("/api/eva/plan", (req, res) => {
+    try {
+      res.json({
+        eva: evaluateEvaPlan({
+          evaDurationHours: Number(req.body?.evaDurationHours ?? 6),
+          radiationDoseRateMsvHr: Number(req.body?.radiationDoseRateMsvHr ?? 0.15),
+          commCoverageFraction: Number(req.body?.commCoverageFraction ?? 0.7),
+          localTempC: Number(req.body?.localTempC ?? -20),
+          lifeSupportMarginHours: Number(req.body?.lifeSupportMarginHours ?? 48),
+          daylight: Boolean(req.body?.daylight ?? true),
+        }),
+        source: 'FORMULA-DRIVEN · EVA planning support',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'EVA planning failed' });
+    }
+  });
+
+  app.post("/api/reports/flight-review", (req, res) => {
+    try {
+      res.json({
+        report: buildFlightReviewReport(req.body ?? {}),
+        source: 'FORMULA-DRIVEN · Flight review synthesis',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Flight review generation failed' });
     }
   });
 

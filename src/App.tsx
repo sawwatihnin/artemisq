@@ -436,6 +436,59 @@ interface Sgp4ResidualFeed {
   source: string;
 }
 
+interface CovarianceFeed {
+  propagation: {
+    horizonMinutes: number;
+    sigmaPositionKm: number;
+    sigmaVelocityKmS: number;
+    radialSigmaKm: number;
+    alongTrackSigmaKm: number;
+    crossTrackSigmaKm: number;
+    covarianceTrace: number;
+    missDistance95Km: number;
+    source: string;
+  };
+  source: string;
+}
+
+interface ManeuverTargetingFeed {
+  targeting: {
+    deltaVVectorKmS: [number, number, number];
+    deltaVMagnitudeKmS: number;
+    burnDurationS: number;
+    closingVelocityKmS: number;
+    estimatedArrivalErrorKm: number;
+    targetingQuality: 'GOOD' | 'WATCH' | 'POOR';
+    source: string;
+  };
+  source: string;
+}
+
+interface EvaPlanFeed {
+  eva: {
+    evaDurationHours: number;
+    commCoverageFraction: number;
+    doseDuringEvaMsv: number;
+    thermalExposureIndex: number;
+    consumablesMarginHours: number;
+    constraintsSatisfied: boolean;
+    rationale: string;
+    source: string;
+  };
+  source: string;
+}
+
+interface FlightReviewFeed {
+  report: {
+    headline: string;
+    readiness: 'READY' | 'CONDITIONAL' | 'NOT_READY';
+    findings: string[];
+    actions: string[];
+    provenance: string[];
+  };
+  source: string;
+}
+
 interface StageConfig {
   name: string;
   dryMassKg: number;
@@ -1700,6 +1753,11 @@ function SourceStatus({
   webGeoCalcMeta,
   stlAnalysis,
   simResult,
+  trajectoryDesign,
+  groundConstraints,
+  launchConstraintAnalysis,
+  sgp4Propagation,
+  multistageAssessment,
 }: {
   weatherData: any;
   openMeteoWeather: any;
@@ -1714,6 +1772,11 @@ function SourceStatus({
   webGeoCalcMeta: { source?: string; version?: string } | null;
   stlAnalysis: STLAnalysis | null;
   simResult: LaunchOptimizationResponse | null;
+  trajectoryDesign?: TrajectoryDesignFeed | null;
+  groundConstraints?: GroundConstraintFeed | null;
+  launchConstraintAnalysis?: LaunchConstraintFeed | null;
+  sgp4Propagation?: Sgp4PropagateFeed | null;
+  multistageAssessment?: MultiStageAssessment | null;
 }) {
   const rows = [
     { label: 'Surface weather', source: weatherData?.source ?? 'Unavailable', kind: weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
@@ -1730,6 +1793,11 @@ function SourceStatus({
     { label: 'Gravity influence', source: gravityInfluence?.source ?? 'Unavailable', kind: gravityInfluence?.source?.startsWith('FORMULA') ? 'formula' : 'preset' },
     { label: 'Telemetry ingest', source: telemetryFeed?.frame ? telemetryFeed.source : 'Awaiting external frames', kind: telemetryFeed?.frame ? 'live-api' : 'preset' },
     { label: 'SPICE verification', source: webGeoCalcMeta?.source ?? 'Unavailable', kind: webGeoCalcMeta?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Trajectory design', source: trajectoryDesign?.source ?? 'Unavailable', kind: trajectoryDesign ? 'formula' : 'preset' },
+    { label: 'Ground systems', source: groundConstraints?.source ?? 'Unavailable', kind: groundConstraints ? 'formula' : 'preset' },
+    { label: 'Launch constraints', source: launchConstraintAnalysis?.source ?? 'Unavailable', kind: launchConstraintAnalysis ? 'formula' : 'preset' },
+    { label: 'Orbital ops', source: sgp4Propagation?.source ?? 'Unavailable', kind: sgp4Propagation ? 'formula' : 'preset' },
+    { label: 'Vehicle staging', source: multistageAssessment?.source ?? 'Unavailable', kind: multistageAssessment ? 'formula' : 'preset' },
   ] as const;
 
   return (
@@ -1948,6 +2016,11 @@ export default function App() {
   const [sgp4Conjunctions, setSgp4Conjunctions] = useState<Sgp4ConjunctionFeed | null>(null);
   const [observedStateText, setObservedStateText] = useState('');
   const [sgp4Residuals, setSgp4Residuals] = useState<Sgp4ResidualFeed | null>(null);
+  const [covariancePropagation, setCovariancePropagation] = useState<CovarianceFeed | null>(null);
+  const [maneuverTargeting, setManeuverTargeting] = useState<ManeuverTargetingFeed | null>(null);
+  const [evaDurationHours, setEvaDurationHours] = useState(6);
+  const [evaPlan, setEvaPlan] = useState<EvaPlanFeed | null>(null);
+  const [flightReview, setFlightReview] = useState<FlightReviewFeed | null>(null);
   const [stageConfigs, setStageConfigs] = useState<StageConfig[]>(DEFAULT_STAGE_CONFIGS);
   const [multistageAssessment, setMultistageAssessment] = useState<MultiStageAssessment | null>(null);
   const [ccsdsImportText, setCcsdsImportText] = useState('');
@@ -2288,6 +2361,22 @@ export default function App() {
       nearEarthRadiation,
       radiationIntersection,
       cislunarOps,
+      trajectoryDesign,
+      groundConstraints,
+      timelineSolution,
+      consumablesAnalysis,
+      surfaceEnvironment,
+      launchConstraintAnalysis,
+      opsConsole,
+      sgp4Propagation,
+      sgp4Conjunctions,
+      sgp4Residuals,
+      covariancePropagation,
+      maneuverTargeting,
+      evaPlan,
+      flightReview,
+      multistageAssessment,
+      baselineComparison,
       optimization: optResult,
       importedMissionConfig,
       importedGraph,
@@ -2752,6 +2841,53 @@ export default function App() {
       setSgp4Propagation(propagationResponse.ok ? propagationData : null);
       setSgp4Conjunctions(conjunctionResponse.ok ? conjunctionData : null);
 
+      const primaryState = propagationData?.states?.[0];
+      if (primaryState) {
+        const covarianceResponse = await fetch('/api/sgp4/covariance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            state: {
+              positionKm: primaryState.positionKm,
+              velocityKmS: primaryState.velocityKmS,
+              sigmaPositionKm: 1.5,
+              sigmaVelocityKmS: 0.002,
+            },
+            horizonMinutes: 180,
+          }),
+        });
+        const covarianceData = await covarianceResponse.json();
+        setCovariancePropagation(covarianceResponse.ok ? covarianceData : null);
+
+        const targetPoint = missionTrajectory[Math.min(missionTrajectory.length - 1, Math.max(1, Math.floor(missionTrajectory.length * 0.7)))];
+        if (targetPoint) {
+          const targetingResponse = await fetch('/api/maneuver/target', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              currentPositionKm: primaryState.positionKm,
+              currentVelocityKmS: primaryState.velocityKmS,
+              targetPositionKm: [
+                targetPoint.pos[0] * missionKmPerUnit,
+                targetPoint.pos[1] * missionKmPerUnit,
+                targetPoint.pos[2] * missionKmPerUnit,
+              ],
+              targetVelocityKmS: targetPoint.vel ?? [0, 0, 0],
+              timeToGoHours: Math.max(2, ((targetPoint.time_s ?? 0) / 3600) - 1),
+              thrustN: spacecraftThrust,
+              massKg: spacecraftMass,
+            }),
+          });
+          const targetingData = await targetingResponse.json();
+          setManeuverTargeting(targetingResponse.ok ? targetingData : null);
+        } else {
+          setManeuverTargeting(null);
+        }
+      } else {
+        setCovariancePropagation(null);
+        setManeuverTargeting(null);
+      }
+
       const observed = parseObservedStateText(observedStateText);
       if (observed.length && propagationData?.states?.length) {
         const residualResponse = await fetch('/api/sgp4/residuals', {
@@ -2769,9 +2905,11 @@ export default function App() {
       setSgp4Propagation(null);
       setSgp4Conjunctions(null);
       setSgp4Residuals(null);
+      setCovariancePropagation(null);
+      setManeuverTargeting(null);
       addLog('SGP4 analysis failed');
     }
-  }, [tleInputText, observedStateText, launchDate, addLog]);
+  }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass]);
 
   const exportCcsdsProducts = useCallback(async () => {
     try {
@@ -2861,6 +2999,62 @@ export default function App() {
       addLog('Baseline comparison failed');
     }
   }, [importedMissionConfig, launchBodyId, targetPlanet, launchDate, missionType, fuelType, launchLatitude, launchLongitude, launchAltitudeKm, spacecraftMass, spacecraftThrust, keplerEl, policyProfile, shieldingMassKg, addLog]);
+
+  useEffect(() => {
+    const analyzeEva = async () => {
+      try {
+        const response = await fetch('/api/eva/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            evaDurationHours,
+            radiationDoseRateMsvHr: cislunarOps?.analysis?.dose?.peakDoseRateMsvHr ?? 0.12,
+            commCoverageFraction: cislunarOps?.analysis?.consumables?.commCoverageFraction ?? 0.7,
+            localTempC: surfaceEnvironment?.estimatedSurfaceTempC ?? -20,
+            lifeSupportMarginHours: cislunarOps?.analysis?.consumables?.lifeSupportMarginHours ?? 72,
+            daylight: surfaceEnvironment?.daylight ?? true,
+          }),
+        });
+        const data = await response.json();
+        setEvaPlan(response.ok ? data : null);
+      } catch {
+        setEvaPlan(null);
+      }
+    };
+    analyzeEva();
+  }, [evaDurationHours, cislunarOps, surfaceEnvironment]);
+
+  useEffect(() => {
+    const synthesizeFlightReview = async () => {
+      try {
+        const response = await fetch('/api/reports/flight-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            missionName: `${launchBodyId} to ${targetPlanet}`,
+            goNoGo: cislunarOps?.analysis?.goNoGo?.overall ?? (launchConstraintAnalysis?.analysis?.goForLaunch ? 'GO' : 'WATCH'),
+            trajectoryDeltaV: trajectoryDesign?.patchedConic?.totalDeltaVKmS ?? (optResult?.totalDeltaV_ms ?? 0) / 1000,
+            totalDoseMsv: cislunarOps?.analysis?.dose?.cumulativeDoseMsv ?? 0,
+            conjunctionCount: sgp4Conjunctions?.conjunctions?.length ?? celestrakTraffic?.conjunctions?.length ?? 0,
+            rangeGo: groundConstraints?.analysis?.rangeGo,
+            launchGo: launchConstraintAnalysis?.analysis?.goForLaunch,
+            opsStatus: opsConsole?.console?.status,
+            provenance: [
+              weatherData?.source ?? 'NO WEATHER',
+              nasaWeather?.source ?? 'NO SPACE WEATHER',
+              dsnVisibility?.source ?? 'NO DSN',
+              trajectoryDesign?.source ?? 'NO TRAJECTORY DESIGN',
+            ],
+          }),
+        });
+        const data = await response.json();
+        setFlightReview(response.ok ? data : null);
+      } catch {
+        setFlightReview(null);
+      }
+    };
+    synthesizeFlightReview();
+  }, [launchBodyId, targetPlanet, cislunarOps, launchConstraintAnalysis, trajectoryDesign, optResult, sgp4Conjunctions, celestrakTraffic, groundConstraints, opsConsole, weatherData, nasaWeather, dsnVisibility]);
   useEffect(() => {
     if (importedMissionConfig?.tleObjects?.length) {
       const lines = importedMissionConfig.tleObjects.flatMap((item) => [item.name, item.tle1, item.tle2]).join('\n');
@@ -3861,6 +4055,45 @@ export default function App() {
                     </div>
                   </DashboardCard>
 
+                  <DashboardCard title="Crew EVA & Flight Review" icon={ShieldAlert} provenance={flightReview ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                        EVA Duration
+                        <input className="mt-1 w-full" type="range" min={1} max={10} step={0.5} value={evaDurationHours} onChange={(event) => setEvaDurationHours(+event.target.value)} />
+                        <span className="mt-1 block text-xs text-sky-200">{evaDurationHours.toFixed(1)} h</span>
+                      </label>
+                      {evaPlan?.eva ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="EVA" value={evaPlan.eva.constraintsSatisfied ? 'GO' : 'HOLD'} unit="constraint check" tone={evaPlan.eva.constraintsSatisfied ? 'good' : 'bad'} />
+                          <MetricBadge label="Dose" value={evaPlan.eva.doseDuringEvaMsv.toFixed(2)} unit="mSv EVA" tone={evaPlan.eva.doseDuringEvaMsv < 2.5 ? 'good' : 'warn'} />
+                          <MetricBadge label="Comm" value={(evaPlan.eva.commCoverageFraction * 100).toFixed(0)} unit="%" tone={evaPlan.eva.commCoverageFraction > 0.55 ? 'good' : 'warn'} />
+                          <MetricBadge label="Margin" value={evaPlan.eva.consumablesMarginHours.toFixed(1)} unit="h life-support" tone={evaPlan.eva.consumablesMarginHours > 6 ? 'good' : 'warn'} />
+                        </div>
+                      ) : null}
+                      {evaPlan?.eva ? (
+                        <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs leading-relaxed text-slate-300">{evaPlan.eva.rationale}</p>
+                      ) : null}
+                      {flightReview?.report ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-sm text-slate-100">{flightReview.report.headline}</p>
+                            <StatusPill value={flightReview.report.readiness} tone={flightReview.report.readiness === 'READY' ? 'good' : flightReview.report.readiness === 'CONDITIONAL' ? 'warn' : 'bad'} />
+                          </div>
+                          <div className="space-y-1 text-xs text-slate-400">
+                            {flightReview.report.findings.slice(0, 4).map((item) => (
+                              <p key={item}>• {item}</p>
+                            ))}
+                          </div>
+                          <div className="mt-2 space-y-1 text-xs text-slate-300">
+                            {flightReview.report.actions.map((item) => (
+                              <p key={item}>{item}</p>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+
                   <DashboardCard title="CCSDS & Baselines" icon={Atom} provenance={baselineComparison ? 'formula' : 'preset'}>
                     <div className="space-y-3">
                       <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
@@ -3911,6 +4144,11 @@ export default function App() {
                       webGeoCalcMeta={webGeoCalcMeta}
                       stlAnalysis={stlAnalysis}
                       simResult={simResult}
+                      trajectoryDesign={trajectoryDesign}
+                      groundConstraints={groundConstraints}
+                      launchConstraintAnalysis={launchConstraintAnalysis}
+                      sgp4Propagation={sgp4Propagation}
+                      multistageAssessment={multistageAssessment}
                     />
                   </DashboardCard>
                 </motion.div>
@@ -4005,6 +4243,36 @@ export default function App() {
                       ) : (
                         <p className="text-sm text-slate-400">Paste observed states and rerun SGP4 to compute orbit-determination residuals.</p>
                       )}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Covariance & Targeting" icon={Gauge} provenance={covariancePropagation ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      {covariancePropagation?.propagation ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="σ Position" value={covariancePropagation.propagation.sigmaPositionKm.toFixed(2)} unit="km" tone="warn" />
+                          <MetricBadge label="σ Velocity" value={covariancePropagation.propagation.sigmaVelocityKmS.toExponential(2)} unit="km/s" />
+                          <MetricBadge label="Along-Track" value={covariancePropagation.propagation.alongTrackSigmaKm.toFixed(2)} unit="km" />
+                          <MetricBadge label="95% Miss" value={covariancePropagation.propagation.missDistance95Km.toFixed(2)} unit="km" tone={covariancePropagation.propagation.missDistance95Km < 10 ? 'good' : 'warn'} />
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-400">Run SGP4 propagation to seed covariance growth and uncertainty screening.</p>
+                      )}
+                      {maneuverTargeting?.targeting ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-sm text-slate-100">Maneuver Design</p>
+                            <StatusPill value={maneuverTargeting.targeting.targetingQuality} tone={maneuverTargeting.targeting.targetingQuality === 'GOOD' ? 'good' : maneuverTargeting.targeting.targetingQuality === 'WATCH' ? 'warn' : 'bad'} />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <MetricBadge label="Δv" value={maneuverTargeting.targeting.deltaVMagnitudeKmS.toFixed(4)} unit="km/s" tone="good" />
+                            <MetricBadge label="Burn" value={maneuverTargeting.targeting.burnDurationS.toFixed(1)} unit="s" />
+                            <MetricBadge label="Closing V" value={maneuverTargeting.targeting.closingVelocityKmS.toFixed(4)} unit="km/s" />
+                            <MetricBadge label="Arrival Error" value={maneuverTargeting.targeting.estimatedArrivalErrorKm.toFixed(2)} unit="km" tone={maneuverTargeting.targeting.estimatedArrivalErrorKm < 5 ? 'good' : 'warn'} />
+                          </div>
+                          <p className="mt-2 text-xs text-slate-500">Vector: {maneuverTargeting.targeting.deltaVVectorKmS.map((item) => item.toFixed(5)).join(', ')} km/s</p>
+                        </div>
+                      ) : null}
                     </div>
                   </DashboardCard>
 
