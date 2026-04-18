@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
 import { LaunchSimulator } from "./src/lib/simulator.ts";
+import { buildHorizonsTrajectory, buildHorizonsUrl } from "./src/lib/horizons.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,74 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
   app.use(express.json());
+
+  // ── JPL Horizons ───────────────────────────────────────────────────────────
+  app.get("/api/horizons", async (req, res) => {
+    const raw = req.query;
+    const required = ['COMMAND', 'CENTER', 'START_TIME', 'STOP_TIME'] as const;
+    for (const key of required) {
+      if (!raw[key]) {
+        return res.status(400).json({ error: `${key} is required` });
+      }
+    }
+
+    try {
+      const url = buildHorizonsUrl({
+        COMMAND: String(raw.COMMAND),
+        CENTER: String(raw.CENTER),
+        START_TIME: String(raw.START_TIME),
+        STOP_TIME: String(raw.STOP_TIME),
+        STEP_SIZE: raw.STEP_SIZE ? String(raw.STEP_SIZE) : undefined,
+        EPHEM_TYPE: raw.EPHEM_TYPE as 'OBSERVER' | 'VECTORS' | 'ELEMENTS' | undefined,
+        OUT_UNITS: raw.OUT_UNITS as 'KM-S' | 'AU-D' | 'KM-D' | undefined,
+        REF_SYSTEM: raw.REF_SYSTEM as 'ICRF' | 'B1950' | undefined,
+        VEC_TABLE: raw.VEC_TABLE ? String(raw.VEC_TABLE) : undefined,
+        VEC_CORR: raw.VEC_CORR as 'NONE' | 'LT' | 'LT+S' | undefined,
+        OBJ_DATA: raw.OBJ_DATA as 'YES' | 'NO' | undefined,
+        CSV_FORMAT: raw.CSV_FORMAT as 'YES' | 'NO' | undefined,
+        CAL_FORMAT: raw.CAL_FORMAT as 'CAL' | 'JD' | 'BOTH' | undefined,
+        TIME_TYPE: raw.TIME_TYPE as 'UT' | 'TT' | 'TDB' | undefined,
+        MAKE_EPHEM: raw.MAKE_EPHEM as 'YES' | 'NO' | undefined,
+      });
+      const response = await fetch(url);
+      const text = await response.text();
+      res.status(response.status).type('application/json').send(text);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "Horizons fetch failed" });
+    }
+  });
+
+  app.get("/api/horizons/trajectory", async (req, res) => {
+    const launchDate = String(req.query.launchDate || '');
+    const destinationId = String(req.query.destinationId || '');
+    const launchBodyId = String(req.query.launchBodyId || 'earth');
+    if (!launchDate || !destinationId) {
+      return res.status(400).json({ error: "launchDate and destinationId are required" });
+    }
+
+    try {
+      const keplerEl = {
+        a: Number(req.query.a ?? 6778),
+        e: Number(req.query.e ?? 0.0008),
+        i: Number(req.query.i ?? 51.6),
+        raan: Number(req.query.raan ?? 247),
+        argp: Number(req.query.argp ?? 130),
+        nu: Number(req.query.nu ?? 0),
+      };
+      const trajectory = await buildHorizonsTrajectory({
+        launchDate,
+        destinationId,
+        launchBodyId,
+        keplerEl,
+      });
+      res.json({
+        source: "LIVE · JPL Horizons",
+        trajectory,
+      });
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || "Horizons trajectory build failed" });
+    }
+  });
 
   // ── Weather ────────────────────────────────────────────────────────────────
   app.get("/api/weather", async (req, res) => {

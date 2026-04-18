@@ -34,6 +34,7 @@ import { twMerge } from 'tailwind-merge';
 
 import {
   type KeplerianElements,
+  type TrajectoryPoint,
   atmosphericDensity,
   calculateArtemisTrajectory,
   computeHohmann,
@@ -960,6 +961,7 @@ function MissionGlobe({
   pathNodeIds,
   keplerEl,
   stageList,
+  trajectory,
 }: {
   launchDate: string;
   targetPlanetId: string;
@@ -968,12 +970,9 @@ function MissionGlobe({
   pathNodeIds: string[];
   keplerEl: KeplerianElements;
   stageList: StageDisplay[];
+  trajectory: TrajectoryPoint[];
 }) {
   const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
-  const trajectory = useMemo(
-    () => calculateArtemisTrajectory(launchDate, targetPlanetId, launchBodyId, keplerEl),
-    [launchDate, targetPlanetId, launchBodyId, keplerEl],
-  );
   const outboundTrajectory = useMemo(() => trajectory.slice(0, Math.max(2, Math.floor(trajectory.length * 0.55))), [trajectory]);
   const inboundTrajectory = useMemo(() => trajectory.slice(Math.max(1, Math.floor(trajectory.length * 0.5))), [trajectory]);
   const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
@@ -1313,6 +1312,8 @@ export default function App() {
   const [maxQThresholdKpa, setMaxQThresholdKpa] = useState(42);
   const [optimizing, setOptimizing] = useState(false);
   const [simulating, setSimulating] = useState(false);
+  const [horizonsTrajectory, setHorizonsTrajectory] = useState<TrajectoryPoint[] | null>(null);
+  const [horizonsTrajectorySource, setHorizonsTrajectorySource] = useState<string | null>(null);
   const [qaoaDepth, setQaoaDepth] = useState(3);
   const [qaoaRefreshing, setQaoaRefreshing] = useState(false);
   const [shieldingMassKg, setShieldingMassKg] = useState(180);
@@ -1616,9 +1617,48 @@ export default function App() {
 
   const cislunarVisualizer = missionType === 'lunar' && targetPlanet === 'moon' && launchBodyId === 'earth';
   const missionKmPerUnit = cislunarVisualizer ? CISLUNAR_VIS_KM_PER_UNIT : VIS_SCENE_KM_PER_UNIT;
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const params = new URLSearchParams({
+          launchDate,
+          destinationId: targetPlanet,
+          launchBodyId,
+          a: String(keplerEl.a),
+          e: String(keplerEl.e),
+          i: String(keplerEl.i),
+          raan: String(keplerEl.raan),
+          argp: String(keplerEl.argp),
+          nu: String(keplerEl.nu),
+        });
+        const response = await fetch(`/api/horizons/trajectory?${params.toString()}`, { signal: controller.signal });
+        if (!response.ok) throw new Error(`Horizons HTTP ${response.status}`);
+        const payload = await response.json() as { trajectory?: TrajectoryPoint[]; source?: string; error?: string };
+        if (payload.error) throw new Error(payload.error);
+        if (!cancelled && payload.trajectory?.length) {
+          setHorizonsTrajectory(payload.trajectory);
+          setHorizonsTrajectorySource(payload.source ?? 'LIVE · JPL Horizons');
+        }
+      } catch {
+        if (!cancelled) {
+          setHorizonsTrajectory(null);
+          setHorizonsTrajectorySource(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [launchDate, targetPlanet, launchBodyId, keplerEl.a, keplerEl.e, keplerEl.i, keplerEl.raan, keplerEl.argp, keplerEl.nu]);
+
   const missionTrajectory = useMemo(
-    () => calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
-    [launchDate, targetPlanet, launchBodyId, keplerEl],
+    () => horizonsTrajectory ?? calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
+    [horizonsTrajectory, launchDate, targetPlanet, launchBodyId, keplerEl],
   );
   const missionStages = useMemo(() => {
     const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
@@ -1723,7 +1763,7 @@ export default function App() {
                       <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
                       <ambientLight intensity={0.45} />
                       <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
-                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} stageList={missionStages} />
+                      <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} stageList={missionStages} trajectory={missionTrajectory} />
                     </Canvas>
                   </div>
                   <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
@@ -1736,6 +1776,7 @@ export default function App() {
                         Heliocentric bodies are shown relative to Earth at the selected date (same scale as orbit polynomials in <code className="text-slate-400">celestial.ts</code>). Trajectory is a smooth guide curve, not a patched-conic solve.
                       </>
                     )}
+                    {horizonsTrajectorySource ? <span className="ml-1 text-sky-300">Trajectory source: {horizonsTrajectorySource}.</span> : null}
                   </p>
                   {simResult ? (
                     <p className="mt-2 text-[10px] text-sky-200/90">
