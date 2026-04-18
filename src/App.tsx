@@ -984,6 +984,19 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function classifyDisplayedCrewRisk(score: number): 'SAFE' | 'MONITOR' | 'HIGH_RISK' | 'DO_NOT_EMBARK' {
+  if (score <= 0.3) return 'SAFE';
+  if (score <= 0.6) return 'MONITOR';
+  if (score <= 1.0) return 'HIGH_RISK';
+  return 'DO_NOT_EMBARK';
+}
+
+function embarkationFromDisplayedRisk(classification: 'SAFE' | 'MONITOR' | 'HIGH_RISK' | 'DO_NOT_EMBARK') {
+  if (classification === 'SAFE') return 'SAFE_TO_EMBARK';
+  if (classification === 'MONITOR') return 'PROCEED_WITH_CAUTION';
+  return 'DO_NOT_EMBARK';
+}
+
 function formatHour(value: number): string {
   return `T+${value.toFixed(1)} h`;
 }
@@ -2000,6 +2013,7 @@ function MissionGlobe({
     }
     return { ...stage, point: trajectory[idx]?.pos ?? [0, 0, 0] };
   });
+  const hasReturnPhase = stageList.some((stage) => stage.label === 'Return coast' || stage.label === 'Entry' || stage.label === 'Landing');
 
   return (
     <group>
@@ -2052,7 +2066,7 @@ function MissionGlobe({
         );
       })}
       <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.8 : 2.5} transparent opacity={0.96} />
-      {isCislunar && returnTrajectory.length >= 2 ? (
+      {hasReturnPhase && returnTrajectory.length >= 2 ? (
         <DreiLine points={returnTrajectory.map((point) => point.pos)} color="#38bdf8" lineWidth={isCislunar ? 3.2 : 2.2} transparent opacity={0.88} />
       ) : null}
       {projectedNodes.map((node) => {
@@ -2460,7 +2474,7 @@ export default function App() {
   }, []);
 
   const preset = MISSION_PRESETS[missionType];
-  const activeGraph = importedGraph ?? { nodes: preset.nodes, edges: preset.edges };
+  const baseGraph = importedGraph ?? { nodes: preset.nodes, edges: preset.edges };
   const altitude = keplerEl.a - 6371;
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
   const bodyCatalog = useMemo(() => (
@@ -2605,12 +2619,12 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          nodes: activeGraph.nodes,
-          edges: activeGraph.edges,
+          nodes: missionGraph.nodes,
+          edges: missionGraph.edges,
           weights: { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
-          start: activeGraph.nodes[0]?.id ?? preset.start,
-          end: activeGraph.nodes[activeGraph.nodes.length - 1]?.id ?? preset.end,
-          steps: Math.max(2, activeGraph.nodes.length),
+          start: missionGraph.nodes[0]?.id ?? preset.start,
+          end: missionGraph.nodes[missionGraph.nodes.length - 1]?.id ?? preset.end,
+          steps: Math.max(2, missionGraph.nodes.length),
           date: launchDate,
           radiationIndex: Math.max(
             nasaWeather?.radiationIndex || 1.0,
@@ -2638,7 +2652,7 @@ export default function App() {
       const data = await response.json();
       setOptResult(data);
       addLog(`Mission optimization complete: ${data.qaoa.layers.length} QAOA layers`);
-      addLog(`Quantum tab remains simulated; routing cost still uses preset graph data`);
+      addLog(`Mission graph costs are now conditioned on live radiation, comm, and transfer design inputs`);
     } catch (error) {
       addLog('Mission optimization failed');
     } finally {
@@ -2646,7 +2660,7 @@ export default function App() {
     }
   };
 
-  const rerunQAOA = useCallback(async (nextDepth: number) => {
+  async function rerunQAOA(nextDepth: number) {
     if (!optResult?.path?.length) return;
     setQaoaRefreshing(true);
     try {
@@ -2655,8 +2669,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bestPath: optResult.path,
-          nodes: activeGraph.nodes,
-          edges: activeGraph.edges,
+          nodes: missionGraph.nodes,
+          edges: missionGraph.edges,
           weights: { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
           qaoa_p: nextDepth,
           isp_s: PROPELLANTS[fuelType].isp_vac,
@@ -2672,7 +2686,7 @@ export default function App() {
     } finally {
       setQaoaRefreshing(false);
     }
-  }, [optResult, activeGraph.nodes, activeGraph.edges, fuelType, spacecraftMass, addLog]);
+  }
 
   const handleStlUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -2897,6 +2911,99 @@ export default function App() {
     () => horizonsTrajectory ?? calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
     [horizonsTrajectory, launchDate, targetPlanet, launchBodyId, keplerEl],
   );
+  const missionDistanceKm = useMemo(() => {
+    let total = 0;
+    for (let i = 1; i < missionTrajectory.length; i++) {
+      const a = missionTrajectory[i - 1].pos;
+      const b = missionTrajectory[i].pos;
+      total += Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * missionKmPerUnit;
+    }
+    return total;
+  }, [missionTrajectory, missionKmPerUnit]);
+  const missionGraph: { nodes: Array<Record<string, any>>; edges: Array<Record<string, any>> } = useMemo(() => {
+    if (importedGraph) return importedGraph;
+
+    const radiationScale = Math.max(
+      nasaWeather?.radiationIndex ?? 1,
+      nearEarthRadiation?.environment?.aggregateIndex ?? 1,
+      radiationIntersection?.assessment?.normalizedRiskIndex ?? 1,
+      ((cislunarOps?.analysis?.dose?.cumulativeDoseMsv ?? 0) / 40),
+      1,
+    );
+    const dsnCoverage = clamp((dsnVisibility?.windows?.reduce((sum, window) => sum + window.durationMinutes, 0) ?? 0) / (72 * 60), 0.15, 1);
+    const telemetryComm = clamp((((telemetryFeed?.frame?.commMarginDb ?? 6) + 2) / 12), 0.2, 1);
+    const launchCommit = launchConstraintAnalysis?.analysis?.goForLaunch === false ? 0.82 : 1;
+    const commScale = clamp(0.55 * dsnCoverage + 0.45 * telemetryComm, 0.2, 1) * launchCommit;
+    const totalBaseDistance = Math.max(1, preset.edges.reduce((sum, edge) => sum + Math.max(0, edge.distance ?? 0), 0));
+    const totalBaseDeltaV = Math.max(1, preset.edges.reduce((sum, edge) => sum + Math.max(0, edge.deltaV_ms ?? 0), 0));
+    const designedDeltaV = Math.max(
+      trajectoryDesign?.patchedConic?.totalDeltaVKmS ? trajectoryDesign.patchedConic.totalDeltaVKmS * 1000 : 0,
+      trajectoryDesign?.reservePolicy?.reserveDeltaVKmS ? trajectoryDesign.reservePolicy.reserveDeltaVKmS * 1000 : 0,
+      totalBaseDeltaV,
+    );
+    const totalDistance = Math.max(missionDistanceKm, totalBaseDistance);
+    const solarBoost = clamp((eonetEvents?.total ?? 0) / 10, 0, 0.18);
+
+    const nodes = preset.nodes.map((node, index) => {
+      const progress = preset.nodes.length > 1 ? index / (preset.nodes.length - 1) : 0;
+      const altitudeFactor = clamp(node.altitude_km / 400000, 0, 1.4);
+      const beltBoost = node.id.toLowerCase().includes('allen') ? Math.max(0.35, (radiationIntersection?.assessment?.normalizedRiskIndex ?? 0) * 0.8) : 0;
+      const surfaceShielding = missionType === 'rover' && surfaceEnvironment?.dustOrRegolithRisk === 'HIGH' ? 0.08 : 0;
+      const radiation = clamp(
+        node.radiation * (0.7 + 0.45 * radiationScale) + altitudeFactor * 0.12 + beltBoost + solarBoost - surfaceShielding,
+        0.04,
+        1.6,
+      );
+      const commPenalty = progress > 0.55 ? 0.18 * (1 - dsnCoverage) : 0.05 * (1 - telemetryComm);
+      const surfaceCommBoost = missionType === 'rover' && surfaceEnvironment?.daylight ? 0.06 : 0;
+      const commScore = clamp(node.commScore * commScale - commPenalty + surfaceCommBoost, 0.08, 1);
+      return {
+        ...node,
+        radiation,
+        commScore,
+      };
+    });
+
+    const edges = preset.edges.map((edge) => {
+      const distanceShare = Math.max(0, edge.distance ?? 0) / totalBaseDistance;
+      const deltaVShare = Math.max(0, edge.deltaV_ms ?? 0) / totalBaseDeltaV;
+      const blendedShare = deltaVShare > 0 ? 0.65 * deltaVShare + 0.35 * distanceShare : distanceShare;
+      const distance = missionType === 'rover'
+        ? edge.distance
+        : Math.max(edge.distance ?? 0, totalDistance * blendedShare);
+      const deltaV_ms = missionType === 'rover'
+        ? edge.deltaV_ms
+        : Math.max(25, designedDeltaV * blendedShare);
+      const fuelFraction = missionType === 'rover'
+        ? (edge.fuelCost ?? 0) / 100
+        : tsiolkovskyFuelMass(deltaV_ms, spacecraftMass, PROPELLANTS[fuelType].isp_vac) / Math.max(spacecraftMass, 1);
+      return {
+        ...edge,
+        distance,
+        deltaV_ms,
+        fuelCost: clamp(fuelFraction * 100, 0.5, 95),
+      };
+    });
+
+    return { nodes, edges };
+  }, [
+    importedGraph,
+    nasaWeather?.radiationIndex,
+    nearEarthRadiation,
+    radiationIntersection,
+    cislunarOps,
+    dsnVisibility,
+    telemetryFeed,
+    launchConstraintAnalysis,
+    preset,
+    trajectoryDesign,
+    missionDistanceKm,
+    missionType,
+    spacecraftMass,
+    fuelType,
+    eonetEvents,
+    surfaceEnvironment,
+  ]);
   useEffect(() => {
     const analyzeGravity = async () => {
       if (!systemEphemeris?.bodies?.length || !missionTrajectory.length) {
@@ -3484,6 +3591,65 @@ export default function App() {
     () => deriveAscentTimelineStages(simResult, optResult?.physics.transferTime_days),
     [simResult, optResult?.physics.transferTime_days],
   );
+  const displayedCrewHealth = useMemo(() => {
+    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarOps?.analysis) {
+      const dose = cislunarOps.analysis.dose;
+      const consumables = cislunarOps.analysis.consumables;
+      const unsafeDuration = dose.safeHavenWindows.reduce((sum, window) => sum + Math.max(0, window.endHour - window.startHour), 0);
+      const missionDuration = Math.max(consumables.missionDurationHours, 1);
+      const riskScore = clamp(
+        0.42 * (dose.cumulativeDoseMsv / 35) +
+        0.38 * (dose.peakDoseRateMsvHr / 0.32) +
+        0.2 * (unsafeDuration / missionDuration),
+        0,
+        1.5,
+      );
+      const classification = classifyDisplayedCrewRisk(riskScore);
+      const dominantSegment = dose.beltDoseMsv >= dose.deepSpaceDoseMsv
+        ? {
+            nodeName: 'Van Allen Passage',
+            share: dose.cumulativeDoseMsv > 0 ? dose.beltDoseMsv / dose.cumulativeDoseMsv : 0,
+          }
+        : {
+            nodeName: 'Deep Space Transit',
+            share: dose.cumulativeDoseMsv > 0 ? dose.deepSpaceDoseMsv / dose.cumulativeDoseMsv : 0,
+          };
+      return {
+        cumulativeDose: dose.cumulativeDoseMsv,
+        peakExposure: dose.peakDoseRateMsvHr,
+        unsafeDuration,
+        riskScore,
+        classification,
+        embarkationDecision: embarkationFromDisplayedRisk(classification),
+        dominantSegment,
+        unitLabel: 'mSv',
+        peakUnitLabel: 'mSv/h',
+      };
+    }
+    if (!optResult?.crewRisk) return null;
+    return {
+      ...optResult.crewRisk,
+      unitLabel: 'arb. dose',
+      peakUnitLabel: 'dose-rate proxy',
+    };
+  }, [launchBodyId, targetPlanet, cislunarOps, optResult?.crewRisk]);
+  const displayedMissionDecision = useMemo(() => {
+    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarOps?.analysis && displayedCrewHealth) {
+      const go = cislunarOps.analysis.goNoGo;
+      const decision = go.overall === 'GO' ? 'CONTINUE' : go.overall === 'CONDITIONAL' ? 'REPLAN' : 'ABORT';
+      const urgencyLevel = go.overall === 'GO' ? 'LOW' : go.overall === 'CONDITIONAL' ? 'MODERATE' : 'HIGH';
+      return {
+        decision,
+        urgencyLevel,
+        rationale: go.rationale,
+        expectedRiskReduction: clamp(displayedCrewHealth.riskScore * (decision === 'ABORT' ? 0.9 : decision === 'REPLAN' ? 0.45 : 0), 0, 1.5),
+        candidateActions: go.rules
+          .filter((rule) => rule.status !== 'GO')
+          .map((rule) => `${rule.rule}: ${rule.rationale}`),
+      };
+    }
+    return optResult?.missionDecision ?? null;
+  }, [launchBodyId, targetPlanet, cislunarOps, displayedCrewHealth, optResult?.missionDecision]);
 
   const ascentChartData = simResult?.best.steps.map((step) => ({
     time: step.time,
@@ -3601,7 +3767,7 @@ export default function App() {
                         launchDate={launchDate}
                         targetPlanetId={targetPlanet}
                         launchBodyId={launchBodyId}
-                        preset={{ ...preset, nodes: activeGraph.nodes }}
+                        preset={{ ...preset, nodes: missionGraph.nodes }}
                         pathNodeIds={optResult?.path ?? []}
                         keplerEl={keplerEl}
                         stageList={missionStages}
@@ -3760,52 +3926,52 @@ export default function App() {
               </div>
             </DashboardCard>
 
-            {optResult?.crewRisk ? (
+            {displayedCrewHealth ? (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <DashboardCard title="Crew Health Panel" icon={ShieldAlert} provenance="formula">
                     <div className="grid grid-cols-2 gap-2">
-                      <MetricBadge label="Cumulative Dose" value={optResult.crewRisk.cumulativeDose.toFixed(2)} unit="arb. dose" tone={optResult.crewRisk.cumulativeDose > 18 ? 'bad' : 'warn'} />
-                      <MetricBadge label="Peak Exposure" value={optResult.crewRisk.peakExposure.toFixed(2)} unit="dose-rate proxy" tone={optResult.crewRisk.peakExposure > 1 ? 'bad' : 'warn'} />
-                      <MetricBadge label="Unsafe Duration" value={optResult.crewRisk.unsafeDuration.toFixed(1)} unit="hours" tone={optResult.crewRisk.unsafeDuration > 6 ? 'bad' : 'warn'} />
-                      <MetricBadge label="Risk Score" value={optResult.crewRisk.riskScore.toFixed(2)} unit={optResult.crewRisk.classification} tone={optResult.crewRisk.riskScore > 1 ? 'bad' : optResult.crewRisk.riskScore > 0.6 ? 'warn' : 'good'} />
+                      <MetricBadge label="Cumulative Dose" value={displayedCrewHealth.cumulativeDose.toFixed(2)} unit={displayedCrewHealth.unitLabel} tone={displayedCrewHealth.cumulativeDose > (displayedCrewHealth.unitLabel === 'mSv' ? 35 : 18) ? 'bad' : 'warn'} />
+                      <MetricBadge label="Peak Exposure" value={displayedCrewHealth.peakExposure.toFixed(2)} unit={displayedCrewHealth.peakUnitLabel} tone={displayedCrewHealth.peakExposure > (displayedCrewHealth.peakUnitLabel === 'mSv/h' ? 0.32 : 1) ? 'bad' : 'warn'} />
+                      <MetricBadge label="Unsafe Duration" value={displayedCrewHealth.unsafeDuration.toFixed(1)} unit="hours" tone={displayedCrewHealth.unsafeDuration > 6 ? 'bad' : 'warn'} />
+                      <MetricBadge label="Risk Score" value={displayedCrewHealth.riskScore.toFixed(2)} unit={displayedCrewHealth.classification} tone={displayedCrewHealth.riskScore > 1 ? 'bad' : displayedCrewHealth.riskScore > 0.6 ? 'warn' : 'good'} />
                     </div>
                     <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
                       <div>
                         <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Embarkation</p>
-                        <p className="text-sm text-slate-100">{optResult.crewRisk.embarkationDecision.replaceAll('_', ' ')}</p>
+                        <p className="text-sm text-slate-100">{displayedCrewHealth.embarkationDecision.replaceAll('_', ' ')}</p>
                       </div>
                       <StatusPill
-                        value={optResult.crewRisk.classification}
-                        tone={optResult.crewRisk.classification === 'SAFE' ? 'good' : optResult.crewRisk.classification === 'MONITOR' ? 'warn' : 'bad'}
+                        value={displayedCrewHealth.classification}
+                        tone={displayedCrewHealth.classification === 'SAFE' ? 'good' : displayedCrewHealth.classification === 'MONITOR' ? 'warn' : 'bad'}
                       />
                     </div>
                     <p className="mt-2 text-xs text-slate-400">
-                      Dominant segment: {optResult.crewRisk.dominantSegment.nodeName} ({(optResult.crewRisk.dominantSegment.share * 100).toFixed(0)}% of cumulative modeled dose).
+                      Dominant segment: {displayedCrewHealth.dominantSegment.nodeName} ({(displayedCrewHealth.dominantSegment.share * 100).toFixed(0)}% of cumulative modeled dose).
                     </p>
                   </DashboardCard>
 
                   <DashboardCard title="Mission Decision Panel" icon={AlertTriangle} provenance="formula">
-                    {optResult.missionDecision ? (
+                    {displayedMissionDecision ? (
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <StatusPill
-                            value={optResult.missionDecision.decision}
-                            tone={optResult.missionDecision.decision === 'CONTINUE' ? 'good' : optResult.missionDecision.decision === 'REPLAN' ? 'warn' : 'bad'}
+                            value={displayedMissionDecision.decision}
+                            tone={displayedMissionDecision.decision === 'CONTINUE' ? 'good' : displayedMissionDecision.decision === 'REPLAN' ? 'warn' : 'bad'}
                           />
                           <StatusPill
-                            value={optResult.missionDecision.urgencyLevel}
-                            tone={optResult.missionDecision.urgencyLevel === 'LOW' ? 'good' : optResult.missionDecision.urgencyLevel === 'MODERATE' ? 'warn' : 'bad'}
+                            value={displayedMissionDecision.urgencyLevel}
+                            tone={displayedMissionDecision.urgencyLevel === 'LOW' ? 'good' : displayedMissionDecision.urgencyLevel === 'MODERATE' ? 'warn' : 'bad'}
                           />
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          <MetricBadge label="Risk Reduction" value={`${(optResult.missionDecision.expectedRiskReduction * 100).toFixed(0)}%`} unit="estimated" />
-                          <MetricBadge label="Driver" value={optResult.medicalValidation?.dominantRiskDriver ?? '--'} unit="dominant factor" />
+                          <MetricBadge label="Risk Reduction" value={`${(displayedMissionDecision.expectedRiskReduction * 100).toFixed(0)}%`} unit="estimated" />
+                          <MetricBadge label="Driver" value={launchBodyId === 'earth' && targetPlanet === 'moon' ? 'dose + ops rules' : optResult.medicalValidation?.dominantRiskDriver ?? '--'} unit="dominant factor" />
                           <MetricBadge label="Regret" value={optResult.regret?.regretScore.toFixed(2) ?? '--'} unit="utility gap" tone="warn" />
                           <MetricBadge label="VOI" value={optResult.voi?.valueOfWaiting.toFixed(2) ?? '--'} unit="value of waiting" tone={(optResult.voi?.valueOfWaiting ?? 0) > 0 ? 'good' : 'default'} />
                         </div>
                         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
-                          <p>{optResult.missionDecision.rationale}</p>
+                          <p>{displayedMissionDecision.rationale}</p>
                           {optResult.hierarchy ? (
                             <div className="mt-2 space-y-1 text-xs text-slate-400">
                               <p>Low-level: {optResult.hierarchy.lowLevelAction}</p>
@@ -3813,9 +3979,9 @@ export default function App() {
                               <p>High-level: {optResult.hierarchy.highLevelDecision}</p>
                             </div>
                           ) : null}
-                          {optResult.missionDecision.candidateActions?.length ? (
+                          {displayedMissionDecision.candidateActions?.length ? (
                             <div className="mt-2 space-y-1 text-xs text-slate-400">
-                              {optResult.missionDecision.candidateActions.map((action, index) => (
+                              {displayedMissionDecision.candidateActions.map((action, index) => (
                                 <p key={index}>• {action}</p>
                               ))}
                             </div>
@@ -5090,12 +5256,15 @@ export default function App() {
                       <ul className="list-disc pl-5 text-slate-400">
                         <li>Hohmann transfer, Tsiolkovsky, J2 drift, atmosphere, and the 2D ascent solver.</li>
                         <li>STL-derived frontal area, surface area, volume, and a coarse drag estimate.</li>
+                        <li>Mission graph node and edge values are now conditioned on live radiation, comm coverage, transfer design, and mission-distance data.</li>
+                        <li>Conjunction analysis uses propagated state vectors for imported objects and live CelesTrak screening when available.</li>
+                        <li>The quantum view uses a simulated QAOA statevector backend with rerunnable layer depth, not a display-only placeholder.</li>
                       </ul>
                       <p>What is still not NASA-grade:</p>
                       <ul className="list-disc pl-5 text-slate-400">
-                        <li>Mission node graph values remain preset.</li>
-                        <li>Conjunction panel is still a shell-spacing heuristic.</li>
-                        <li>Quantum view is still explanatory, not operational.</li>
+                        <li>Mission graph topology is still curated unless you import external mission objects or a custom graph.</li>
+                        <li>Conjunction workflow is reduced-order propagation, not a certified operational CDM/TCA pipeline.</li>
+                        <li>QAOA remains a classical simulation of a reduced Hamiltonian, not quantum-hardware execution.</li>
                       </ul>
                     </div>
                   </DashboardCard>
