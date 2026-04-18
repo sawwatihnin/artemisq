@@ -1244,7 +1244,7 @@ export class SimulatedAnnealer {
     const gravityAssist = applyGravityAssist(bestPath, [...this.nodes.values()], totalDeltaV);
     totalDeltaV = gravityAssist.adjustedDeltaV_ms;
     const reentry = evaluateReentry(bestPath, {
-      approachVelocityMs: 10850 + 0.22 * deltaVPhases.return,
+      approachVelocityMs: 10850 + 0.22 * deltaVPhases.phases.return,
       flightPathAngleDeg: inferReturnFlightPathAngleDeg(bestCost.timeline, this.nodes),
       safeAngleMinDeg: missionProfile.reentrySafeAngleMinDeg,
       safeAngleMaxDeg: missionProfile.reentrySafeAngleMaxDeg,

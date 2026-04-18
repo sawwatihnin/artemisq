@@ -1630,6 +1630,90 @@ export default function App() {
                     </div>
                   </DashboardCard>
                 </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DashboardCard title="Launch & Shielding Trade Space" icon={Rocket} provenance="formula">
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <MetricBadge label="Policy" value={optResult.policy?.profile ?? policyProfile} unit="decision mode" />
+                        <MetricBadge label="Confidence" value={optResult.missionConfidence?.confidenceScore.toFixed(0) ?? '--'} unit="/100" tone={(optResult.missionConfidence?.confidenceScore ?? 0) >= 70 ? 'good' : (optResult.missionConfidence?.confidenceScore ?? 0) >= 50 ? 'warn' : 'bad'} />
+                        <MetricBadge label="Shielding" value={optResult.shieldingTradeoff?.shieldingMassKg.toFixed(0) ?? String(shieldingMassKg)} unit="kg" />
+                        <MetricBadge label="Shield Factor" value={optResult.shieldingTradeoff?.shieldingFactor.toFixed(2) ?? '--'} unit="attenuation" tone="good" />
+                      </div>
+                      {optResult.launchWindows?.slice(0, 4).map((entry, index) => (
+                        <div key={`${entry.window.launchTimeIso}-${index}`} className={cn('rounded-lg border px-3 py-2 text-sm', index === 0 ? 'border-sky-400/40 bg-sky-400/5 text-slate-100' : 'border-slate-800 bg-slate-950/60 text-slate-300')}>
+                          <div className="flex items-center justify-between">
+                            <span>Launch +{entry.window.offsetHours} h</span>
+                            <span className="text-sky-200">score {entry.score.toFixed(2)}</span>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-400">
+                            Δv {entry.deltaV_ms.toFixed(0)} m/s | Radiation {entry.radiationExposure.toFixed(2)} | Comm {(entry.communicationAvailability * 100).toFixed(0)}%
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Uncertainty & Reentry" icon={Wind} provenance="formula">
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <MetricBadge label="Reentry" value={optResult.reentry?.reentrySafe ? 'SAFE' : 'REVIEW'} unit="corridor" tone={optResult.reentry?.reentrySafe ? 'good' : 'bad'} />
+                        <MetricBadge label="Reentry Risk" value={optResult.reentry?.reentryRiskScore.toFixed(1) ?? '--'} unit="/100" tone={(optResult.reentry?.reentryRiskScore ?? 0) < 30 ? 'good' : 'warn'} />
+                        <MetricBadge label="Cost P50" value={formatMoney(optResult.uncertaintySummary?.cost.p50 ?? 0)} unit="MC median" />
+                        <MetricBadge label="Risk P90" value={optResult.uncertaintySummary?.risk.p90.toFixed(2) ?? '--'} unit="upper band" tone="warn" />
+                      </div>
+                      {optResult.uncertaintySummary?.cost.histogram?.length ? (
+                        <ResponsiveContainer width="100%" height={180}>
+                          <BarChart data={optResult.uncertaintySummary.cost.histogram}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                            <XAxis dataKey="binStart" stroke="#64748b" tick={{ fontSize: 10 }} />
+                            <YAxis stroke="#64748b" tick={{ fontSize: 10 }} />
+                            <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} />
+                            <Bar dataKey="count" fill="#4B9CD3" />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : null}
+                      <p className="text-xs text-slate-400">{optResult.reentry?.violationReason ?? optResult.missionConfidence?.interpretation}</p>
+                    </div>
+                  </DashboardCard>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DashboardCard title="Phase Breakdown" icon={ChevronRight} provenance="formula">
+                    <div className="grid grid-cols-2 gap-2">
+                      <MetricBadge label="Departure" value={optResult.deltaVPhases?.phases.departure.toFixed(0) ?? '--'} unit="m/s" />
+                      <MetricBadge label="Midcourse" value={optResult.deltaVPhases?.phases.midcourse.toFixed(0) ?? '--'} unit="m/s" />
+                      <MetricBadge label="Flyby" value={optResult.deltaVPhases?.phases.flyby.toFixed(0) ?? '--'} unit="m/s" />
+                      <MetricBadge label="Return" value={optResult.deltaVPhases?.phases.return.toFixed(0) ?? '--'} unit="m/s" />
+                    </div>
+                    <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                      <p>Gravity assist bonus: {(((optResult.gravityAssist?.totalBonusFraction ?? 0) * 100)).toFixed(1)}% Δv reduction.</p>
+                      <p className="mt-1">Scenario: {optResult.scenario?.type ?? scenarioType}.</p>
+                      <p className="mt-1">{optResult.scenario?.summary}</p>
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Stakeholder Board" icon={Globe} provenance="formula">
+                    <div className="space-y-2 text-sm text-slate-300">
+                      <p>{optResult.stakeholderView?.crewView}</p>
+                      <p>{optResult.stakeholderView?.controlView}</p>
+                      <p>{optResult.stakeholderView?.financeView}</p>
+                    </div>
+                    {optResult.telemetry?.events?.length ? (
+                      <div className="mt-3 space-y-2">
+                        {optResult.telemetry.events.slice(0, 5).map((event, index) => (
+                          <div key={`${event.event}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                            <div className="flex items-center justify-between">
+                              <span>{event.event}</span>
+                              <StatusPill value={event.severity} tone={event.severity === 'INFO' ? 'good' : event.severity === 'WATCH' ? 'warn' : 'bad'} />
+                            </div>
+                            <p className="mt-1">{event.detail}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </DashboardCard>
+                </div>
               </>
             ) : null}
           </section>
@@ -1688,6 +1772,39 @@ export default function App() {
                       <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
                         Launch Date
                         <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="date" value={launchDate} onChange={(event) => setLaunchDate(event.target.value)} />
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Launch Window Offset
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={launchOffsetHours} onChange={(event) => setLaunchOffsetHours(+event.target.value)}>
+                          {[0, 6, 12, 24, 36].map((offset) => (
+                            <option key={offset} value={offset}>+{offset} h</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Mission Policy
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={policyProfile} onChange={(event) => setPolicyProfile(event.target.value as PolicyProfile)}>
+                          <option value="CREW_FIRST">Crew First</option>
+                          <option value="BALANCED">Balanced</option>
+                          <option value="COST_FIRST">Cost First</option>
+                        </select>
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Stress Scenario
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={scenarioType} onChange={(event) => setScenarioType(event.target.value as ScenarioType)}>
+                          <option value="NOMINAL">Nominal</option>
+                          <option value="SOLAR_STORM">Solar Storm</option>
+                          <option value="COMM_BLACKOUT">Comm Blackout</option>
+                          <option value="PROPULSION_ANOMALY">Propulsion Anomaly</option>
+                          <option value="DELAYED_LAUNCH">Delayed Launch</option>
+                        </select>
+                      </label>
+                      <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        <div className="mb-1 flex items-center justify-between">
+                          <span>Shielding Mass</span>
+                          <span className="text-sky-200">{shieldingMassKg.toFixed(0)} kg</span>
+                        </div>
+                        <input className="w-full" type="range" min={0} max={1200} step={20} value={shieldingMassKg} onChange={(event) => setShieldingMassKg(+event.target.value)} />
                       </label>
                       <label className="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
                         Import Mission Config
