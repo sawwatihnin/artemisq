@@ -2,7 +2,7 @@
  * ARTEMIS-Q Orbital Mechanics Library — Competition Edition
  * 
  * Implements:
- *   - SGP4-inspired propagation for TLE elements
+ *   - Keplerian propagation (two-body + secular J2 on Ω, ω)
  *   - Keplerian element conversions (COE → ECI)
  *   - Patched conic trajectory design (Hohmann, bi-elliptic)
  *   - Atmospheric density model (NRLMSISE-00 simplified)
@@ -11,6 +11,8 @@
  */
 
 import * as THREE from 'three';
+import { CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition } from './celestial';
+import { moonGeocentricPositionKm, normalize3, slerpUnitVectors } from './lunarEphemeris';
 
 // ─── Physical Constants ───────────────────────────────────────────────────────
 export const MU = 398600.4418;   // km³/s² (Earth gravitational parameter)
@@ -179,6 +181,125 @@ export function generateOrbitPoints(el: KeplerianElements, nPoints = 200, scale 
   return points;
 }
 
+/** Kilometers per Three.js unit for heliocentric / generic orbit visualization. */
+export const VIS_SCENE_KM_PER_UNIT = 2500;
+
+/**
+ * Cislunar (Earth–Moon) view: smaller km per unit ⇒ larger scene coordinates so Earth, LEO, and Moon
+ * read clearly and transfer / stage markers are not stacked on top of each other.
+ */
+export const CISLUNAR_VIS_KM_PER_UNIT = 720;
+
+/** LEO / parking orbit polyline in scene units, consistent with {@link VIS_SCENE_KM_PER_UNIT}. */
+export function generateOrbitPointsScene(el: KeplerianElements, nPoints = 200): [number, number, number][] {
+  return generateOrbitPoints(el, nPoints, 1 / VIS_SCENE_KM_PER_UNIT);
+}
+
+/**
+ * Earth–Moon transfer polyline in **scene units** (not km). Uses Hohmann semi-major axis and true anomaly
+ * sampled in the plane between departure direction and Moon arrival direction (endpoints match patched-conic radii).
+ */
+export function buildEarthMoonTransferTrajectory(
+  launchDate: Date,
+  keplerEl: KeplerianElements,
+  segments = 96,
+  stayDays = 3,
+): TrajectoryPoint[] {
+  const inv = 1 / CISLUNAR_VIS_KM_PER_UNIT;
+  const toScene = (km: [number, number, number]): [number, number, number] =>
+    [km[0] * inv, km[1] * inv, km[2] * inv];
+
+  const state0 = keplerian2ECI(keplerEl);
+  const r1 = Math.hypot(state0.r[0], state0.r[1], state0.r[2]);
+  const leoHat = normalize3(state0.r);
+  const leoAlt = Math.max(150, r1 - RE);
+
+  const moonGuess = moonGeocentricPositionKm(launchDate);
+  const moonAlt0 = Math.hypot(moonGuess[0], moonGuess[1], moonGuess[2]) - RE;
+
+  const hoh = computeHohmann(leoAlt, Math.max(250_000, moonAlt0));
+  const tofS = hoh.tof_s;
+  const arrival = new Date(launchDate.getTime() + tofS * 1000);
+  const moonVec = moonGeocentricPositionKm(arrival);
+  const r2 = Math.hypot(moonVec[0], moonVec[1], moonVec[2]);
+  const moonHat = normalize3(moonVec);
+
+  const a = (r1 + r2) / 2;
+  const e = (r2 - r1) / (r2 + r1);
+  const p = a * (1 - e * e);
+
+  const outbound: TrajectoryPoint[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const nu = (i / segments) * Math.PI;
+    const rKm = p / (1 + e * Math.cos(nu));
+    const dir = slerpUnitVectors(leoHat, moonHat, nu / Math.PI);
+    outbound.push({
+      pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
+      time_s: (i / segments) * tofS,
+    });
+  }
+
+  const stayS = stayDays * 86400;
+  const returnEpoch = new Date(arrival.getTime() + stayS * 1000);
+  const moonReturn = moonGeocentricPositionKm(returnEpoch);
+  const moonHatR = normalize3(moonReturn);
+  const r2r = Math.hypot(moonReturn[0], moonReturn[1], moonReturn[2]);
+  const aR = (r2r + r1) / 2;
+  const eR = Math.abs(r2r - r1) / (r2r + r1);
+  const pR = aR * (1 - eR * eR);
+
+  const inbound: TrajectoryPoint[] = [];
+  for (let i = 1; i <= segments; i++) {
+    const nu = (i / segments) * Math.PI;
+    const rKm = pR / (1 + eR * Math.cos(nu));
+    const dir = slerpUnitVectors(moonHatR, leoHat, nu / Math.PI);
+    inbound.push({
+      pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
+      time_s: tofS + stayS + (i / segments) * tofS,
+    });
+  }
+
+  const combined = [...outbound, ...inbound];
+  const n = combined.length;
+  const labels: { idx: number; label: string; step: number }[] = [
+    { idx: 0, label: 'LEO / Departure', step: 1 },
+    { idx: Math.floor(n * 0.12), label: 'TLI', step: 2 },
+    { idx: Math.floor(n * 0.28), label: 'Translunar coast', step: 3 },
+    { idx: Math.floor(n * 0.48), label: 'Lunar approach', step: 4 },
+    { idx: Math.floor(n * 0.62), label: 'NRHO / Gateway', step: 5 },
+    { idx: Math.floor(n * 0.78), label: 'Return coast', step: 6 },
+    { idx: n - 1, label: 'Earth return', step: 7 },
+  ];
+
+  return combined.map((point, i) => {
+    const key = labels.find((entry) => entry.idx === i);
+    return { ...point, label: key?.label ?? point.label, step: key?.step };
+  });
+}
+
+function relativeHeliocentricPosition(bodyId: string, date: Date): THREE.Vector3 {
+  const earth = CELESTIAL_BODY_MAP.earth;
+  const body = CELESTIAL_BODY_MAP[bodyId];
+  if (!body?.orbit) return new THREE.Vector3(0, 0, 0);
+  const pe = getApproximateHeliocentricPosition(earth, date);
+  const pb = getApproximateHeliocentricPosition(body, date);
+  return new THREE.Vector3(pb[0] - pe[0], pb[1] - pe[1], pb[2] - pe[2]);
+}
+
+function relativeHeliocentricVelocity(bodyId: string, date: Date): THREE.Vector3 {
+  const dt = 0.25;
+  const t1 = new Date(date.getTime() - dt * 86400000);
+  const t2 = new Date(date.getTime() + dt * 86400000);
+  const r1 = relativeHeliocentricPosition(bodyId, t1);
+  const r2 = relativeHeliocentricPosition(bodyId, t2);
+  const dtS = 2 * dt * 86400;
+  return new THREE.Vector3(
+    (r2.x - r1.x) / dtS,
+    (r2.y - r1.y) / dtS,
+    (r2.z - r1.z) / dtS,
+  );
+}
+
 // ─── Hohmann Transfer ─────────────────────────────────────────────────────────
 
 export interface HohmannResult {
@@ -257,52 +378,113 @@ export function dragAcceleration(alt_km: number, v_kms: number, Cd = 2.2, A_m2 =
 
 // ─── Legacy API (kept for compatibility) ──────────────────────────────────────
 
-export function calculateArtemisTrajectory(launchDate: string, destinationId: string = 'moon'): TrajectoryPoint[] {
-  const date = new Date(launchDate);
-  const timeOffset = date.getTime() / 86400000;
-  const planet = PLANETS[destinationId] || PLANETS.moon;
-  const orbitalAngle = (timeOffset % planet.period) / planet.period * Math.PI * 2;
-  const scale = destinationId === 'moon' ? 1 : planet.dist / 384.4;
-  const D = 384 * scale;
+function cubicTransferBetween(
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  startVelocity: THREE.Vector3,
+  endVelocity: THREE.Vector3,
+  nPoints: number,
+  startTimeS: number,
+  durationS: number,
+  labelPrefix: string,
+): TrajectoryPoint[] {
+  const tangentScale = durationS * 0.16;
+  const control1 = start.clone().add(startVelocity.clone().multiplyScalar(tangentScale));
+  const control2 = end.clone().sub(endVelocity.clone().multiplyScalar(tangentScale));
+  const curve = new THREE.CubicBezierCurve3(start, control1, control2, end);
+  const points = curve.getPoints(nPoints);
+  return points.map((p, idx) => ({
+    pos: [p.x, p.y, p.z],
+    time_s: startTimeS + (durationS * idx) / nPoints,
+    label:
+      idx === 0 ? `${labelPrefix} Departure` :
+      idx === Math.floor(nPoints * 0.5) ? `${labelPrefix} Cruise` :
+      idx === nPoints ? `${labelPrefix} Arrival` :
+      undefined,
+  }));
+}
 
-  const planetPos: [number,number,number] = [
-    Math.cos(orbitalAngle) * D,
+const DEFAULT_VIS_KEPLER: KeplerianElements = {
+  a: 6778,
+  e: 0.0008,
+  i: 51.6,
+  raan: 247,
+  argp: 130,
+  nu: 0,
+};
+
+/**
+ * Mission trajectory in **display units** matching the visualizer: cislunar uses {@link VIS_SCENE_KM_PER_UNIT};
+ * interplanetary uses Earth-centered heliocentric offsets (same scale as {@link getApproximateHeliocentricPosition}).
+ */
+export function calculateArtemisTrajectory(
+  launchDate: string,
+  destinationId: string = 'moon',
+  launchBodyId: string = 'earth',
+  keplerEl: KeplerianElements = DEFAULT_VIS_KEPLER,
+): TrajectoryPoint[] {
+  if (destinationId === 'moon' && launchBodyId === 'earth') {
+    return buildEarthMoonTransferTrajectory(new Date(launchDate), keplerEl);
+  }
+
+  const departureDate = new Date(launchDate);
+  const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
+  const destinationBody = CELESTIAL_BODY_MAP[destinationId] ?? CELESTIAL_BODY_MAP.mars;
+
+  const origin = relativeHeliocentricPosition(launchBody.id, departureDate);
+  const originVelocity = relativeHeliocentricVelocity(launchBody.id, departureDate);
+
+  const transferDays =
+    destinationBody.orbit && launchBody.orbit
+      ? Math.max(30, Math.abs(destinationBody.orbit.semiMajorAxisAu - launchBody.orbit.semiMajorAxisAu) * 220)
+      : 120;
+  const arrivalDate = new Date(departureDate.getTime() + transferDays * 86400000);
+
+  const destinationOutbound = relativeHeliocentricPosition(destinationBody.id, arrivalDate);
+  const destinationArrivalVelocity = relativeHeliocentricVelocity(destinationBody.id, arrivalDate);
+  const returnDate = new Date(arrivalDate.getTime() + transferDays * 86400000);
+  const returnTarget = relativeHeliocentricPosition(launchBody.id, returnDate);
+  const returnVelocity = relativeHeliocentricVelocity(launchBody.id, returnDate);
+
+  const outbound = cubicTransferBetween(
+    origin,
+    destinationOutbound,
+    originVelocity,
+    destinationArrivalVelocity,
+    64,
     0,
-    Math.sin(orbitalAngle) * D
+    transferDays * 86400,
+    'Outbound',
+  );
+  const inbound = cubicTransferBetween(
+    destinationOutbound,
+    returnTarget,
+    destinationArrivalVelocity,
+    returnVelocity,
+    64,
+    transferDays * 86400,
+    transferDays * 86400,
+    'Inbound',
+  );
+
+  const combined = [...outbound, ...inbound.slice(1)];
+  const labels = [
+    { idx: 0, label: 'Launch / Takeoff', step: 1 },
+    { idx: Math.floor(combined.length * 0.12), label: 'Stage Separation', step: 2 },
+    { idx: Math.floor(combined.length * 0.22), label: 'Transfer Burn', step: 3 },
+    { idx: Math.floor(combined.length * 0.48), label: `${destinationBody.name} Encounter`, step: 4 },
+    { idx: Math.floor(combined.length * 0.72), label: 'Return Burn', step: 5 },
+    { idx: Math.floor(combined.length * 0.92), label: 'Entry Interface', step: 6 },
+    { idx: combined.length - 1, label: 'Landing / Splashdown', step: 7 },
   ];
 
-  // Use Keplerian propagation for departure and arrival
-  const departEl: KeplerianElements = { a: RE + 400, e: 0.001, i: 28.5, raan: 0, argp: 90, nu: 0 };
-  const departECI = keplerian2ECI(departEl);
-  const launchPos: [number,number,number] = [
-    departECI.r[0] * 0.15, departECI.r[1] * 0.15, departECI.r[2] * 0.15
-  ];
-
-  const controlPoints = [
-    new THREE.Vector3(...launchPos),
-    new THREE.Vector3(launchPos[0] + 20, -30, 10),
-    new THREE.Vector3(D * 0.3, -50, planetPos[2] * 0.1),
-    new THREE.Vector3(D * 0.7, -25, planetPos[2] * 0.6),
-    new THREE.Vector3(planetPos[0] + 10, 5, planetPos[2] + 10),
-    new THREE.Vector3(planetPos[0] - 15, 40, planetPos[2] - 15),
-    new THREE.Vector3(D * 0.4, 60, planetPos[2] * 0.05),
-    new THREE.Vector3(launchPos[0] + 5, 15, 2),
-  ];
-
-  const curve = new THREE.CatmullRomCurve3(controlPoints);
-  const splinePoints = curve.getPoints(120);
-
-  const keyLabels = [
-    { idx: 0,   label: 'Liftoff (KSC 39B)',     step: 1  },
-    { idx: 12,  label: 'Trans-Injection Burn',    step: 4  },
-    { idx: 55,  label: `${planet.name} Arrival`,  step: 11 },
-    { idx: 80,  label: 'Return Trajectory',       step: 12 },
-    { idx: 115, label: 'Re-entry / Splashdown',   step: 15 },
-  ];
-
-  return splinePoints.map((p, i) => {
-    const key = keyLabels.find(k => Math.abs(k.idx - i) < 1);
-    return { pos: [p.x, p.y, p.z], label: key?.label, step: key?.step };
+  return combined.map((point, i) => {
+    const key = labels.find((entry) => entry.idx === i);
+    return {
+      ...point,
+      label: key?.label ?? point.label,
+      step: key?.step,
+    };
   });
 }
 

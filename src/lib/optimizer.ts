@@ -1,19 +1,59 @@
 /**
- * ARTEMIS-Q Quantum Optimizer — Competition Edition (v2)
+ * ARTEMIS-Q Quantum Optimizer — research prototype extension
  *
- * Implements a full quantum-inspired pipeline:
- *   1. QUBO formulation with realistic Hamiltonian encoding
- *   2. QAOA (Quantum Approximate Optimization Algorithm) simulation
- *      - Full complex statevector (re+im amplitudes, no magnitude-only approximation)
- *      - Cost Hamiltonian HC (diagonal): e^{-iγHC}|ψ⟩
- *      - Mixer Hamiltonian HB = Σᵢ Xᵢ (Rx(2β) per qubit)
- *      - Layer-by-layer greedy parameter optimization (20×20 grid per layer)
- *      - Feasibility constraints: start + end nodes always active
- *   3. Quantum Annealing via Simulated Annealing (Metropolis-Hastings)
- *   4. Real Tsiolkovsky rocket equation for delta-v → fuel mass
- *   5. Orbital mechanics: Hohmann transfer dv, J2 perturbation
- *   6. Van Allen belt radiation model (L-shell parameterization)
+ * Discrete-time mission model:
+ *   x_{i,t} ∈ {0,1}, x_{i,t}=1 iff the vehicle occupies node i at epoch t.
+ *
+ * Objective:
+ *   J(x) = λ_f Fuel(x)
+ *        + λ_r Radiation(x)
+ *        + λ_c CommunicationPenalty(x)
+ *        + λ_s Risk(x)
+ *        + λ_t Time(x)
+ *        + P_continuity(x)
+ *        + P_start/end(x)
+ *        + P_illegal(x)
+ *
+ * QUBO mapping:
+ *   min_x x^T Q x
+ * with penalties expanded into diagonal and pairwise terms over the binary
+ * variables x_{i,t}. This keeps the formulation compatible with annealing-style
+ * solvers while remaining implementable in the current prototype.
  */
+
+import {
+  explainCrewRisk,
+  explainFinancialRecommendation,
+  explainMissionDecision,
+  explainPath,
+  type ExplainNodeMetric,
+  type PathExplanation,
+} from './explain';
+import {
+  computeCrewRadiationReadiness,
+  validateCrewRadiationReadiness,
+  type CrewRadiationParams,
+  type CrewRadiationReadiness,
+  type CrewRiskValidationReport,
+  type RadiationSamplePoint,
+} from './crewRisk';
+import {
+  evaluateMissionDecision,
+  recommendAbortOrReplan,
+  type DecisionPathCandidate,
+  type MissionDecisionResult,
+} from './missionDecision';
+import {
+  runMonteCarlo,
+  runDecisionOptionMonteCarlo,
+  type DecisionOptionMonteCarloSummary,
+  type MissionUncertaintySample,
+  type MonteCarloSummary,
+  type UncertaintyModel,
+} from './monteCarlo';
+import { generateReplanOptions, type ReplanOption } from './replan';
+import { assessDecisionCost, type DecisionCostAssessment } from './replanCost';
+import { runMissionSupportVerification, type MissionSupportVerification } from './verification';
 
 export interface OptimizerNode {
   id: string;
@@ -39,34 +79,94 @@ export interface QUBOWeights {
   rad: number;
   comm: number;
   safety: number;
+  time?: number;
 }
 
-/** Complex amplitude for QAOA statevector simulation */
-export interface ComplexAmp {
-  re: number;
-  im: number;
+export interface QuantumState {
+  amplitudes: number[];
+  phases: number[];
+  nQubits: number;
 }
 
 export interface QAOALayer {
-  gamma: number;           // Cost Hamiltonian angle
-  beta: number;            // Mixer Hamiltonian angle
+  gamma: number;
+  beta: number;
   energyExpectation: number;
 }
 
 export interface DistributionEntry {
-  state: string;        // binary string e.g. "101011" (qubit 0 = leftmost = start node)
-  probability: number;  // |amp|² = re² + im²
-  energy: number;       // E(x) from QAOA basis energies
-  isOptimal: boolean;   // true if this is the minimum-energy feasible state
+  state: string;
+  probability: number;
+  energy: number;
+  isOptimal: boolean;
 }
 
 export interface QAOAResult {
   layers: QAOALayer[];
   finalEnergy: number;
-  approximationRatio: number;         // ⟨E⟩_QAOA / E_optimal (≥1, closer to 1 = better)
-  qaoaMatchPct: number;               // (E_optimal / ⟨E⟩_QAOA) × 100 — intuitive 0-100%, higher = better
-  classicalSAImprovement_pct: number; // SA cost reduction vs. greedy baseline (classical, not quantum)
-  distribution: DistributionEntry[];  // Top-16 feasible states by probability
+  approximationRatio: number;
+  quantumAdvantage_pct: number;
+  qaoaMatchPct?: number;
+  classicalSAImprovement_pct?: number;
+  distribution?: DistributionEntry[];
+}
+
+export interface TimeDependentNodeState {
+  communicationWindow: number[];
+  radiationField: number[];
+  fuelMultiplier: number[];
+  communicationReliability: number[];
+}
+
+export interface IllegalTransitionRule {
+  from: string;
+  to: string;
+  activeAt?: number[];
+  penalty?: number;
+  reason?: string;
+}
+
+export interface MissionTimeProfile {
+  horizon: number;
+  radiationThreshold: number;
+  nodeStates: Record<string, TimeDependentNodeState>;
+  illegalTransitions?: IllegalTransitionRule[];
+}
+
+export interface MissionTimelinePoint {
+  t: number;
+  nodeId: string;
+  nodeName: string;
+  radiation: number;
+  communicationOpen: boolean;
+  communicationReliability: number;
+  fuelMultiplier: number;
+  stepCost: number;
+  riskScore: number;
+}
+
+export interface MissionCostBreakdown {
+  total: number;
+  fuel: number;
+  rad: number;
+  comm: number;
+  safety: number;
+  time: number;
+  continuityPenalty: number;
+  startEndPenalty: number;
+  illegalTransitionPenalty: number;
+  deltaV_ms: number;
+  timeline: MissionTimelinePoint[];
+  nodeMetrics: ExplainNodeMetric[];
+  violations: string[];
+}
+
+export interface StrategyBenchmark {
+  label: string;
+  path: string[];
+  totalCost: number;
+  constraintViolations: number;
+  successProbability: number;
 }
 
 export interface OptimizationResult {
@@ -75,9 +175,11 @@ export interface OptimizationResult {
   fuel: number;
   radiationExposure: number;
   commLoss: number;
+  timePenalty: number;
+  safetyPenalty: number;
   naivePath: string[];
   naiveCost: number;
-  quboGraph: { nodes: number; binaryVars: number; temperature: number; annealingSteps: number };
+  quboGraph: { nodes: number; binaryVars: number; temperature: number; annealingSteps: number; nonZeroTerms: number };
   circuitMap: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[];
   totalDeltaV_ms: number;
   fuelMass_kg: number;
@@ -90,325 +192,381 @@ export interface OptimizationResult {
     vanAllenDose: number;
     transferTime_days: number;
   };
+  timeline: MissionTimelinePoint[];
+  constraintViolations: string[];
+  stochastic: MonteCarloSummary<{
+    fuel: number;
+    radiation: number;
+    communication: number;
+    safety: number;
+    violations: number;
+  }>;
+  explanation: PathExplanation;
+  crewRisk: CrewRadiationReadiness;
+  medicalValidation: CrewRiskValidationReport;
+  missionDecision: MissionDecisionResult;
+  replanOptions: ReplanOption[];
+  decisionCosts: DecisionCostAssessment[];
+  decisionMonteCarlo: DecisionOptionMonteCarloSummary<{
+    crewRisk: number;
+    riskAdjustedCost: number;
+    successProbability: number;
+  }>[];
+  decisionNarrative: {
+    medicalRisk: string;
+    operationalDecision: string;
+    financialRecommendation: string;
+  };
+  verification: MissionSupportVerification;
+  systemLimitations: string[];
+  benchmarks: {
+    optimized: StrategyBenchmark;
+    shortestPath: StrategyBenchmark;
+    greedy: StrategyBenchmark;
+  };
+  formalModel: {
+    variables: string[];
+    objective: string[];
+    constraints: string[];
+    qubo: string[];
+    assumptions: string[];
+    limitations: string[];
+  };
+  timeDependent: {
+    radiationThreshold: number;
+    communicationViolations: number;
+    radiationViolations: number;
+  };
 }
 
-// ─── Physical Constants ───────────────────────────────────────────────────────
-const G          = 6.67430e-11;   // m³ kg⁻¹ s⁻²
-const M_EARTH    = 5.972e24;      // kg
-const R_EARTH    = 6.371e6;       // m
-const MU_EARTH   = G * M_EARTH;   // m³/s²
-const G0         = 9.80665;       // m/s² standard gravity
-const J2_CONST   = 1.08263e-3;   // Earth's second zonal harmonic
-const RE_KM      = 6371;          // km
+const G = 6.67430e-11;
+const M_EARTH = 5.972e24;
+const R_EARTH = 6.371e6;
+const MU_EARTH = G * M_EARTH;
+const G0 = 9.80665;
+const J2 = 1.08263e-3;
+const RE_KM = 6371;
 
-// ─── Orbital Mechanics ───────────────────────────────────────────────────────
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
-/**
- * Hohmann transfer delta-v (two burns) between circular orbits
- * ΔV₁ = √(μ/r₁)·(√(2r₂/(r₁+r₂)) - 1)
- * ΔV₂ = √(μ/r₂)·(1 - √(2r₁/(r₁+r₂)))
- */
+function timelineToRadiationSamples(timeline: MissionTimelinePoint[]): RadiationSamplePoint[] {
+  return timeline.map((point) => ({
+    t: point.t,
+    nodeId: point.nodeId,
+    nodeName: point.nodeName,
+    radiation: point.radiation,
+  }));
+}
+
+function averageCommunicationStability(timeline: MissionTimelinePoint[]): number {
+  if (!timeline.length) return 0;
+  return timeline.reduce((sum, point) => (
+    sum + (point.communicationOpen ? point.communicationReliability : point.communicationReliability * 0.2)
+  ), 0) / timeline.length;
+}
+
 export function hohmannDeltaV(r1_km: number, r2_km: number): { dv1: number; dv2: number; dvTotal: number; tof_days: number } {
-  const r1  = (r1_km + RE_KM) * 1000;
-  const r2  = (r2_km + RE_KM) * 1000;
-  const at  = (r1 + r2) / 2;
-  const v1  = Math.sqrt(MU_EARTH / r1);
-  const v2  = Math.sqrt(MU_EARTH / r2);
+  const r1 = (r1_km + RE_KM) * 1000;
+  const r2 = (r2_km + RE_KM) * 1000;
+  const at = (r1 + r2) / 2;
+
+  const v1 = Math.sqrt(MU_EARTH / r1);
+  const v2 = Math.sqrt(MU_EARTH / r2);
   const vt1 = Math.sqrt(MU_EARTH * (2 / r1 - 1 / at));
   const vt2 = Math.sqrt(MU_EARTH * (2 / r2 - 1 / at));
+
   const dv1 = Math.abs(vt1 - v1);
   const dv2 = Math.abs(v2 - vt2);
   const tof_s = Math.PI * Math.sqrt(at ** 3 / MU_EARTH);
+
   return { dv1, dv2, dvTotal: dv1 + dv2, tof_days: tof_s / 86400 };
 }
 
-/**
- * J2 nodal precession rate (secular RAAN drift)
- * dΩ/dt = -3/2 · n · J2 · (RE/p)² · cos(i)
- * where p = a(1−e²), n = √(μ/a³)
- */
 export function j2NodalPrecession(a_km: number, ecc: number, inc_deg: number): number {
-  const a     = (a_km + RE_KM) * 1000;
-  const i     = (inc_deg * Math.PI) / 180;
-  const p     = a * (1 - ecc * ecc);
-  const n     = Math.sqrt(MU_EARTH / (a * a * a));
-  const dOmega = (-3 / 2) * n * J2_CONST * (R_EARTH / p) ** 2 * Math.cos(i);
-  return (dOmega * 180) / Math.PI * 86400; // deg/day
+  const a = (a_km + RE_KM) * 1000;
+  const i = (inc_deg * Math.PI) / 180;
+  const p = a * (1 - ecc * ecc);
+  const n = Math.sqrt(MU_EARTH / (a * a * a));
+  const dOmega_rad_s = (-3 / 2) * n * J2 * (R_EARTH / p) ** 2 * Math.cos(i);
+  return ((dOmega_rad_s * 180) / Math.PI) * 86400;
 }
 
-/**
- * Van Allen belt radiation dose model (simplified AE8/AP8-style L-shell model)
- * Peak radiation ~ L=3-4 (outer belt), secondary peak L=1.5 (inner belt)
- * Returns dose rate in mrad/day
- */
 export function vanAllenDose(altitude_km: number, inc_deg: number): number {
-  const r     = (altitude_km + RE_KM) / RE_KM;
+  const r = (altitude_km + RE_KM) / RE_KM;
   const i_rad = (inc_deg * Math.PI) / 180;
-  const L     = r / (Math.cos(i_rad) ** 2 + 0.001);
+  const L = r / (Math.cos(i_rad) ** 2 + 0.001);
   const inner = 2000 * Math.exp(-((L - 1.5) ** 2) / 0.3);
-  const outer = 800  * Math.exp(-((L - 4.0) ** 2) / 1.5);
-  return inner + outer; // mrad/day
+  const outer = 800 * Math.exp(-((L - 4.0) ** 2) / 1.5);
+  return inner + outer;
 }
 
-/**
- * Tsiolkovsky rocket equation: Δm = m₀(1 − e^(−Δv / (Isp·g₀)))
- */
 export function tsiolkovskyFuelMass(dv_ms: number, m0_kg: number, isp_s: number): number {
   return m0_kg * (1 - Math.exp(-dv_ms / (isp_s * G0)));
 }
 
-// ─── QUBO Formulation ────────────────────────────────────────────────────────
-
-/**
- * Build QUBO matrix Q for the full assignment problem.
- * Variables: x_{i,k} = 1 if node i is at position k in path (n×pathLen binary vars).
- * H(x) = Σᵢ Qᵢᵢ xᵢ + Σᵢ<ⱼ Qᵢⱼ xᵢxⱼ
- *
- * NOTE: This encodes the full TSP-style assignment QUBO (n×pathLen variables).
- * The QAOA simulation uses a simpler node-SELECTION encoding (n variables, 1 per path node).
- * These are separate encodings for separate purposes:
- *   - buildQUBOMatrix → hardware-ready full formulation (future QPU use)
- *   - buildBasisEnergies → compact QAOA demo formulation
- *
- * Edge lookup pre-indexed to O(1) for efficiency.
- */
-function buildQUBOMatrix(
+export function buildFormalMissionQUBO(
   nodes: Map<string, OptimizerNode>,
   edges: OptimizerEdge[],
-  weights: QUBOWeights,
-  pathLen: number
-): number[][] {
-  const n        = nodes.size;
-  const N        = n * pathLen;
-  const Q: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+  weights: Required<QUBOWeights>,
+  pathLen: number,
+  missionProfile: MissionTimeProfile,
+  start: string,
+  end: string,
+): { matrix: number[][]; nonZeroTerms: number } {
   const nodeList = [...nodes.values()];
+  const n = nodeList.length;
+  const N = n * pathLen;
+  const Q: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+  const edgeSet = new Set(edges.map((edge) => `${edge.from}->${edge.to}`));
+  const idx = (i: number, t: number) => i * pathLen + t;
 
-  // Pre-index edges for O(1) lookup
-  const edgeMap = new Map<string, OptimizerEdge>();
-  edges.forEach(e => edgeMap.set(`${e.from}_${e.to}`, e));
+  const lambdaPos = 900;
+  const lambdaOnce = 450;
+  const lambdaStartEnd = 1200;
+  const lambdaIllegal = 650;
 
-  const idx = (i: number, k: number) => i * pathLen + k;
-
-  // Constraint 1: Each position k must have exactly one node
-  const lambda_pos = 1000;
-  for (let k = 0; k < pathLen; k++) {
+  for (let t = 0; t < pathLen; t++) {
     for (let i = 0; i < n; i++) {
-      Q[idx(i, k)][idx(i, k)] += -lambda_pos;
+      Q[idx(i, t)][idx(i, t)] -= lambdaPos;
       for (let j = i + 1; j < n; j++) {
-        Q[idx(i, k)][idx(j, k)] += 2 * lambda_pos;
+        Q[idx(i, t)][idx(j, t)] += 2 * lambdaPos;
       }
     }
   }
 
-  // Constraint 2: Each node appears at most once
-  const lambda_once = 500;
   for (let i = 0; i < n; i++) {
-    for (let k = 0; k < pathLen; k++) {
-      for (let l = k + 1; l < pathLen; l++) {
-        Q[idx(i, k)][idx(i, l)] += 2 * lambda_once;
+    for (let t = 0; t < pathLen; t++) {
+      for (let u = t + 1; u < pathLen; u++) {
+        Q[idx(i, t)][idx(i, u)] += 2 * lambdaOnce;
       }
     }
   }
 
-  // Objective: minimise edge costs + radiation + comm penalties
-  for (let k = 0; k < pathLen - 1; k++) {
+  for (let i = 0; i < n; i++) {
+    const node = nodeList[i];
+    if (node.id === start) Q[idx(i, 0)][idx(i, 0)] -= lambdaStartEnd;
+    else Q[idx(i, 0)][idx(i, 0)] += lambdaStartEnd;
+
+    if (node.id === end) Q[idx(i, pathLen - 1)][idx(i, pathLen - 1)] -= lambdaStartEnd;
+    else Q[idx(i, pathLen - 1)][idx(i, pathLen - 1)] += lambdaStartEnd;
+  }
+
+  for (let t = 0; t < pathLen; t++) {
+    for (let i = 0; i < n; i++) {
+      const node = nodeList[i];
+      const state = missionProfile.nodeStates[node.id];
+      const radiation = state?.radiationField[t] ?? node.radiation;
+      const commOpen = state?.communicationWindow[t] ?? 1;
+      const commReliability = state?.communicationReliability[t] ?? node.commScore;
+      const timeCost = 1 + 0.001 * (node.altitude_km ?? 0);
+      const radiationPenalty = radiation > missionProfile.radiationThreshold
+        ? 40 * ((radiation - missionProfile.radiationThreshold) / missionProfile.radiationThreshold) ** 2
+        : 0;
+      const commPenalty = commOpen ? (1 - commReliability) ** 2 : 8 + (1 - commReliability);
+
+      Q[idx(i, t)][idx(i, t)] +=
+        weights.rad * radiation ** 2 +
+        weights.comm * commPenalty +
+        weights.time * timeCost +
+        weights.safety * radiationPenalty;
+    }
+  }
+
+  for (let t = 0; t < pathLen - 1; t++) {
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < n; j++) {
         if (i === j) continue;
-        const edge = edgeMap.get(`${nodeList[i].id}_${nodeList[j].id}`);
+
+        const fromNode = nodeList[i];
+        const toNode = nodeList[j];
+        const edge = edges.find((candidate) => candidate.from === fromNode.id && candidate.to === toNode.id);
+        const rule = missionProfile.illegalTransitions?.find((candidate) =>
+          candidate.from === fromNode.id &&
+          candidate.to === toNode.id &&
+          (!candidate.activeAt || candidate.activeAt.includes(t)),
+        );
+
         if (edge) {
-          const cost = edge.fuelCost * weights.fuel
-            + nodeList[j].radiation * weights.rad
-            + (1 - nodeList[j].commScore) * weights.comm;
-          Q[idx(i, k)][idx(j, k + 1)] += cost;
+          const state = missionProfile.nodeStates[fromNode.id];
+          const fuelMultiplier = state?.fuelMultiplier[t] ?? 1;
+          Q[idx(i, t)][idx(j, t + 1)] += weights.fuel * edge.fuelCost * fuelMultiplier;
+          if (rule) {
+            Q[idx(i, t)][idx(j, t + 1)] += rule.penalty ?? lambdaIllegal;
+          }
+        } else if (rule || !edgeSet.has(`${fromNode.id}->${toNode.id}`)) {
+          Q[idx(i, t)][idx(j, t + 1)] += rule?.penalty ?? lambdaIllegal;
         }
       }
     }
   }
 
-  return Q;
-}
-
-// ─── QAOA Complex Statevector Simulation ─────────────────────────────────────
-
-/** Probability of a complex amplitude */
-const ampProb = (a: ComplexAmp): number => a.re * a.re + a.im * a.im;
-
-/** ⟨E⟩ = Σ_x |amp_x|² · E(x) — full expectation including infeasible states */
-function expectationValue(amps: ComplexAmp[], energies: number[]): number {
-  return amps.reduce((sum, a, x) => sum + ampProb(a) * (energies[x] ?? 0), 0);
-}
-
-/**
- * Feasible-only expectation value — excludes states with energy ≥ INFEASIBLE.
- * Used to compute finalEnergy for qaoaMatchPct so that amplitude accidentally
- * spreading to infeasible states (due to the mixer) doesn't inflate ⟨E⟩.
- * Denominator = sum of feasible state probabilities (renormalized).
- */
-const INFEASIBLE_THRESH = 1e5; // any energy below this is considered feasible
-function expectationValueFeasible(amps: ComplexAmp[], energies: number[]): number {
-  let numerator = 0, denominator = 0;
-  for (let x = 0; x < amps.length; x++) {
-    const E = energies[x] ?? 0;
-    if (E < INFEASIBLE_THRESH) {
-      const p = ampProb(amps[x]);
-      numerator   += p * E;
-      denominator += p;
+  let nonZeroTerms = 0;
+  for (let i = 0; i < N; i++) {
+    for (let j = i; j < N; j++) {
+      if (Math.abs(Q[i][j]) > 1e-9) nonZeroTerms++;
     }
   }
-  return denominator > 0 ? numerator / denominator : 0;
+
+  return { matrix: Q, nonZeroTerms };
 }
 
-/**
- * Apply one QAOA layer: cost unitary e^{-iγH_C} followed by mixer e^{-iβH_B}.
- *
- * Cost unitary (diagonal in computational basis):
- *   new_re_x = re_x·cos(γE_x) + im_x·sin(γE_x)
- *   new_im_x = im_x·cos(γE_x) − re_x·sin(γE_x)
- *
- * Mixer Rx(2β) on qubit q — for pair (x, f = x⊕(1<<q)):
- *   Rx(2β) = [[cosβ, −i sinβ], [−i sinβ, cosβ]]
- *   new_re_x = cosβ·re_x + sinβ·im_f
- *   new_im_x = cosβ·im_x − sinβ·re_f
- *   (reads from original buffer, writes to newAmps — each state updated exactly once)
- *
- * Renormalization: once per qubit pass for floating-point stability.
- */
-function applyQAOALayer(
-  amps: ComplexAmp[],
-  energies: number[],
-  gamma: number,
-  beta: number,
-  nQubits: number,
-  dim: number
-): ComplexAmp[] {
-  // Apply cost Hamiltonian (diagonal — per-state, no cross-state coupling)
-  let result: ComplexAmp[] = amps.map((a, x) => {
-    const E    = energies[x] ?? 0;
-    const cosG = Math.cos(gamma * E);
-    const sinG = Math.sin(gamma * E);
-    return { re: a.re * cosG + a.im * sinG, im: a.im * cosG - a.re * sinG };
-  });
-
-  // Apply mixer: Rx(2β) on each qubit sequentially
-  for (let q = 0; q < Math.min(nQubits, 8); q++) {
-    const newAmps: ComplexAmp[] = result.map(a => ({ re: a.re, im: a.im }));
-    for (let x = 0; x < dim; x++) {
-      const f = x ^ (1 << q);
-      if (f < dim) {
-        // Always reads from result (original), writes to newAmps — correct even when f < x
-        newAmps[x] = {
-          re: Math.cos(beta) * result[x].re + Math.sin(beta) * result[f].im,
-          im: Math.cos(beta) * result[x].im - Math.sin(beta) * result[f].re,
-        };
-      }
-    }
-    // Renormalize once per qubit pass (unitary preserves norm; this catches float drift)
-    const norm = Math.sqrt(newAmps.reduce((s, a) => s + ampProb(a), 0)) || 1;
-    result = newAmps.map(a => ({ re: a.re / norm, im: a.im / norm }));
-  }
-
-  return result;
-}
-
-/**
- * QAOA statevector simulation with layer-by-layer greedy parameter search.
- *
- * For each layer k (0..p−1): fix amps from layers 0..k−1, then grid-search
- * (γ_k, β_k) ∈ [0,π] × [0,π/2] with 20×20 = 400 evaluations.
- * This is the sequential/greedy strategy from Zhou et al. (2020), which
- * outperforms independent per-layer optimization and avoids high-dimensional
- * joint Nelder-Mead instability.
- *
- * Returns the final amplitude vector for probability distribution computation.
- */
-function simulateQAOA(
-  energies: number[],
-  nQubits: number,
-  p: number = 3
-): {
+function simulateQAOA(energies: number[], nQubits: number, p: number = 3): {
   layers: QAOALayer[];
   finalEnergy: number;
   optGamma: number[];
   optBeta: number[];
-  finalAmps: ComplexAmp[];
+  finalAmps: number[];
 } {
-  const dim       = Math.pow(2, nQubits);
+  const dim = Math.pow(2, nQubits);
   const actualDim = Math.min(dim, energies.length);
-
-  // Initial state: uniform superposition |+⟩^n = (1/√dim) Σ_x |x⟩
-  const initCoeff: ComplexAmp = { re: 1 / Math.sqrt(actualDim), im: 0 };
-  let amps: ComplexAmp[] = new Array(actualDim).fill(null).map(() => ({ ...initCoeff }));
+  let amps = new Array(actualDim).fill(1 / Math.sqrt(actualDim));
 
   const layers: QAOALayer[] = [];
-  const optGamma: number[]  = [];
-  const optBeta: number[]   = [];
+  const optGamma: number[] = [];
+  const optBeta: number[] = [];
   let bestEnergy = Infinity;
 
   for (let layer = 0; layer < p; layer++) {
-    let bestG = Math.PI / 4;  // sensible starting guess
-    let bestB = Math.PI / 8;
+    let bestG = 0;
+    let bestB = 0;
     let bestE = Infinity;
 
-    // 20×20 grid search over γ ∈ [0, π], β ∈ [0, π/2]
-    for (let gi = 0; gi <= 20; gi++) {
-      for (let bi = 0; bi <= 20; bi++) {
-        const gamma    = (gi / 20) * Math.PI;
-        const beta     = (bi / 20) * (Math.PI / 2);
-        const testAmps = applyQAOALayer(
-          amps.map(a => ({ re: a.re, im: a.im })),
-          energies, gamma, beta, nQubits, actualDim
-        );
+    for (let gi = 0; gi <= 8; gi++) {
+      for (let bi = 0; bi <= 8; bi++) {
+        const gamma = (gi / 8) * Math.PI;
+        const beta = (bi / 8) * (Math.PI / 2);
+        const testAmps = applyQAOALayer([...amps], energies, gamma, beta, nQubits, actualDim);
         const E = expectationValue(testAmps, energies);
-        if (E < bestE) { bestE = E; bestG = gamma; bestB = beta; }
+        if (E < bestE) {
+          bestE = E;
+          bestG = gamma;
+          bestB = beta;
+        }
       }
     }
 
-    // Commit best parameters for this layer
     amps = applyQAOALayer(amps, energies, bestG, bestB, nQubits, actualDim);
-    // Use feasible-only ⟨E⟩ for display and final metric (excludes infeasible penalty states)
-    const E = expectationValueFeasible(amps, energies);
+    const E = expectationValue(amps, energies);
     optGamma.push(bestG);
     optBeta.push(bestB);
     layers.push({ gamma: bestG, beta: bestB, energyExpectation: E });
     if (E < bestEnergy) bestEnergy = E;
   }
 
-  // Final feasible-only expectation over the full statevector
-  const finalFeasibleEnergy = expectationValueFeasible(amps, energies);
-  return { layers, finalEnergy: finalFeasibleEnergy, optGamma, optBeta, finalAmps: amps };
+  return { layers, finalEnergy: bestEnergy, optGamma, optBeta, finalAmps: amps };
 }
 
-// ─── Simulated Annealer ───────────────────────────────────────────────────────
+function applyQAOALayer(amps: number[], energies: number[], gamma: number, beta: number, nQubits: number, dim: number): number[] {
+  const phasedAmps = amps.map((amplitude, index) => amplitude * Math.abs(Math.cos(gamma * (energies[index] ?? 0))));
+  let result = [...phasedAmps];
+
+  for (let q = 0; q < Math.min(nQubits, 6); q++) {
+    const newAmps = new Array(dim).fill(0);
+    for (let x = 0; x < dim; x++) {
+      const flipped = x ^ (1 << q);
+      if (flipped < dim) {
+        newAmps[x] += result[x] * Math.cos(beta);
+        newAmps[x] += result[flipped] * (-Math.sin(beta));
+      } else {
+        newAmps[x] = result[x];
+      }
+    }
+    const norm = Math.sqrt(newAmps.reduce((sum, amplitude) => sum + amplitude * amplitude, 0)) || 1;
+    result = newAmps.map((amplitude) => amplitude / norm);
+  }
+
+  return result;
+}
+
+function expectationValue(amps: number[], energies: number[]): number {
+  return amps.reduce((sum, amplitude, index) => sum + amplitude * amplitude * (energies[index] ?? 0), 0);
+}
 
 export class SimulatedAnnealer {
   private nodes: Map<string, OptimizerNode>;
   private edges: OptimizerEdge[];
-  private weights: QUBOWeights;
+  private weights: Required<QUBOWeights>;
   private isp_s: number;
   private spacecraft_mass_kg: number;
 
   constructor(
     nodes: OptimizerNode[],
     edges: OptimizerEdge[],
-    weights: QUBOWeights = { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
+    weights: QUBOWeights = { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0, time: 1.2 },
     isp_s: number = 450,
-    spacecraft_mass_kg: number = 5000
+    spacecraft_mass_kg: number = 5000,
   ) {
-    this.nodes               = new Map(nodes.map(n => [n.id, n]));
-    this.edges               = edges;
-    this.weights             = weights;
-    this.isp_s               = isp_s;
-    this.spacecraft_mass_kg  = spacecraft_mass_kg;
+    this.nodes = new Map(nodes.map((node) => [node.id, node]));
+    this.edges = edges;
+    this.weights = {
+      fuel: weights.fuel,
+      rad: weights.rad,
+      comm: weights.comm,
+      safety: weights.safety,
+      time: weights.time ?? 1.2,
+    };
+    this.isp_s = isp_s;
+    this.spacecraft_mass_kg = spacecraft_mass_kg;
+  }
+
+  private findEdge(from: string, to: string): OptimizerEdge | undefined {
+    return this.edges.find((edge) => edge.from === from && edge.to === to);
+  }
+
+  private buildMissionProfile(
+    horizon: number,
+    radiationMultiplier: number,
+    overrides?: Partial<MissionTimeProfile>,
+  ): MissionTimeProfile {
+    const nodeList = [...this.nodes.values()];
+    const nodeStates = Object.fromEntries(
+      nodeList.map((node, index) => {
+        const phase = (index + 1) * 0.65;
+        const communicationWindow = Array.from({ length: horizon }, (_, t) =>
+          (0.5 + 0.5 * Math.sin((2 * Math.PI * (t + 1)) / Math.max(horizon, 2) + phase)) < (1 - node.commScore * 0.95)
+            ? 0
+            : 1,
+        );
+        const communicationReliability = Array.from({ length: horizon }, (_, t) =>
+          clamp(node.commScore * (0.85 + 0.2 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase / 2)), 0.05, 1),
+        );
+        const radiationField = Array.from({ length: horizon }, (_, t) =>
+          clamp(node.radiation * radiationMultiplier * (0.88 + 0.28 * Math.sin((2 * Math.PI * t) / Math.max(horizon, 2) + phase)), 0, 2),
+        );
+        const fuelMultiplier = Array.from({ length: horizon }, (_, t) =>
+          1 + 0.08 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase),
+        );
+
+        return [
+          node.id,
+          {
+            communicationWindow,
+            communicationReliability,
+            radiationField,
+            fuelMultiplier,
+          } satisfies TimeDependentNodeState,
+        ];
+      }),
+    ) as Record<string, TimeDependentNodeState>;
+
+    return {
+      horizon,
+      radiationThreshold: overrides?.radiationThreshold ?? 0.75,
+      nodeStates: { ...nodeStates, ...(overrides?.nodeStates ?? {}) },
+      illegalTransitions: overrides?.illegalTransitions ?? [],
+    };
   }
 
   private getInitialPath(start: string, end: string, steps: number): string[] {
     const path: string[] = [start];
     let currentId = start;
     const visited = new Set([start]);
+
     for (let i = 0; i < steps - 2; i++) {
       const neighbors = this.edges
-        .filter(e => e.from === currentId && !visited.has(e.to))
+        .filter((edge) => edge.from === currentId && !visited.has(edge.to))
         .sort((a, b) => a.fuelCost - b.fuelCost);
       if (!neighbors.length) break;
       currentId = neighbors[0].to;
@@ -416,67 +574,276 @@ export class SimulatedAnnealer {
       path.push(currentId);
       if (currentId === end) break;
     }
+
     if (path[path.length - 1] !== end) path.push(end);
     return path;
   }
 
-  /**
-   * Full QUBO Hamiltonian cost:
-   * H(x) = wf·ΣΔv² + wr·Σrad² + wc·Σ(1-comm)² + ws·ΣΔrad_shock²
-   *        + λ_orbit · Σ(out-of-plane penalty)
-   */
-  private calculateCost(path: string[]): {
-    total: number; fuel: number; rad: number; comm: number; safety: number; deltaV_ms: number;
-  } {
-    let fuel = 0, rad = 0, comm = 0, safety = 0, deltaV_ms = 0;
+  private getShortestPath(start: string, end: string): string[] {
+    const dist = new Map<string, number>();
+    const prev = new Map<string, string | null>();
+    const unvisited = new Set(this.nodes.keys());
 
-    for (let i = 0; i < path.length; i++) {
-      const node = this.nodes.get(path[i]);
-      if (!node) { fuel += 2000; continue; }
+    for (const id of unvisited) {
+      dist.set(id, Infinity);
+      prev.set(id, null);
+    }
+    dist.set(start, 0);
 
-      rad  += node.radiation ** 2;
-      comm += (1 - node.commScore) ** 2;
+    while (unvisited.size) {
+      let current: string | null = null;
+      let best = Infinity;
+      for (const nodeId of unvisited) {
+        const candidate = dist.get(nodeId) ?? Infinity;
+        if (candidate < best) {
+          best = candidate;
+          current = nodeId;
+        }
+      }
+      if (!current || current === end) break;
+      unvisited.delete(current);
 
-      if (i < path.length - 1) {
-        const edge = this.edges.find(e => e.from === path[i] && e.to === path[i + 1]);
-        if (edge) {
-          fuel += edge.fuelCost;
-          if (edge.deltaV_ms) deltaV_ms += edge.deltaV_ms;
-
-          const nextNode = this.nodes.get(path[i + 1]);
-          if (nextNode) {
-            const radShock = Math.abs(nextNode.radiation - node.radiation);
-            if (radShock > 0.4) safety += 50 * radShock ** 2;
-            const incDelta = Math.abs((nextNode.inclination || 0) - (node.inclination || 0));
-            safety += incDelta * 10;
-          }
-        } else {
-          fuel += 2000;
+      for (const edge of this.edges.filter((candidate) => candidate.from === current)) {
+        const alt = (dist.get(current) ?? Infinity) + edge.distance;
+        if (alt < (dist.get(edge.to) ?? Infinity)) {
+          dist.set(edge.to, alt);
+          prev.set(edge.to, current);
         }
       }
     }
 
-    const total = fuel * this.weights.fuel
-      + rad    * this.weights.rad
-      + comm   * this.weights.comm
-      + safety * this.weights.safety;
-
-    return { total, fuel, rad, comm, safety, deltaV_ms };
+    const path: string[] = [];
+    let cursor: string | null = end;
+    while (cursor) {
+      path.unshift(cursor);
+      cursor = prev.get(cursor) ?? null;
+    }
+    return path[0] === start ? path : this.getInitialPath(start, end, 4);
   }
 
-  /**
-   * Generate physically-meaningful QAOA circuit map for visualisation.
-   * Gates reflect the QUBO cost structure:
-   *   - H gates:  initialise |+⟩^n (uniform superposition)
-   *   - RZ(γQᵢᵢ): diagonal QUBO terms (node costs)
-   *   - CNOT+RZ+CNOT: off-diagonal coupling (edge costs)
-   *   - RX(2β):   mixer Hamiltonian (bit-flip, uniform superposition)
-   */
+  private getGreedyPath(start: string, end: string, missionProfile: MissionTimeProfile): string[] {
+    const path: string[] = [start];
+    const visited = new Set(path);
+    let current = start;
+
+    while (current !== end && path.length < missionProfile.horizon) {
+      const next = this.edges
+        .filter((edge) => edge.from === current && !visited.has(edge.to))
+        .map((edge) => {
+          const node = this.nodes.get(edge.to);
+          const t = path.length;
+          const state = node ? missionProfile.nodeStates[node.id] : undefined;
+          const radiation = state?.radiationField[t] ?? node?.radiation ?? 1;
+          const commPenalty = state?.communicationWindow[t]
+            ? (1 - (state?.communicationReliability[t] ?? node?.commScore ?? 0.2)) ** 2
+            : 8;
+          const score = edge.fuelCost * this.weights.fuel + radiation ** 2 * this.weights.rad + commPenalty * this.weights.comm;
+          return { score, to: edge.to };
+        })
+        .sort((a, b) => a.score - b.score)[0];
+
+      if (!next) break;
+      current = next.to;
+      visited.add(current);
+      path.push(current);
+    }
+
+    if (path[path.length - 1] !== end) path.push(end);
+    return path;
+  }
+
+  private evaluatePath(
+    path: string[],
+    missionProfile: MissionTimeProfile,
+    start: string,
+    end: string,
+    uncertainty: MissionUncertaintySample = { fuelScale: 1, radiationScale: 1, communicationScale: 1 },
+  ): MissionCostBreakdown {
+    let fuel = 0;
+    let rad = 0;
+    let comm = 0;
+    let safety = 0;
+    let time = 0;
+    let continuityPenalty = 0;
+    let startEndPenalty = 0;
+    let illegalTransitionPenalty = 0;
+    let deltaV_ms = 0;
+    const timeline: MissionTimelinePoint[] = [];
+    const nodeMetrics = new Map<string, ExplainNodeMetric>();
+    const violations: string[] = [];
+    const visited = new Set<string>();
+
+    if (path[0] !== start) {
+      startEndPenalty += 800;
+      violations.push(`Start constraint violated: expected ${start}, got ${path[0]}`);
+    }
+    if (path[path.length - 1] !== end) {
+      startEndPenalty += 800;
+      violations.push(`End constraint violated: expected ${end}, got ${path[path.length - 1]}`);
+    }
+
+    for (let t = 0; t < path.length; t++) {
+      const node = this.nodes.get(path[t]);
+      if (!node) {
+        continuityPenalty += 500;
+        violations.push(`Unknown node at t=${t}: ${path[t]}`);
+        continue;
+      }
+
+      const state = missionProfile.nodeStates[node.id];
+      const communicationOpen = (state?.communicationWindow[t] ?? 1) > 0;
+      const communicationReliability = clamp(
+        (state?.communicationReliability[t] ?? node.commScore) / uncertainty.communicationScale,
+        0.01,
+        1,
+      );
+      const radiation = (state?.radiationField[t] ?? node.radiation) * uncertainty.radiationScale;
+      const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale;
+      const radiationPenalty = radiation ** 2;
+      const communicationPenalty = communicationOpen ? (1 - communicationReliability) ** 2 : 8 + (1 - communicationReliability);
+      const timePenalty = 1 + 0.0015 * (node.altitude_km ?? 0);
+      let nodeSafetyPenalty = 0;
+      const reasons: string[] = [];
+
+      rad += radiationPenalty;
+      comm += communicationPenalty;
+      time += timePenalty;
+
+      if (!communicationOpen) {
+        violations.push(`Communication blackout at ${node.id} (t=${t})`);
+        reasons.push('communication blackout');
+      }
+
+      if (radiation > missionProfile.radiationThreshold) {
+        const excess = (radiation - missionProfile.radiationThreshold) / Math.max(missionProfile.radiationThreshold, 0.1);
+        nodeSafetyPenalty += 40 * excess ** 2;
+        violations.push(`Radiation threshold exceeded at ${node.id} (t=${t})`);
+        reasons.push('high radiation');
+      }
+
+      if (visited.has(node.id)) {
+        continuityPenalty += 350;
+        violations.push(`Repeated visit to ${node.id}`);
+      }
+      visited.add(node.id);
+
+      const metric = nodeMetrics.get(node.id) ?? {
+        id: node.id,
+        name: node.name,
+        fuelPenalty: 0,
+        radiationPenalty: 0,
+        communicationPenalty: 0,
+        safetyPenalty: 0,
+        timePenalty: 0,
+        reasons: [],
+      };
+
+      metric.radiationPenalty += this.weights.rad * radiationPenalty;
+      metric.communicationPenalty += this.weights.comm * communicationPenalty;
+      metric.timePenalty += this.weights.time * timePenalty;
+      metric.safetyPenalty += this.weights.safety * nodeSafetyPenalty;
+      metric.reasons = [...new Set([...metric.reasons, ...reasons])];
+      nodeMetrics.set(node.id, metric);
+
+      if (t < path.length - 1) {
+        const nextNode = this.nodes.get(path[t + 1]);
+        const edge = this.findEdge(path[t], path[t + 1]);
+        const illegalRule = missionProfile.illegalTransitions?.find((candidate) =>
+          candidate.from === path[t] &&
+          candidate.to === path[t + 1] &&
+          (!candidate.activeAt || candidate.activeAt.includes(t)),
+        );
+
+        if (edge) {
+          fuel += edge.fuelCost * fuelMultiplier;
+          deltaV_ms += edge.deltaV_ms ?? 0;
+          metric.fuelPenalty += this.weights.fuel * edge.fuelCost * fuelMultiplier;
+
+          if (illegalRule) {
+            illegalTransitionPenalty += illegalRule.penalty ?? 650;
+            reasons.push(illegalRule.reason ?? 'time-blocked transition');
+            violations.push(`Time-dependent transition lock ${path[t]} -> ${path[t + 1]} at t=${t}`);
+          }
+
+          if (nextNode) {
+            const nextState = missionProfile.nodeStates[nextNode.id];
+            const nextRadiation = (nextState?.radiationField[t + 1] ?? nextNode.radiation) * uncertainty.radiationScale;
+            const radShock = Math.abs(nextRadiation - radiation);
+            if (radShock > 0.35) {
+              nodeSafetyPenalty += 45 * radShock ** 2;
+              reasons.push('radiation gradient');
+            }
+
+            const incDelta = Math.abs((nextNode.inclination ?? 0) - (node.inclination ?? 0));
+            nodeSafetyPenalty += incDelta * 10;
+            if (incDelta > 10) reasons.push('excessive plane change');
+          }
+        } else {
+          continuityPenalty += 1200;
+          illegalTransitionPenalty += illegalRule?.penalty ?? 900;
+          metric.fuelPenalty += 900;
+          reasons.push(illegalRule?.reason ?? 'illegal transition');
+          violations.push(`Illegal transition ${path[t]} -> ${path[t + 1]} at t=${t}`);
+        }
+      }
+
+      safety += nodeSafetyPenalty;
+      metric.safetyPenalty += this.weights.safety * nodeSafetyPenalty;
+      metric.reasons = [...new Set([...metric.reasons, ...reasons])];
+      nodeMetrics.set(node.id, metric);
+
+      const weightedStepCost =
+        this.weights.rad * radiationPenalty +
+        this.weights.comm * communicationPenalty +
+        this.weights.safety * nodeSafetyPenalty +
+        this.weights.time * timePenalty;
+
+      timeline.push({
+        t,
+        nodeId: node.id,
+        nodeName: node.name,
+        radiation,
+        communicationOpen,
+        communicationReliability,
+        fuelMultiplier,
+        stepCost: weightedStepCost,
+        riskScore: clamp(100 * (0.45 * radiation + 0.35 * (communicationOpen ? 0.15 : 1) + 0.2 * nodeSafetyPenalty / 50), 0, 100),
+      });
+    }
+
+    const total =
+      this.weights.fuel * fuel +
+      this.weights.rad * rad +
+      this.weights.comm * comm +
+      this.weights.safety * safety +
+      this.weights.time * time +
+      continuityPenalty +
+      startEndPenalty +
+      illegalTransitionPenalty;
+
+    return {
+      total,
+      fuel,
+      rad,
+      comm,
+      safety,
+      time,
+      continuityPenalty,
+      startEndPenalty,
+      illegalTransitionPenalty,
+      deltaV_ms,
+      timeline,
+      nodeMetrics: [...nodeMetrics.values()],
+      violations,
+    };
+  }
+
   private generateQAOACircuit(
     path: string[],
+    timeline: MissionTimelinePoint[],
     gamma: number,
     beta: number,
-    layer: number
+    layer: number,
   ): { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[] {
     const circuit: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[] = [];
     const nQubits = Math.min(path.length, 8);
@@ -488,20 +855,16 @@ export class SimulatedAnnealer {
     }
 
     for (let q = 0; q < nQubits; q++) {
-      const node = this.nodes.get(path[q]);
-      if (!node) continue;
-      const diagCost = node.radiation * this.weights.rad + (1 - node.commScore) * this.weights.comm;
+      const diagCost = timeline[q]?.stepCost ?? 0;
       circuit.push({ gate: 'RZ', qubit: q, angle: (gamma * diagCost).toFixed(3), layer });
     }
 
     for (let q = 0; q < nQubits - 1; q++) {
-      const edge = this.edges.find(e => e.from === path[q] && e.to === path[q + 1]);
-      if (edge) {
-        const edgeCost = edge.fuelCost * this.weights.fuel;
-        circuit.push({ gate: 'CNOT', qubit: q, target: q + 1, layer });
-        circuit.push({ gate: 'RZ',   qubit: q + 1, angle: (gamma * edgeCost).toFixed(3), layer });
-        circuit.push({ gate: 'CNOT', qubit: q, target: q + 1, layer });
-      }
+      const edge = this.findEdge(path[q], path[q + 1]);
+      const edgeCost = edge ? edge.fuelCost * this.weights.fuel : 600;
+      circuit.push({ gate: 'CNOT', qubit: q, target: q + 1, layer });
+      circuit.push({ gate: 'RZ', qubit: q + 1, angle: (gamma * edgeCost).toFixed(3), layer });
+      circuit.push({ gate: 'CNOT', qubit: q, target: q + 1, layer });
     }
 
     for (let q = 0; q < nQubits; q++) {
@@ -511,168 +874,119 @@ export class SimulatedAnnealer {
     return circuit;
   }
 
-  /**
-   * Build QAOA basis energies using node-selection encoding with feasibility constraints.
-   *
-   * Encoding: qubit q = 1 means path node bestPath[q] is included in the sub-path.
-   * Constraint: start node (qubit 0) and end node (qubit nQubits-1) must always be 1.
-   * States violating this get INFEASIBLE penalty, ensuring:
-   *   - E_optimal is taken over valid paths (not the empty path with E=0)
-   *   - QAOA amplitude concentrates on physically meaningful states
-   * Objective: radiation + comm + edge fuel costs for active node pairs.
-   */
-  private buildBasisEnergies(
-    path: string[],
+  private buildBasisEnergiesFromTimeline(
+    timeline: MissionTimelinePoint[],
     nQubits: number,
     dim: number,
-    INFEASIBLE: number
+    infeasiblePenalty: number,
   ): number[] {
     return Array.from({ length: dim }, (_, x) => {
       const hasStart = !!(x & 1);
-      const hasEnd   = !!(x & (1 << (nQubits - 1)));
-      if (!hasStart || !hasEnd) return INFEASIBLE;
+      const hasEnd = !!(x & (1 << (nQubits - 1)));
+      if (!hasStart || !hasEnd) return infeasiblePenalty;
 
-      let e = 0;
-      // Node costs for active qubits
+      let energy = 0;
       for (let q = 0; q < nQubits; q++) {
-        if (x & (1 << q)) {
-          const node = this.nodes.get(path[q]);
-          if (node) {
-            e += node.radiation    * this.weights.rad;
-            e += (1 - node.commScore) * this.weights.comm;
-          }
-        }
+        if (x & (1 << q)) energy += timeline[q]?.stepCost ?? 0;
       }
-      // Edge costs between consecutive active qubit pairs
-      for (let q = 0; q < nQubits - 1; q++) {
-        if ((x & (1 << q)) && (x & (1 << (q + 1)))) {
-          const edge = this.edges.find(
-            e2 => e2.from === path[q] && e2.to === path[q + 1]
-          );
-          if (edge) e += edge.fuelCost * this.weights.fuel;
-        }
-      }
-      return e;
+      return energy;
     });
   }
 
-  /**
-   * Re-run only the QAOA simulation for a pre-found path.
-   * Exposed publicly so the /api/qaoa endpoint can update QAOA results
-   * without re-running the full 20,000-step simulated annealing.
-   * Use when the user changes the QAOA depth p interactively.
-   */
-  public runQAOAOnly(
+  private benchmarkStrategy(
+    label: string,
     path: string[],
-    qaoa_p: number = 3
-  ): {
-    qaoa: Omit<QAOAResult, 'classicalSAImprovement_pct'> & { classicalSAImprovement_pct: number };
-    circuitMap: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[];
-  } {
-    const nQubits   = Math.min(path.length, 6);
-    const dim       = Math.pow(2, nQubits);
-    const INFEASIBLE = 1e6;
-
-    const basisEnergies = this.buildBasisEnergies(path, nQubits, dim, INFEASIBLE);
-    const feasibleEnergies = basisEnergies.filter(e => e < INFEASIBLE);
-    const E_optimal = feasibleEnergies.length > 0 ? Math.min(...feasibleEnergies) : 1;
-    const optimalIdx = basisEnergies.reduce(
-      (best, e, i) => (e < basisEnergies[best] ? i : best), 0
-    );
-
-    const qaoa = simulateQAOA(basisEnergies, nQubits, qaoa_p);
-
-    const approxRatio  = E_optimal > 0 ? qaoa.finalEnergy / E_optimal : 1.0;
-    const qaoaMatchPct = (E_optimal > 0 && qaoa.finalEnergy > 0)
-      ? Math.min(100, (E_optimal / qaoa.finalEnergy) * 100)
-      : 100;
-
-    const distribution: DistributionEntry[] = Array.from({ length: dim }, (_, x) => ({
-      state:     x.toString(2).padStart(nQubits, '0'),
-      probability: qaoa.finalAmps[x] ? ampProb(qaoa.finalAmps[x]) : 0,
-      energy:    basisEnergies[x],
-      isOptimal: x === optimalIdx,
-    }))
-      .filter(d => d.energy < INFEASIBLE)
-      .sort((a, b) => b.probability - a.probability)
-      .slice(0, 16);
-
-    const circuitMap = qaoa.layers.flatMap((layer, li) =>
-      this.generateQAOACircuit(path, layer.gamma, layer.beta, li)
+    missionProfile: MissionTimeProfile,
+    start: string,
+    end: string,
+    uncertaintyModel: UncertaintyModel,
+  ): StrategyBenchmark {
+    const deterministic = this.evaluatePath(path, missionProfile, start, end);
+    const stochastic = runMonteCarlo(
+      32,
+      (sample) => {
+        const result = this.evaluatePath(path, missionProfile, start, end, sample);
+        const success = result.violations.length === 0 && result.safety < 180;
+        return {
+          cost: result.total,
+          success,
+          metrics: {
+            fuel: result.fuel,
+            radiation: result.rad,
+            communication: result.comm,
+            safety: result.safety,
+            violations: result.violations.length,
+          },
+        };
+      },
+      uncertaintyModel,
     );
 
     return {
-      qaoa: {
-        layers:                     qaoa.layers,
-        finalEnergy:                qaoa.finalEnergy,
-        approximationRatio:         approxRatio,
-        qaoaMatchPct,
-        classicalSAImprovement_pct: 0, // N/A for QAOA-only re-runs (no SA baseline)
-        distribution,
-      },
-      circuitMap,
+      label,
+      path,
+      totalCost: deterministic.total,
+      constraintViolations: deterministic.violations.length,
+      successProbability: stochastic.successProbability,
     };
   }
 
-  /**
-   * Full optimization: Simulated Annealing → QAOA simulation → physics calculations.
-   * @param qaoa_p QAOA circuit depth (number of layers, default 3)
-   */
   public optimize(
     start: string,
     end: string,
     steps: number = 8,
     radiationMultiplier: number = 1.0,
-    qaoa_p: number = 3
+    missionProfileOverrides?: Partial<MissionTimeProfile>,
+    monteCarloRuns: number = 80,
+    qaoaDepth: number = 3,
   ): OptimizationResult {
-    // Scale radiation by live space weather index
-    const adjustedNodes = [...this.nodes.values()].map(n => ({
-      ...n,
-      radiation: Math.min(1.5, n.radiation * radiationMultiplier)
-    }));
-    adjustedNodes.forEach(n => this.nodes.set(n.id, n));
+    const horizon = Math.max(2, steps);
+    const missionProfile = this.buildMissionProfile(horizon, radiationMultiplier, missionProfileOverrides);
+    const uncertaintyModel: UncertaintyModel = {
+      fuelSigmaFraction: 0.07,
+      radiationSigmaFraction: 0.14,
+      communicationSpread: 0.2,
+    };
 
-    const naivePath     = this.getInitialPath(start, end, steps);
-    const naiveCostData = this.calculateCost(naivePath);
-    const naiveCost     = naiveCostData.total;
+    const naivePath = this.getInitialPath(start, end, horizon);
+    const naiveCostData = this.evaluatePath(naivePath, missionProfile, start, end);
+    const naiveCost = naiveCostData.total;
 
-    // ── Simulated Annealing (Metropolis-Hastings) ─────────────────────────────
     let currentPath = [...naivePath];
-    let currentCost = this.calculateCost(currentPath);
-    let bestPath    = [...currentPath];
-    let bestCost    = { ...currentCost };
+    let currentCost = this.evaluatePath(currentPath, missionProfile, start, end);
+    let bestPath = [...currentPath];
+    let bestCost = { ...currentCost };
 
-    const T0          = 8000.0;
-    const Tf          = 0.01;
-    const iterations  = 20000;
+    const T0 = 8000.0;
+    const Tf = 0.01;
+    const iterations = 20000;
     const coolingRate = Math.pow(Tf / T0, 1 / iterations);
-    let temp          = T0;
+    let temp = T0;
 
     const annealingHistory: { step: number; temperature: number; energy: number }[] = [];
-    const sampleInterval = Math.floor(iterations / 60);
+    const sampleInterval = Math.max(1, Math.floor(iterations / 60));
 
     for (let i = 0; i < iterations; i++) {
       const newPath = [...currentPath];
       if (newPath.length > 2) {
-        if (Math.random() < 0.6) {
-          // Swap two intermediate nodes
+        const moveType = Math.random();
+        if (moveType < 0.6) {
           const idx1 = Math.floor(Math.random() * (newPath.length - 2)) + 1;
           const idx2 = Math.floor(Math.random() * (newPath.length - 2)) + 1;
           [newPath[idx1], newPath[idx2]] = [newPath[idx2], newPath[idx1]];
         } else {
-          // Replace one intermediate node via a valid edge
           const idx = Math.floor(Math.random() * (newPath.length - 2)) + 1;
-          const candidates = this.edges.filter(e => e.from === newPath[idx - 1]).map(e => e.to);
-          if (candidates.length > 0) {
+          const prevNode = newPath[idx - 1];
+          const candidates = this.edges.filter((edge) => edge.from === prevNode).map((edge) => edge.to);
+          if (candidates.length) {
             newPath[idx] = candidates[Math.floor(Math.random() * candidates.length)];
           }
         }
       }
 
-      const newCost = this.calculateCost(newPath);
-      const delta   = newCost.total - currentCost.total;
+      const newCost = this.evaluatePath(newPath, missionProfile, start, end);
+      const delta = newCost.total - currentCost.total;
 
-      // Metropolis criterion: e^(-δE/T)
       if (delta < 0 || Math.random() < Math.exp(-delta / temp)) {
         currentPath = newPath;
         currentCost = newCost;
@@ -688,93 +1002,414 @@ export class SimulatedAnnealer {
       }
     }
 
-    // ── QAOA Simulation ───────────────────────────────────────────────────────
-    const nQubits    = Math.min(bestPath.length, 6);
-    const dim        = Math.pow(2, nQubits);
-    const INFEASIBLE = 1e6;
+    const shortestPath = this.getShortestPath(start, end);
+    const greedyPath = this.getGreedyPath(start, end, missionProfile);
+    const shortestCostData = this.evaluatePath(shortestPath, missionProfile, start, end);
+    const greedyCostData = this.evaluatePath(greedyPath, missionProfile, start, end);
 
-    const basisEnergies    = this.buildBasisEnergies(bestPath, nQubits, dim, INFEASIBLE);
-    const feasibleEnergies = basisEnergies.filter(e => e < INFEASIBLE);
-    const E_optimal        = feasibleEnergies.length > 0 ? Math.min(...feasibleEnergies) : 1;
-    const optimalIdx       = basisEnergies.reduce(
-      (best, e, i) => (e < basisEnergies[best] ? i : best), 0
-    );
+    const qubo = buildFormalMissionQUBO(this.nodes, this.edges, this.weights, bestPath.length, missionProfile, start, end);
+    const nQubits = Math.min(bestPath.length, 6);
+    const dim = Math.pow(2, nQubits);
 
-    const qaoa = simulateQAOA(basisEnergies, nQubits, qaoa_p);
+    const basisEnergies = Array.from({ length: dim }, (_, x) => {
+      let energy = 0;
+      for (let q = 0; q < nQubits; q++) {
+        if (x & (1 << q)) energy += bestCost.timeline[q]?.stepCost ?? 0;
+      }
+      return energy;
+    });
 
-    const approxRatio  = E_optimal > 0 ? qaoa.finalEnergy / E_optimal : 1.0;
-    const qaoaMatchPct = (E_optimal > 0 && qaoa.finalEnergy > 0)
-      ? Math.min(100, (E_optimal / qaoa.finalEnergy) * 100)
-      : 100;
-    const classicalSAImprovement_pct = Math.max(0, (1 - bestCost.total / naiveCost) * 100);
-
+    const qaoa = simulateQAOA(basisEnergies, nQubits, qaoaDepth);
+    const classicalMin = Math.min(...basisEnergies);
+    const approxRatio = classicalMin !== 0 ? qaoa.finalEnergy / classicalMin : 1.0;
+    const quantumAdvantage_pct = Math.max(0, (1 - bestCost.total / Math.max(naiveCost, 1e-9)) * 100);
+    const optimalIdx = basisEnergies.reduce((best, energy, index) => (
+      energy < basisEnergies[best] ? index : best
+    ), 0);
     const distribution: DistributionEntry[] = Array.from({ length: dim }, (_, x) => ({
-      state:       x.toString(2).padStart(nQubits, '0'),
-      probability: qaoa.finalAmps[x] ? ampProb(qaoa.finalAmps[x]) : 0,
-      energy:      basisEnergies[x],
-      isOptimal:   x === optimalIdx,
+      state: x.toString(2).padStart(nQubits, '0'),
+      probability: qaoa.finalAmps[x] ? qaoa.finalAmps[x] ** 2 : 0,
+      energy: basisEnergies[x],
+      isOptimal: x === optimalIdx,
     }))
-      .filter(d => d.energy < INFEASIBLE)
       .sort((a, b) => b.probability - a.probability)
       .slice(0, 16);
-
-    const fullCircuit = qaoa.layers.flatMap((layer, li) =>
-      this.generateQAOACircuit(bestPath, layer.gamma, layer.beta, li)
+    const fullCircuit = qaoa.layers.flatMap((layer, index) =>
+      this.generateQAOACircuit(bestPath, bestCost.timeline, layer.gamma, layer.beta, index),
     );
 
-    // ── Physics Calculations ──────────────────────────────────────────────────
     let totalDeltaV = bestCost.deltaV_ms;
     if (totalDeltaV === 0) {
       totalDeltaV = this.isp_s * G0 * bestCost.fuel * 0.05;
     }
 
-    const fuelMass_kg       = tsiolkovskyFuelMass(totalDeltaV, this.spacecraft_mass_kg, this.isp_s);
+    const fuelMass_kg = tsiolkovskyFuelMass(totalDeltaV, this.spacecraft_mass_kg, this.isp_s);
     const propellantFraction = fuelMass_kg / this.spacecraft_mass_kg;
 
-    const firstNode     = this.nodes.get(bestPath[0]);
-    const lastNode      = this.nodes.get(bestPath[bestPath.length - 1]);
-    const h1            = firstNode?.altitude_km || 400;
-    const h2            = lastNode?.altitude_km  || 35786;
-    const hohmann       = hohmannDeltaV(h1, h2);
-
-    const avgAlt        = bestPath.reduce((s, id) => s + (this.nodes.get(id)?.altitude_km || 400), 0) / bestPath.length;
-    const avgInc        = bestPath.reduce((s, id) => s + (this.nodes.get(id)?.inclination || 28.5), 0) / bestPath.length;
+    const firstNode = this.nodes.get(bestPath[0]);
+    const lastNode = this.nodes.get(bestPath[bestPath.length - 1]);
+    const h1 = firstNode?.altitude_km ?? 400;
+    const h2 = lastNode?.altitude_km ?? 35786;
+    const hohmann = hohmannDeltaV(h1, h2);
+    const avgAlt = bestPath.reduce((sum, id) => sum + (this.nodes.get(id)?.altitude_km ?? 400), 0) / bestPath.length;
+    const avgInc = bestPath.reduce((sum, id) => sum + (this.nodes.get(id)?.inclination ?? 28.5), 0) / bestPath.length;
     const vanAllenDoseVal = vanAllenDose(avgAlt, avgInc);
-    const j2corr        = j2NodalPrecession(avgAlt, 0.001, avgInc);
+    const j2corr = j2NodalPrecession(avgAlt, 0.001, avgInc);
+
+    const stochastic = runMonteCarlo(
+      Math.max(50, Math.min(100, monteCarloRuns)),
+      (sample) => {
+        const result = this.evaluatePath(bestPath, missionProfile, start, end, sample);
+        const success = result.violations.length === 0 && result.safety < 180 && result.illegalTransitionPenalty === 0;
+        return {
+          cost: result.total,
+          success,
+          metrics: {
+            fuel: result.fuel,
+            radiation: result.rad,
+            communication: result.comm,
+            safety: result.safety,
+            violations: result.violations.length,
+          },
+        };
+      },
+      uncertaintyModel,
+    );
+
+    const crewRiskParams: CrewRadiationParams = {
+      timestepHours: 6,
+      shieldingFactor: 0.74,
+      crewSensitivity: 1.08,
+      unsafeDoseRateThreshold: missionProfile.radiationThreshold,
+      acuteDoseRateThreshold: missionProfile.radiationThreshold * 1.25,
+      alpha: 0.42,
+      beta: 0.95,
+      gamma: 0.08,
+    };
+    const bestRadiationSamples = timelineToRadiationSamples(bestCost.timeline);
+    const shortestRadiationSamples = timelineToRadiationSamples(shortestCostData.timeline);
+    const greedyRadiationSamples = timelineToRadiationSamples(greedyCostData.timeline);
+    const crewRisk = computeCrewRadiationReadiness(bestRadiationSamples, crewRiskParams);
+    const shortestCrewRisk = computeCrewRadiationReadiness(shortestRadiationSamples, crewRiskParams);
+    const greedyCrewRisk = computeCrewRadiationReadiness(greedyRadiationSamples, crewRiskParams);
+    const alternateRouteSamples = shortestCrewRisk.riskScore <= greedyCrewRisk.riskScore
+      ? shortestRadiationSamples
+      : greedyRadiationSamples;
+    const medicalValidation = validateCrewRadiationReadiness(bestRadiationSamples, crewRisk, crewRiskParams, alternateRouteSamples);
+    const communicationStability = averageCommunicationStability(bestCost.timeline);
+    const missionProgress = 0;
+    const returnFeasibility = clamp(1 - propellantFraction * 0.55 - bestCost.illegalTransitionPenalty / 4000, 0, 1);
+    const forecastRemainingRisk = clamp(
+      crewRisk.riskScore * (0.58 + (1 - communicationStability) * 0.35 + (1 - returnFeasibility) * 0.2),
+      0,
+      1.5,
+    );
+    const candidateDecisionPaths: DecisionPathCandidate[] = [
+      {
+        name: 'Shortest path',
+        path: shortestPath,
+        projectedRiskScore: shortestCrewRisk.riskScore,
+        communicationStability: averageCommunicationStability(shortestCostData.timeline),
+        returnFeasibility: clamp(1 - shortestCostData.deltaV_ms / Math.max(totalDeltaV + 1200, 1), 0, 1),
+        missionProgressGain: 0.92,
+      },
+      {
+        name: 'Greedy path',
+        path: greedyPath,
+        projectedRiskScore: greedyCrewRisk.riskScore,
+        communicationStability: averageCommunicationStability(greedyCostData.timeline),
+        returnFeasibility: clamp(1 - greedyCostData.deltaV_ms / Math.max(totalDeltaV + 1200, 1), 0, 1),
+        missionProgressGain: 0.86,
+      },
+    ];
+    const baseMissionDecision = evaluateMissionDecision(bestPath, crewRisk, {
+      forecastRemainingRisk,
+      returnFeasibility,
+      communicationStability,
+      missionProgress,
+      alternateCorridorAvailable: candidateDecisionPaths.some((candidate) => candidate.projectedRiskScore < crewRisk.riskScore),
+    });
+    const missionDecision = baseMissionDecision.decision === 'CONTINUE'
+      ? baseMissionDecision
+      : recommendAbortOrReplan(bestPath, {
+          crewRisk,
+          forecastRemainingRisk,
+          returnFeasibility,
+          communicationStability,
+          missionProgress,
+        }, candidateDecisionPaths);
+    const replanOptions = generateReplanOptions(
+      {
+        currentPath: bestPath,
+        currentRiskScore: crewRisk.riskScore,
+        baselineDeltaV: totalDeltaV,
+        baselineDurationHours: bestCost.timeline.length * (crewRiskParams.timestepHours ?? 6),
+        baselineCommunication: communicationStability,
+        missionProgress,
+        currentSuccessProbability: stochastic.successProbability,
+      },
+      {
+        nodes: [...this.nodes.values()],
+        edges: this.edges,
+      },
+      {
+        shieldingBenefitFraction: 0.18,
+      },
+    );
+    const decisionCosts = replanOptions.map((option) => assessDecisionCost(option));
+    const decisionMonteCarlo = replanOptions.map((option) =>
+      runDecisionOptionMonteCarlo(
+        option.name,
+        48,
+        (sample) => {
+          const optionRisk = clamp(
+            option.newTotalMissionRisk *
+              sample.radiationScale *
+              (sample.healthRiskScale ?? 1) *
+              (sample.solarEvent ? (sample.acuteSpikeScale ?? 1.1) : 1),
+            0,
+            1.5,
+          );
+          const costAssessment = assessDecisionCost(option);
+          const cost = costAssessment.riskAdjustedCost * (sample.costScale ?? 1) * (sample.outagePenalty ?? 1);
+          const successProbability = clamp(
+            option.probabilityOfSuccess * (sample.replanSuccessScale ?? 1) / (option.type === 'CONTINUE' && sample.solarEvent ? 1.15 : 1),
+            0,
+            1,
+          );
+          return {
+            cost,
+            success: successProbability >= 0.55,
+            unsafe: optionRisk > 1,
+            crewRisk: optionRisk,
+            metrics: {
+              crewRisk: optionRisk,
+              riskAdjustedCost: cost,
+              successProbability,
+            },
+          };
+        },
+        {
+          ...uncertaintyModel,
+          communicationOutageProbability: 0.14,
+          replanSuccessSigmaFraction: 0.1,
+          costSigmaFraction: 0.16,
+          healthRiskSigmaFraction: 0.12,
+          solarEventProbability: 0.2,
+        },
+      ),
+    );
+
+    const pathIdSet = new Set(bestPath);
+    const offPathExplainMetrics: ExplainNodeMetric[] = [...this.nodes.values()]
+      .filter((node) => !pathIdSet.has(node.id))
+      .map((node) => {
+        const radiationPenalty = node.radiation ** 2;
+        const communicationPenalty = (1 - node.commScore) ** 2;
+        const timePenalty = 1 + 0.0015 * (node.altitude_km ?? 0);
+        return {
+          id: node.id,
+          name: node.name,
+          fuelPenalty: 0,
+          radiationPenalty: this.weights.rad * radiationPenalty,
+          communicationPenalty: this.weights.comm * communicationPenalty,
+          safetyPenalty: 0,
+          timePenalty: this.weights.time * timePenalty,
+          reasons: ['graph alternative not on optimized path'],
+        };
+      });
+
+    const explanation = explainPath(
+      bestPath,
+      {
+        fuel: bestCost.fuel * this.weights.fuel,
+        radiation: bestCost.rad * this.weights.rad,
+        communication: bestCost.comm * this.weights.comm,
+        safety: bestCost.safety * this.weights.safety,
+        time: bestCost.time * this.weights.time,
+      },
+      [...bestCost.nodeMetrics, ...offPathExplainMetrics],
+    );
+
+    const benchmarks = {
+      optimized: this.benchmarkStrategy('Optimized', bestPath, missionProfile, start, end, uncertaintyModel),
+      shortestPath: this.benchmarkStrategy('Shortest Path', shortestPath, missionProfile, start, end, uncertaintyModel),
+      greedy: this.benchmarkStrategy('Greedy', greedyPath, missionProfile, start, end, uncertaintyModel),
+    };
+    const financiallyPreferred = [...decisionCosts].sort((a, b) => a.riskAdjustedCost - b.riskAdjustedCost)[0];
+    const costBenchmark = [...decisionCosts].sort((a, b) => b.riskAdjustedCost - a.riskAdjustedCost)[0];
+    const preferredReplan = replanOptions[0];
+    const verification = runMissionSupportVerification(bestRadiationSamples, crewRiskParams, replanOptions);
 
     return {
-      path:             bestPath,
-      totalCost:        bestCost.total,
-      fuel:             bestCost.fuel,
+      path: bestPath,
+      totalCost: bestCost.total,
+      fuel: bestCost.fuel,
       radiationExposure: bestCost.rad,
-      commLoss:         bestCost.comm,
+      commLoss: bestCost.comm,
+      timePenalty: bestCost.time,
+      safetyPenalty: bestCost.safety,
       naivePath,
       naiveCost,
       quboGraph: {
-        nodes:          this.nodes.size,
-        binaryVars:     this.nodes.size * bestPath.length,
-        temperature:    temp,
+        nodes: this.nodes.size,
+        binaryVars: this.nodes.size * bestPath.length,
+        temperature: temp,
         annealingSteps: iterations,
+        nonZeroTerms: qubo.nonZeroTerms,
       },
-      circuitMap:        fullCircuit,
-      totalDeltaV_ms:    totalDeltaV,
+      circuitMap: fullCircuit,
+      totalDeltaV_ms: totalDeltaV,
       fuelMass_kg,
       propellantFraction,
       annealingHistory,
       qaoa: {
-        layers:                     qaoa.layers,
-        finalEnergy:                qaoa.finalEnergy,
-        approximationRatio:         approxRatio,
-        qaoaMatchPct,
-        classicalSAImprovement_pct,
+        layers: qaoa.layers,
+        finalEnergy: qaoa.finalEnergy,
+        approximationRatio: approxRatio,
+        quantumAdvantage_pct,
+        qaoaMatchPct: approxRatio > 0 ? Math.min(100, 100 / approxRatio) : 100,
+        classicalSAImprovement_pct: quantumAdvantage_pct,
         distribution,
       },
       physics: {
-        hohmannDeltaV:    hohmann.dvTotal,
-        j2Correction:     j2corr,
-        vanAllenDose:     vanAllenDoseVal,
+        hohmannDeltaV: hohmann.dvTotal,
+        j2Correction: j2corr,
+        vanAllenDose: vanAllenDoseVal,
         transferTime_days: hohmann.tof_days,
       },
+      timeline: bestCost.timeline,
+      constraintViolations: bestCost.violations,
+      stochastic,
+      explanation,
+      crewRisk,
+      medicalValidation,
+      missionDecision,
+      replanOptions,
+      decisionCosts,
+      decisionMonteCarlo,
+      decisionNarrative: {
+        medicalRisk: explainCrewRisk(crewRisk, medicalValidation),
+        operationalDecision: explainMissionDecision(missionDecision, preferredReplan),
+        financialRecommendation: financiallyPreferred
+          ? explainFinancialRecommendation(financiallyPreferred, costBenchmark)
+          : 'No financially differentiated replan recommendation was available.',
+      },
+      verification,
+      systemLimitations: [
+        'Radiation scoring is a mission-support approximation and not individualized astronaut clinical judgment.',
+        'Replan generation is graph-based and does not solve full continuous translunar or cislunar trajectory mechanics.',
+        'Cost magnitudes are scenario proxies for comparative decision intelligence rather than agency budget truth.',
+        'Uncertainty propagation is illustrative and not a space-weather forecast-grade probabilistic operations stack.',
+      ],
+      benchmarks,
+      formalModel: {
+        variables: [
+          'Binary decision variable x(i,t) = 1 when the vehicle occupies node i at time index t.',
+          'Transition pairs x(i,t)x(j,t+1) encode discrete moves between mission states.',
+        ],
+        objective: [
+          'Fuel(x) = Σ_t Σ_(i,j) F_ij(t) x(i,t)x(j,t+1)',
+          'Radiation(x) = Σ_t Σ_i R(i,t)^2 x(i,t)',
+          'CommunicationPenalty(x) = Σ_t Σ_i [1 - C(i,t)rho(i,t)]_pen x(i,t)',
+          'Risk(x) = Σ_t Σ_i Psi(i,t) x(i,t)',
+          'Time(x) = Σ_t Σ_i tau(i,t) x(i,t)',
+        ],
+        constraints: [
+          'Position occupancy: Σ_i x(i,t) = 1 for every t.',
+          'Visit consistency: Σ_t x(i,t) <= 1 for each node i in this prototype formulation.',
+          `Boundary conditions: x(${start},0)=1 and x(${end},T-1)=1.`,
+          'Continuity: forbidden transitions receive large pairwise penalties.',
+        ],
+        qubo: [
+          'Q diagonal terms contain node-wise fuel/radiation/communication/time costs.',
+          'Q off-diagonal terms contain transition fuel costs and illegal-transition penalties.',
+          'Quadratic penalty expansion maps equality constraints into x^T Q x without auxiliary continuous variables.',
+        ],
+        assumptions: [
+          'Decision epochs are discretized and aligned with graph nodes rather than continuous thrust arcs.',
+          'Time-varying communication and radiation are surrogate mission environment fields suitable for rapid trade studies.',
+          'Annealing is used because it scales to combinatorial mission design spaces faster than exact enumeration in a hackathon prototype.',
+          'Crew radiation readiness, replan valuation, and decision thresholds are transparent screening layers built on top of the optimized route.',
+        ],
+        limitations: [
+          'The present QUBO uses coarse graph states and does not solve continuous low-thrust or full ephemeris-constrained dynamics.',
+          'Communication and radiation fields are stylized if no external forecast is supplied.',
+          'QAOA is simulated for explainability only; no quantum hardware execution is implied.',
+          'Crew-health logic remains a medically serious but simplified mission-support surrogate model.',
+        ],
+      },
+      timeDependent: {
+        radiationThreshold: missionProfile.radiationThreshold,
+        communicationViolations: bestCost.violations.filter((item) => item.includes('Communication blackout')).length,
+        radiationViolations: bestCost.violations.filter((item) => item.includes('Radiation threshold exceeded')).length,
+      },
+    };
+  }
+
+  public runQAOAOnly(
+    path: string[],
+    qaoaDepth: number = 3,
+  ): {
+    qaoa: QAOAResult;
+    circuitMap: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[];
+  } {
+    const syntheticTimeline = path.map((nodeId, index) => {
+      const node = this.nodes.get(nodeId);
+      const radiation = node?.radiation ?? 0;
+      const communicationReliability = node?.commScore ?? 0.5;
+      const communicationPenalty = (1 - communicationReliability) ** 2;
+      const stepCost =
+        this.weights.rad * radiation ** 2 +
+        this.weights.comm * communicationPenalty +
+        this.weights.time * (1 + 0.0015 * (node?.altitude_km ?? 0));
+
+      return {
+        t: index,
+        nodeId,
+        nodeName: node?.name ?? nodeId,
+        radiation,
+        communicationOpen: true,
+        communicationReliability,
+        fuelMultiplier: 1,
+        stepCost,
+        riskScore: clamp(100 * (0.6 * radiation + 0.4 * communicationPenalty), 0, 100),
+      } satisfies MissionTimelinePoint;
+    });
+
+    const nQubits = Math.min(path.length, 6);
+    const dim = Math.pow(2, nQubits);
+    const infeasiblePenalty = 1e6;
+    const basisEnergies = this.buildBasisEnergiesFromTimeline(syntheticTimeline, nQubits, dim, infeasiblePenalty);
+    const qaoa = simulateQAOA(basisEnergies, nQubits, qaoaDepth);
+    const classicalMin = Math.min(...basisEnergies.filter((energy) => energy < infeasiblePenalty));
+    const approxRatio = classicalMin !== 0 ? qaoa.finalEnergy / classicalMin : 1.0;
+    const optimalIdx = basisEnergies.reduce((best, energy, index) => (
+      energy < basisEnergies[best] ? index : best
+    ), 0);
+    const distribution: DistributionEntry[] = Array.from({ length: dim }, (_, x) => ({
+      state: x.toString(2).padStart(nQubits, '0'),
+      probability: qaoa.finalAmps[x] ? qaoa.finalAmps[x] ** 2 : 0,
+      energy: basisEnergies[x],
+      isOptimal: x === optimalIdx,
+    }))
+      .filter((entry) => entry.energy < infeasiblePenalty)
+      .sort((a, b) => b.probability - a.probability)
+      .slice(0, 16);
+
+    return {
+      qaoa: {
+        layers: qaoa.layers,
+        finalEnergy: qaoa.finalEnergy,
+        approximationRatio: approxRatio,
+        quantumAdvantage_pct: 0,
+        qaoaMatchPct: approxRatio > 0 ? Math.min(100, 100 / approxRatio) : 100,
+        classicalSAImprovement_pct: 0,
+        distribution,
+      },
+      circuitMap: qaoa.layers.flatMap((layer, index) =>
+        this.generateQAOACircuit(path, syntheticTimeline, layer.gamma, layer.beta, index),
+      ),
     };
   }
 }

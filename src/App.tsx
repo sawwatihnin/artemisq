@@ -1,667 +1,895 @@
-/**
- * ARTEMIS-Q Competition Edition
- * Quantum-Enhanced Orbital Mission Optimizer
- */
-
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as THREE from 'three';
-import {
-  Rocket, Map as MapIcon, Activity, Settings, ShieldAlert, Zap,
-  ChevronRight, Database, Cpu, Target, FlaskConical, Tractor,
-  Save, Download, CheckCircle2, Atom, Satellite, Globe, AlertTriangle,
-  TrendingDown, Gauge, Wind, Thermometer, Radio, BarChart3
-} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  AreaChart, Area, LineChart, Line, ScatterChart, Scatter, ReferenceLine,
-  Legend, BarChart, Bar, Cell
+  AlertTriangle,
+  Atom,
+  ChevronRight,
+  Gauge,
+  Globe,
+  Rocket,
+  ShieldAlert,
+  Thermometer,
+  Upload,
+  Wind,
+} from 'lucide-react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, PerspectiveCamera, Stars, Float, Text, Line as DreiLine } from '@react-three/drei';
+import { Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+
 import {
-  calculateArtemisTrajectory, getPlanetPosition, PLANETS,
-  KeplerianElements, keplerian2ECI, propagateOrbit, generateOrbitPoints,
-  computeHohmann, atmosphericDensity, estimateConjunctionRisk,
+  type KeplerianElements,
+  atmosphericDensity,
+  calculateArtemisTrajectory,
+  computeHohmann,
+  estimateConjunctionRisk,
+  generateOrbitPoints,
+  getPlanetPosition,
+  keplerian2ECI,
+  RE,
+  CISLUNAR_VIS_KM_PER_UNIT,
+  VIS_SCENE_KM_PER_UNIT,
 } from './lib/orbital';
-import type { OptimizationResult, QUBOWeights, DistributionEntry } from './lib/optimizer';
-import { SimulatedAnnealer, hohmannDeltaV, vanAllenDose, tsiolkovskyFuelMass, j2NodalPrecession } from './lib/optimizer';
+import { moonGeocentricPositionKm, normalize3, slerpUnitVectors } from './lib/lunarEphemeris';
+import { j2NodalPrecession, tsiolkovskyFuelMass, vanAllenDose } from './lib/optimizer';
+import { STLAnalyzer, type STLAnalysis } from './lib/stlAnalyzer';
+import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition, getDateAdjustedLocalGravity, searchBodies } from './lib/celestial';
+import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
 
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
 
-function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
+function formatMoney(value: number) {
+  if (!Number.isFinite(value)) return '--';
+  return `$${(value / 1_000_000).toFixed(1)}M`;
+}
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-// OptimizationResult is imported from ./lib/optimizer (single source of truth).
 type MissionType = 'lunar' | 'orbital' | 'rover';
 type FuelType = 'RP-1' | 'LH2' | 'Methane';
-type PropellantType = { name: FuelType; isp_vac: number; isp_sl: number; density: number; color: string };
+type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum';
+type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
 
+interface PropellantType {
+  name: FuelType;
+  isp_vac: number;
+  isp_sl: number;
+  density: number;
+  color: string;
+}
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+interface OptimizationResult {
+  path: string[];
+  totalCost: number;
+  fuel: number;
+  radiationExposure: number;
+  commLoss: number;
+  timePenalty?: number;
+  safetyPenalty?: number;
+  naivePath: string[];
+  naiveCost: number;
+  quboGraph: { nodes: number; binaryVars: number; temperature: number; annealingSteps: number; nonZeroTerms?: number };
+  circuitMap: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[];
+  totalDeltaV_ms: number;
+  fuelMass_kg: number;
+  propellantFraction: number;
+  annealingHistory: { step: number; temperature: number; energy: number }[];
+  qaoa: { layers: Array<{ gamma: number; beta: number; energyExpectation: number }>; finalEnergy: number; approximationRatio: number; quantumAdvantage_pct: number };
+  physics: { hohmannDeltaV: number; j2Correction: number; vanAllenDose: number; transferTime_days: number };
+  stochastic?: { expectedCost: number; variance: number; successProbability: number; runs: number };
+  explanation?: {
+    summary: string[];
+    contributionBreakdown: Array<{ term: string; value: number; percentage: number }>;
+    avoidedNodes: Array<{ id: string; name: string; reasons: string[] }>;
+  };
+  crewRisk?: {
+    cumulativeDose: number;
+    peakExposure: number;
+    unsafeDuration: number;
+    riskScore: number;
+    classification: 'SAFE' | 'MONITOR' | 'HIGH_RISK' | 'DO_NOT_EMBARK';
+    embarkationDecision: 'SAFE_TO_EMBARK' | 'PROCEED_WITH_CAUTION' | 'DO_NOT_EMBARK';
+    dominantSegment: { nodeName: string; share: number };
+  };
+  medicalValidation?: {
+    passedConsistencyChecks: boolean;
+    monotonicityChecks: Array<{ name: string; passed: boolean; note: string }>;
+    thresholdTrace: string;
+    dominantRiskDriver: string;
+    counterfactuals: Array<{ name: string; riskScore: number; classification: string; deltaRisk: number; summary: string }>;
+    confidenceNote: string;
+    limitations: string[];
+  };
+  missionDecision?: {
+    decision: 'CONTINUE' | 'REPLAN' | 'ABORT';
+    urgencyLevel: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL';
+    rationale: string;
+    candidateActions: string[];
+    expectedRiskReduction: number;
+  };
+  replanOptions?: Array<{
+    name: string;
+    type: string;
+    newTotalMissionRisk: number;
+    deltaVChange: number;
+    missionDurationChange: number;
+    communicationImpact: number;
+    operationalComplexity: number;
+    probabilityOfSuccess: number;
+    riskReduction: number;
+    score: number;
+    recommendation: string;
+  }>;
+  decisionCosts?: Array<{
+    optionName: string;
+    directCost: number;
+    indirectCost: number;
+    riskAdjustedCost: number;
+    recommendationValueScore: number;
+  }>;
+  decisionMonteCarlo?: Array<{
+    optionName: string;
+    expectedMissionCost: number;
+    expectedCrewRisk: number;
+    variance: number;
+    probabilityUnsafe: number;
+    probabilityOfSuccessfulCompletion: number;
+  }>;
+  decisionNarrative?: {
+    medicalRisk: string;
+    operationalDecision: string;
+    financialRecommendation: string;
+  };
+  verification?: {
+    verificationPassed: boolean;
+    failedChecks: string[];
+    sensitivitySummary: string[];
+    counterfactualSummary: string[];
+    notes: string[];
+  };
+  systemLimitations?: string[];
+  benchmarks?: {
+    optimized: { label: string; totalCost: number; constraintViolations: number; successProbability: number };
+    shortestPath: { label: string; totalCost: number; constraintViolations: number; successProbability: number };
+    greedy: { label: string; totalCost: number; constraintViolations: number; successProbability: number };
+  };
+  constraintViolations?: string[];
+  timeDependent?: { communicationViolations: number; radiationViolations: number; radiationThreshold: number };
+}
+
+interface LaunchSimulationStep {
+  time: number;
+  altitude: number;
+  velocity: number;
+  q: number;
+  stress: number;
+  pitch: number;
+  mach: number;
+}
+
+interface LaunchSimulationResult {
+  steps: LaunchSimulationStep[];
+  stabilityScore: number;
+  failurePoints: string[];
+  maxQTime: number;
+  maxQValue: number;
+  mecoTime: number;
+  residualMass_kg: number;
+  apogeeKm: number;
+  downrangeKm: number;
+  peakAccelerationGs: number;
+  burnoutVelocity: number;
+  finalAltitudeKm: number;
+  source: 'formula-driven';
+  flightPath: {
+    pitchKickSpeed: number;
+    pitchRateDegPerSec: number;
+    maxPitchDeg: number;
+  };
+}
+
+interface LaunchOptimizationResponse {
+  best: LaunchSimulationResult;
+  candidates: Array<{
+    score: number;
+    stabilityScore: number;
+    apogeeKm: number;
+    maxQValue: number;
+    peakAccelerationGs: number;
+    flightPath: LaunchSimulationResult['flightPath'];
+  }>;
+  source: 'formula-driven';
+}
 
 const PROPELLANTS: Record<FuelType, PropellantType> = {
-  'RP-1':    { name: 'RP-1',    isp_vac: 353, isp_sl: 311, density: 820,  color: '#f59e0b' },
-  'LH2':     { name: 'LH2',     isp_vac: 453, isp_sl: 381, density: 71,   color: '#60a5fa' },
-  'Methane': { name: 'Methane', isp_vac: 380, isp_sl: 330, density: 450,  color: '#34d399' },
+  'RP-1': { name: 'RP-1', isp_vac: 353, isp_sl: 311, density: 820, color: '#f59e0b' },
+  LH2: { name: 'LH2', isp_vac: 453, isp_sl: 381, density: 71, color: '#60a5fa' },
+  Methane: { name: 'Methane', isp_vac: 380, isp_sl: 330, density: 450, color: '#34d399' },
 };
 
-const MISSION_PRESETS: Record<MissionType, { title: string; start: string; end: string; nodes: any[]; edges: any[] }> = {
+const MISSION_PRESETS: Record<
+  MissionType,
+  { title: string; start: string; end: string; nodes: Array<Record<string, any>>; edges: Array<Record<string, any>>; provenance: Provenance }
+> = {
   lunar: {
     title: 'Lunar Gateway Transfer',
-    start: 'earth', end: 'moon',
+    start: 'earth',
+    end: 'moon',
+    provenance: 'preset',
     nodes: [
-      { id: 'earth',   name: 'LEO Parking',         x: 10, y: 50, radiation: 0.08, commScore: 1.00, altitude_km: 400,   inclination: 28.5 },
-      { id: 'v_allen', name: 'Van Allen Passage',    x: 28, y: 38, radiation: 0.92, commScore: 0.55, altitude_km: 15000, inclination: 28.5 },
-      { id: 'l1',      name: 'EML-1 Gateway',        x: 50, y: 50, radiation: 0.15, commScore: 0.92, altitude_km: 326000,inclination: 5.1  },
-      { id: 'loi',     name: 'Lunar Orbit Insertion',x: 73, y: 65, radiation: 0.35, commScore: 0.65, altitude_km: 380000,inclination: 90.0 },
-      { id: 'moon',    name: 'Lunar Gateway (NRHO)', x: 92, y: 50, radiation: 0.20, commScore: 0.50, altitude_km: 384400,inclination: 90.0 },
+      { id: 'earth', name: 'LEO Parking', x: 10, y: 50, radiation: 0.08, commScore: 1.0, altitude_km: 400, inclination: 28.5 },
+      { id: 'v_allen', name: 'Van Allen Passage', x: 28, y: 38, radiation: 0.92, commScore: 0.55, altitude_km: 15000, inclination: 28.5 },
+      { id: 'l1', name: 'EML-1 Gateway', x: 50, y: 50, radiation: 0.15, commScore: 0.92, altitude_km: 326000, inclination: 5.1 },
+      { id: 'loi', name: 'Lunar Orbit Insertion', x: 73, y: 65, radiation: 0.35, commScore: 0.65, altitude_km: 380000, inclination: 90.0 },
+      { id: 'moon', name: 'Lunar Gateway (NRHO)', x: 92, y: 50, radiation: 0.2, commScore: 0.5, altitude_km: 384400, inclination: 90.0 },
     ],
     edges: [
-      { from: 'earth',   to: 'v_allen', distance: 14600, fuelCost: 22,  deltaV_ms: 3130 },
-      { from: 'earth',   to: 'l1',      distance: 325600,fuelCost: 48,  deltaV_ms: 3900 },
-      { from: 'v_allen', to: 'l1',      distance: 311000,fuelCost: 18,  deltaV_ms: 900  },
-      { from: 'v_allen', to: 'loi',     distance: 365400,fuelCost: 58,  deltaV_ms: 4200 },
-      { from: 'l1',      to: 'loi',     distance: 58400, fuelCost: 24,  deltaV_ms: 1500 },
-      { from: 'l1',      to: 'moon',    distance: 58400, fuelCost: 52,  deltaV_ms: 3200 },
-      { from: 'loi',     to: 'moon',    distance: 4000,  fuelCost: 10,  deltaV_ms: 900  },
-    ]
+      { from: 'earth', to: 'v_allen', distance: 14600, fuelCost: 22, deltaV_ms: 3130 },
+      { from: 'earth', to: 'l1', distance: 325600, fuelCost: 48, deltaV_ms: 3900 },
+      { from: 'v_allen', to: 'l1', distance: 311000, fuelCost: 18, deltaV_ms: 900 },
+      { from: 'v_allen', to: 'loi', distance: 365400, fuelCost: 58, deltaV_ms: 4200 },
+      { from: 'l1', to: 'loi', distance: 58400, fuelCost: 24, deltaV_ms: 1500 },
+      { from: 'l1', to: 'moon', distance: 58400, fuelCost: 52, deltaV_ms: 3200 },
+      { from: 'loi', to: 'moon', distance: 4000, fuelCost: 10, deltaV_ms: 900 },
+    ],
   },
   orbital: {
     title: 'GEO Satellite Deployment',
-    start: 'leo', end: 'geo',
+    start: 'leo',
+    end: 'geo',
+    provenance: 'preset',
     nodes: [
-      { id: 'leo',      name: 'LEO (400 km)',         x: 10, y: 50, radiation: 0.08, commScore: 1.00, altitude_km: 400,   inclination: 28.5 },
-      { id: 'meo1',     name: 'MEO-Alpha (GPS Shell)',x: 35, y: 28, radiation: 0.55, commScore: 0.80, altitude_km: 20200, inclination: 55.0 },
-      { id: 'meo2',     name: 'MEO-Beta (Glonass)',   x: 35, y: 72, radiation: 0.50, commScore: 0.78, altitude_km: 19100, inclination: 64.8 },
-      { id: 'transfer', name: 'GTO Apogee (35786 km)',x: 65, y: 50, radiation: 0.28, commScore: 0.88, altitude_km: 35786, inclination: 0.0  },
-      { id: 'geo',      name: 'GEO Station',          x: 90, y: 50, radiation: 0.18, commScore: 0.97, altitude_km: 35786, inclination: 0.0  },
+      { id: 'leo', name: 'LEO (400 km)', x: 10, y: 50, radiation: 0.08, commScore: 1.0, altitude_km: 400, inclination: 28.5 },
+      { id: 'meo1', name: 'MEO-Alpha', x: 35, y: 28, radiation: 0.55, commScore: 0.8, altitude_km: 20200, inclination: 55.0 },
+      { id: 'meo2', name: 'MEO-Beta', x: 35, y: 72, radiation: 0.5, commScore: 0.78, altitude_km: 19100, inclination: 64.8 },
+      { id: 'transfer', name: 'GTO Apogee', x: 65, y: 50, radiation: 0.28, commScore: 0.88, altitude_km: 35786, inclination: 0.0 },
+      { id: 'geo', name: 'GEO Station', x: 90, y: 50, radiation: 0.18, commScore: 0.97, altitude_km: 35786, inclination: 0.0 },
     ],
     edges: [
-      { from: 'leo',      to: 'meo1',     distance: 19800, fuelCost: 14, deltaV_ms: 2400 },
-      { from: 'leo',      to: 'meo2',     distance: 18700, fuelCost: 13, deltaV_ms: 2300 },
-      { from: 'meo1',     to: 'transfer', distance: 15586, fuelCost: 22, deltaV_ms: 1800 },
-      { from: 'meo2',     to: 'transfer', distance: 16686, fuelCost: 21, deltaV_ms: 1700 },
-      { from: 'leo',      to: 'transfer', distance: 35386, fuelCost: 42, deltaV_ms: 3900 },
-      { from: 'transfer', to: 'geo',      distance: 0,     fuelCost: 18, deltaV_ms: 1500 },
-    ]
+      { from: 'leo', to: 'meo1', distance: 19800, fuelCost: 14, deltaV_ms: 2400 },
+      { from: 'leo', to: 'meo2', distance: 18700, fuelCost: 13, deltaV_ms: 2300 },
+      { from: 'meo1', to: 'transfer', distance: 15586, fuelCost: 22, deltaV_ms: 1800 },
+      { from: 'meo2', to: 'transfer', distance: 16686, fuelCost: 21, deltaV_ms: 1700 },
+      { from: 'leo', to: 'transfer', distance: 35386, fuelCost: 42, deltaV_ms: 3900 },
+      { from: 'transfer', to: 'geo', distance: 0, fuelCost: 18, deltaV_ms: 1500 },
+    ],
   },
   rover: {
     title: 'Surface Rover Traversal',
-    start: 'base', end: 'crater',
+    start: 'base',
+    end: 'crater',
+    provenance: 'preset',
     nodes: [
-      { id: 'base',   name: 'Artemis Base Camp', x: 10, y: 50, radiation: 0.12, commScore: 0.95, altitude_km: 0, inclination: 0 },
-      { id: 'ridge',  name: 'Shackleton Ridge',  x: 30, y: 32, radiation: 0.28, commScore: 1.00, altitude_km: 0, inclination: 0 },
-      { id: 'slope',  name: 'North Slope (Shadow)',x:55, y: 62, radiation: 0.65, commScore: 0.22, altitude_km: 0, inclination: 0 },
-      { id: 'plains', name: 'Borealis Plains',   x: 70, y: 38, radiation: 0.18, commScore: 0.82, altitude_km: 0, inclination: 0 },
-      { id: 'crater', name: 'Ice Deposit Site',  x: 90, y: 55, radiation: 0.30, commScore: 0.70, altitude_km: 0, inclination: 0 },
+      { id: 'base', name: 'Artemis Base Camp', x: 10, y: 50, radiation: 0.12, commScore: 0.95, altitude_km: 0, inclination: 0 },
+      { id: 'ridge', name: 'Shackleton Ridge', x: 30, y: 32, radiation: 0.28, commScore: 1.0, altitude_km: 0, inclination: 0 },
+      { id: 'slope', name: 'North Slope', x: 55, y: 62, radiation: 0.65, commScore: 0.22, altitude_km: 0, inclination: 0 },
+      { id: 'plains', name: 'Borealis Plains', x: 70, y: 38, radiation: 0.18, commScore: 0.82, altitude_km: 0, inclination: 0 },
+      { id: 'crater', name: 'Ice Deposit Site', x: 90, y: 55, radiation: 0.3, commScore: 0.7, altitude_km: 0, inclination: 0 },
     ],
     edges: [
-      { from: 'base',   to: 'ridge',  distance: 28,  fuelCost: 14, deltaV_ms: 0 },
-      { from: 'base',   to: 'slope',  distance: 48,  fuelCost: 38, deltaV_ms: 0 },
-      { from: 'ridge',  to: 'plains', distance: 42,  fuelCost: 11, deltaV_ms: 0 },
-      { from: 'slope',  to: 'crater', distance: 38,  fuelCost: 22, deltaV_ms: 0 },
-      { from: 'plains', to: 'crater', distance: 22,  fuelCost: 8,  deltaV_ms: 0 },
-      { from: 'ridge',  to: 'crater', distance: 60,  fuelCost: 18, deltaV_ms: 0 },
-    ]
-  }
+      { from: 'base', to: 'ridge', distance: 28, fuelCost: 14, deltaV_ms: 0 },
+      { from: 'base', to: 'slope', distance: 48, fuelCost: 38, deltaV_ms: 0 },
+      { from: 'ridge', to: 'plains', distance: 42, fuelCost: 11, deltaV_ms: 0 },
+      { from: 'slope', to: 'crater', distance: 38, fuelCost: 22, deltaV_ms: 0 },
+      { from: 'plains', to: 'crater', distance: 22, fuelCost: 8, deltaV_ms: 0 },
+      { from: 'ridge', to: 'crater', distance: 60, fuelCost: 18, deltaV_ms: 0 },
+    ],
+  },
 };
 
 const MISSION_SCENARIOS = [
-  { id: 'artemis-ii',    name: 'Artemis II Lunar Flyby',    target: 'moon',    mode: 'lunar',   fuel: 'LH2',     date: '2025-11-20', mass: 26500,  thrust: 111200 },
-  { id: 'mars-rover',    name: 'Mars Rover Survey',         target: 'mars',    mode: 'rover',   fuel: 'Methane', date: '2026-07-15', mass: 15000,  thrust: 90000  },
-  { id: 'venus-orbit',   name: 'Venus Orbital Insertion',   target: 'venus',   mode: 'orbital', fuel: 'RP-1',    date: '2026-10-10', mass: 18000,  thrust: 95000  },
-  { id: 'jupiter-flyby', name: 'Europa Clipper Path',       target: 'jupiter', mode: 'orbital', fuel: 'LH2',     date: '2027-04-12', mass: 6065,   thrust: 445000 },
+  { id: 'artemis-ii', name: 'Artemis II Lunar Flyby', target: 'moon', mode: 'lunar', fuel: 'LH2', date: '2025-11-20', mass: 26500, thrust: 111200 },
+  { id: 'mars-rover', name: 'Mars Rover Survey', target: 'mars', mode: 'rover', fuel: 'Methane', date: '2026-07-15', mass: 15000, thrust: 90000 },
+  { id: 'venus-orbit', name: 'Venus Orbital Insertion', target: 'venus', mode: 'orbital', fuel: 'RP-1', date: '2026-10-10', mass: 18000, thrust: 95000 },
 ];
 
-// ─── Utility Components ───────────────────────────────────────────────────────
+const DEFAULT_MISSION_STAGES = [
+  { label: 'Launch', progress: 0.02, color: '#84cc16' },
+  { label: 'Stage Sep', progress: 0.12, color: '#eab308' },
+  { label: 'Parking Orbit', progress: 0.22, color: '#84cc16' },
+  { label: 'Transfer Burn', progress: 0.34, color: '#38bdf8' },
+  { label: 'Encounter', progress: 0.58, color: '#f59e0b' },
+  { label: 'Return Burn', progress: 0.73, color: '#38bdf8' },
+  { label: 'Entry', progress: 0.9, color: '#ef4444' },
+  { label: 'Landing', progress: 0.98, color: '#84cc16' },
+];
 
-// Carolina Blue = #4B9CD3  (replaces all turquoise/cyan accents)
+/** Wider progress spacing along the cislunar polyline so flight phases are not clustered near Earth. */
+const CISLUNAR_MISSION_STAGES = [
+  { label: 'Launch', progress: 0.015, color: '#84cc16' },
+  { label: 'Stage Sep', progress: 0.055, color: '#eab308' },
+  { label: 'Parking Orbit', progress: 0.1, color: '#84cc16' },
+  { label: 'Transfer Burn', progress: 0.18, color: '#38bdf8' },
+  { label: 'Translunar', progress: 0.36, color: '#a78bfa' },
+  { label: 'Encounter', progress: 0.52, color: '#f59e0b' },
+  { label: 'Return Burn', progress: 0.7, color: '#38bdf8' },
+  { label: 'Entry', progress: 0.86, color: '#ef4444' },
+  { label: 'Landing', progress: 0.97, color: '#84cc16' },
+];
+
+function getSurfaceDensity(bodyId: string): number | undefined {
+  switch (bodyId) {
+    case 'earth':
+      return 1.225;
+    case 'mars':
+      return 0.02;
+    case 'venus':
+      return 65;
+    case 'titan':
+      return 5.3;
+    default:
+      return undefined;
+  }
+}
+
 const CB = '#4B9CD3';
-const CB_DIM = '#3a7aa8';
 
-const DashboardCard = ({ children, title, icon: Icon, className, accent = false, headerRight }: any) => (
-  <div className={cn(
-    "bg-bg-card border rounded-lg overflow-hidden flex flex-col",
-    accent ? "border-[#4B9CD3]/40 shadow-[0_0_16px_rgba(75,156,211,0.07)]" : "border-slate-800 shadow-[0_0_20px_rgba(0,0,0,0.5)]",
-    className
-  )}>
-    <div className={cn(
-      "px-4 py-2.5 border-b flex items-center justify-between",
-      accent ? "border-[#4B9CD3]/20 bg-[#4B9CD3]/5" : "border-slate-800 bg-black/30"
-    )}>
-      <div className="flex items-center gap-2">
-        <Icon className="w-3.5 h-3.5" style={{ color: accent ? CB : CB_DIM }} />
-        <span className="text-[11px] font-semibold tracking-[1.2px] text-slate-300 uppercase">{title}</span>
-      </div>
-      {headerRight ?? <div className="w-1.5 h-1.5 rounded-full" style={{ background: accent ? CB : CB_DIM, opacity: accent ? 1 : 0.4 }} />}
-    </div>
-    <div className="p-4 flex-1">{children}</div>
-  </div>
-);
+function provenanceTone(kind: Provenance) {
+  switch (kind) {
+    case 'live-api':
+      return 'border-green-500/30 bg-green-500/10 text-green-300';
+    case 'formula':
+      return 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+    case 'preset':
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+    case 'heuristic':
+      return 'border-red-500/30 bg-red-500/10 text-red-300';
+    default:
+      return 'border-slate-700 bg-slate-900/70 text-slate-300';
+  }
+}
 
-
-const MetricBadge = ({ label, value, unit, color = CB, warning = false }: any) => (
-  <div className={cn(
-    "p-2 rounded border text-center",
-    warning ? "border-red-500/40 bg-red-500/5" : "border-slate-700 bg-slate-900/60"
-  )}>
-    <p className="text-[9px] text-slate-400 uppercase tracking-wider mb-0.5">{label}</p>
-    <p className="font-bold" style={{ color, fontSize: '14px', lineHeight: 1 }}>{value}</p>
-    {unit && <p className="text-[9px] text-slate-500 mt-0.5">{unit}</p>}
-  </div>
-);
-
-// ─── Quantum Circuit Visualizer ────────────────────────────────────────────────
-
-const QuantumCircuit = ({ gates }: { gates: any[] }) => {
-  const GATE_COLORS: Record<string, string> = {
-    H: '#a78bfa', RX: '#4B9CD3', RZ: '#4ade80', CNOT: '#f87171', X: '#fbbf24',
-  };
-  const layers = gates.reduce((acc: any, g) => {
-    const l = g.layer ?? 0;
-    if (!acc[l]) acc[l] = [];
-    acc[l].push(g);
-    return acc;
-  }, {});
-  const nQubits = Math.max(...gates.map(g => Math.max(g.qubit, g.target ?? 0))) + 1;
-
+function DashboardCard({
+  title,
+  children,
+  icon: Icon,
+  provenance,
+  className,
+}: {
+  title: string;
+  children: ReactNode;
+  icon: any;
+  provenance?: Provenance;
+  className?: string;
+}) {
   return (
-    <div className="overflow-x-auto">
-      <div className="min-w-[300px] p-2">
-        {Array.from({ length: nQubits }, (_, q) => (
-          <div key={q} className="flex items-center gap-0.5 mb-1.5">
-            <span className="text-[9px] text-slate-400 w-6 shrink-0">q{q}</span>
-            <div className="flex-1 h-px bg-slate-700 relative flex items-center gap-0.5">
-              {Object.entries(layers).map(([l, gs]: any) => {
-                const gate = gs.find((g: any) => g.qubit === q || g.target === q);
-                if (!gate) return <div key={l} className="w-7 shrink-0" />;
-                const color = GATE_COLORS[gate.gate] || '#94a3b8';
-                return (
-                  <div key={l}
-                    className="w-7 h-6 rounded border text-center flex flex-col items-center justify-center shrink-0 relative"
-                    style={{ borderColor: color, backgroundColor: color + '28' }}>
-                    <span className="text-[8px] font-bold" style={{ color }}>{gate.gate}</span>
-                    {gate.angle && <span className="text-[8px]" style={{ color: color + 'dd' }}>{gate.angle}</span>}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-        <div className="flex gap-2 mt-2 flex-wrap">
-          {Object.entries(GATE_COLORS).map(([g, c]) => (
-            <div key={g} className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-sm" style={{ background: c }} />
-              <span className="text-[9px] text-slate-400">{g}</span>
-            </div>
-          ))}
+    <section className={cn('rounded-xl border border-slate-800 bg-[#0d1224]/95 shadow-[0_20px_60px_rgba(0,0,0,0.28)]', className)}>
+      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Icon className="h-4 w-4" style={{ color: CB }} />
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">{title}</h2>
         </div>
+        {provenance ? <ProvenancePill kind={provenance} /> : null}
       </div>
-    </div>
+      <div className="p-4">{children}</div>
+    </section>
   );
-};
+}
 
-// ─── Annealing Chart ──────────────────────────────────────────────────────────
-
-const AnnealingChart = ({ history }: { history: { step: number; temperature: number; energy: number }[] }) => (
-  <ResponsiveContainer width="100%" height={100}>
-    <LineChart data={history} margin={{ top: 4, right: 4, bottom: 4, left: -24 }}>
-      <CartesianGrid strokeDasharray="2 2" stroke="#ffffff0a" />
-      <XAxis dataKey="step" tick={{ fontSize: 8, fill: '#94a3b8' }} />
-      <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} />
-      <Tooltip contentStyle={{ background: '#0d1224', border: '1px solid #334155', fontSize: 10, color: '#e2e8f0' }} />
-      <Line type="monotone" dataKey="energy" stroke="#4B9CD3" dot={false} strokeWidth={1.5} name="Energy" />
-      <Line type="monotone" dataKey="temperature" stroke="#f59e0b" dot={false} strokeWidth={1} strokeDasharray="3 2" name="Temp" />
-      <Legend wrapperStyle={{ fontSize: 9, color: '#94a3b8' }} />
-    </LineChart>
-  </ResponsiveContainer>
-);
-
-// ─── Quantum Distribution Chart ───────────────────────────────────────────────
-
-const QuantumDistribution = ({ distribution, nQubits }: { distribution: DistributionEntry[]; nQubits: number }) => {
-  if (!distribution || distribution.length === 0) return null;
-  const maxProb = Math.max(...distribution.map(d => d.probability));
-  return (
-    <div className="space-y-1">
-      <ResponsiveContainer width="100%" height={160}>
-        <BarChart data={distribution} margin={{ top: 4, right: 4, bottom: 24, left: 0 }} layout="vertical">
-          <CartesianGrid strokeDasharray="2 2" stroke="#ffffff0a" horizontal={false} />
-          <XAxis type="number" domain={[0, maxProb * 1.1]} tick={{ fontSize: 8, fill: '#94a3b8' }}
-            tickFormatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
-          <YAxis type="category" dataKey="state" tick={{ fontSize: 7, fill: '#94a3b8' }} width={48} />
-          <Tooltip
-            contentStyle={{ background: '#0d1224', border: '1px solid #334155', fontSize: 9, color: '#e2e8f0' }}
-            formatter={(val: any, _: any, entry: any) => [
-              `${(val * 100).toFixed(2)}% (E=${entry.payload.energy?.toFixed(2)})`,
-              entry.payload.isOptimal ? '★ Optimal state' : 'State'
-            ]}
-          />
-          <Bar dataKey="probability" radius={[0, 2, 2, 0]}>
-            {distribution.map((entry, i) => (
-              <Cell key={i} fill={entry.isOptimal ? '#fbbf24' : '#4B9CD3'} opacity={entry.isOptimal ? 1 : 0.75} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-      <p className="text-[8px] text-slate-500 text-center leading-tight px-2">
-        Higher <span className="text-[#4B9CD3]">p</span> concentrates amplitude on low-energy feasible
-        paths — this is quantum interference. <span className="text-[#fbbf24]">Gold</span> = brute-force optimal.
-      </p>
-    </div>
-  );
-};
-
-// ─── 2D Graph Overlay ─────────────────────────────────────────────────────────
-
-const Graph2DOverlay = ({ preset, optResult }: { preset: any; optResult: OptimizationResult | null }) => {
-  const W = 340, H = 240, PAD = 24;
-  const innerW = W - PAD * 2, innerH = H - PAD * 2;
-  const toSVG = (x: number, y: number) => ({
-    cx: PAD + (x / 100) * innerW,
-    cy: PAD + (y / 100) * innerH,
-  });
-
-  const optPath = optResult?.path ?? [];
-
-  // Radiation heatmap: 0 (green) → 1 (red)
-  const radColor = (rad: number) => {
-    const r = Math.round(255 * rad);
-    const g = Math.round(255 * (1 - rad));
-    return `rgb(${r},${g},60)`;
-  };
+function MetricBadge({
+  label,
+  value,
+  unit,
+  tone = 'default',
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  tone?: 'default' | 'good' | 'warn' | 'bad';
+}) {
+  const color =
+    tone === 'good' ? 'text-green-300 border-green-500/20 bg-green-500/5' :
+    tone === 'warn' ? 'text-amber-300 border-amber-500/20 bg-amber-500/5' :
+    tone === 'bad' ? 'text-red-300 border-red-500/20 bg-red-500/5' :
+    'text-slate-100 border-slate-700 bg-slate-900/70';
 
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="rounded bg-slate-900/80">
-      {/* Edges */}
-      {preset.edges.map((edge: any, i: number) => {
-        const from = preset.nodes.find((n: any) => n.id === edge.from);
-        const to   = preset.nodes.find((n: any) => n.id === edge.to);
-        if (!from || !to) return null;
-        const s = toSVG(from.x, from.y), t = toSVG(to.x, to.y);
-        const isOptEdge = optPath.some((_, idx) =>
-          idx < optPath.length - 1 && optPath[idx] === edge.from && optPath[idx + 1] === edge.to
-        );
-        const sw = Math.max(0.5, Math.min(3, (edge.fuelCost / 200)));
-        return (
-          <g key={i}>
-            <line x1={s.cx} y1={s.cy} x2={t.cx} y2={t.cy}
-              stroke={isOptEdge ? '#4B9CD3' : '#334155'}
-              strokeWidth={isOptEdge ? sw + 1.5 : sw}
-              className={isOptEdge ? 'path-animated' : ''}
-              markerEnd="url(#arrow)"
-            />
-            {edge.deltaV_ms && (
-              <text x={(s.cx + t.cx) / 2} y={(s.cy + t.cy) / 2 - 3}
-                fontSize="6" fill="#64748b" textAnchor="middle">
-                {(edge.deltaV_ms / 1000).toFixed(2)} km/s
-              </text>
-            )}
-          </g>
-        );
-      })}
-
-      {/* Nodes */}
-      {preset.nodes.map((node: any) => {
-        const { cx, cy } = toSVG(node.x, node.y);
-        const r = 5 + node.radiation * 6;
-        const inPath = optPath.includes(node.id);
-        return (
-          <g key={node.id}>
-            <circle cx={cx} cy={cy} r={r} fill={radColor(node.radiation)}
-              stroke={inPath ? '#fbbf24' : '#1e293b'} strokeWidth={inPath ? 2 : 1} opacity={0.9} />
-            <text x={cx} y={cy - r - 2} fontSize="7" fill="#e2e8f0" textAnchor="middle"
-              style={{ fontFamily: 'monospace' }}>
-              {node.name ?? node.id}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* Arrow marker */}
-      <defs>
-        <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-          <path d="M0,0 L0,6 L6,3 z" fill="#4B9CD3" opacity="0.6" />
-        </marker>
-      </defs>
-
-      {/* Legend */}
-      <g transform={`translate(${PAD},${H - 14})`}>
-        <rect x={0} y={0} width={8} height={8} fill="#4B9CD3" rx={1} />
-        <text x={11} y={7} fontSize="6" fill="#94a3b8">Optimal path</text>
-        <rect x={80} y={0} width={8} height={8} fill="#fbbf24" rx={1} />
-        <text x={91} y={7} fontSize="6" fill="#94a3b8">Path nodes</text>
-        <text x={160} y={7} fontSize="6" fill="#94a3b8">Node size ∝ radiation</text>
-      </g>
-    </svg>
+    <div className={cn('rounded-lg border p-3', color)}>
+      <p className="text-[9px] uppercase tracking-[0.16em] text-slate-400">{label}</p>
+      <p className="mt-1 text-lg font-bold">{value}</p>
+      {unit ? <p className="text-[10px] text-slate-500">{unit}</p> : null}
+    </div>
   );
-};
+}
 
-// ─── Orbital Visualizer Components ────────────────────────────────────────────
+function ProvenancePill({ kind }: { kind: Provenance }) {
+  const label =
+    kind === 'live-api' ? 'Live API' :
+    kind === 'formula' ? 'Formula' :
+    kind === 'preset' ? 'Preset' :
+    'Heuristic';
+  return <span className={cn('rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em]', provenanceTone(kind))}>{label}</span>;
+}
 
-function Earth3D() {
+function OrbitLine({ elements, kmPerUnit = VIS_SCENE_KM_PER_UNIT, lineWidth = 1.5 }: { elements: KeplerianElements; kmPerUnit?: number; lineWidth?: number }) {
+  const points = useMemo(() => generateOrbitPoints(elements, 200, 1 / kmPerUnit), [elements, kmPerUnit]);
+  return <DreiLine points={points} color={CB} lineWidth={lineWidth} transparent opacity={0.7} />;
+}
+
+function createPlanetTexture(bodyId: string, baseColor: string) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 512;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (bodyId === 'earth') {
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    gradient.addColorStop(0, '#9ed8ff');
+    gradient.addColorStop(0.45, '#2d7dd2');
+    gradient.addColorStop(1, '#113a71');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#3aa66b';
+    const patches = [
+      [160, 160, 180, 70],
+      [260, 220, 120, 90],
+      [420, 170, 210, 95],
+      [700, 180, 190, 80],
+      [820, 290, 120, 70],
+      [560, 300, 170, 60],
+    ];
+    for (const [x, y, w, h] of patches) {
+      ctx.beginPath();
+      ctx.ellipse(x, y, w, h, Math.PI / 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.32)';
+    for (let i = 0; i < 18; i++) {
+      ctx.beginPath();
+      ctx.ellipse(60 + i * 52, 80 + (i % 5) * 55, 38 + (i % 3) * 12, 12 + (i % 2) * 6, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (bodyId === 'moon') {
+    const g = ctx.createRadialGradient(420, 200, 40, 520, 280, 420);
+    g.addColorStop(0, '#e8eaef');
+    g.addColorStop(0.35, '#b8bcc6');
+    g.addColorStop(0.7, '#7a7f8a');
+    g.addColorStop(1, '#4a4d56');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(25,28,32,0.35)';
+    for (let i = 0; i < 55; i++) {
+      const cx = Math.random() * canvas.width;
+      const cy = Math.random() * canvas.height;
+      const rw = 15 + Math.random() * 90;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rw, rw * (0.35 + Math.random() * 0.35), Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    for (let i = 0; i < 12; i++) {
+      ctx.beginPath();
+      ctx.moveTo(0, (i / 12) * canvas.height);
+      ctx.bezierCurveTo(canvas.width * 0.3, (i / 12) * canvas.height + 40, canvas.width * 0.7, (i / 12) * canvas.height - 40, canvas.width, (i / 12) * canvas.height);
+      ctx.stroke();
+    }
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    for (let i = 0; i < 12; i++) {
+      ctx.beginPath();
+      ctx.ellipse(80 + i * 75, 70 + (i % 4) * 90, 45 + (i % 3) * 18, 18 + (i % 2) * 8, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: string; radius: number }) {
+  const texture = useMemo(() => createPlanetTexture(bodyId, color), [bodyId, color]);
   return (
     <group>
       <mesh>
-        <sphereGeometry args={[20, 64, 64]} />
-        <meshStandardMaterial color="#0a1a2f" emissive="#001020" metalness={0.8} roughness={0.3} />
+        <sphereGeometry args={[radius, 64, 64]} />
+        <meshStandardMaterial map={texture ?? undefined} color={color} emissive="#001020" metalness={0.2} roughness={0.8} />
       </mesh>
       <mesh scale={1.02}>
-        <sphereGeometry args={[20, 64, 64]} />
-        <meshStandardMaterial color="#0066ff" transparent opacity={0.04} side={THREE.BackSide} />
-      </mesh>
-      {/* Terminator (day/night) */}
-      <mesh rotation={[0, Math.PI / 4, Math.PI / 6]} scale={1.01}>
-        <sphereGeometry args={[20, 32, 32]} />
-        <meshStandardMaterial color="#ffffff" transparent opacity={0.02} wireframe />
+        <sphereGeometry args={[radius, 64, 64]} />
+        <meshStandardMaterial color={color} transparent opacity={0.08} side={THREE.BackSide} />
       </mesh>
     </group>
   );
 }
 
-function VanAllenBelt({ inner = true }: { inner?: boolean }) {
-  const r = inner ? 32 : 55;
-  return (
-    <mesh rotation={[Math.PI / 2, 0, 0]}>
-      <torusGeometry args={[r, inner ? 4 : 8, 8, 64]} />
-      <meshBasicMaterial color={inner ? "#ff4400" : "#ff9900"} transparent opacity={0.06} />
-    </mesh>
-  );
+/** Scene radius from physical km using cislunar / heliocentric visual scale. */
+function bodySceneRadiusFromKm(radiusKm: number): number {
+  return Math.max(0.35, radiusKm / VIS_SCENE_KM_PER_UNIT);
 }
 
-function OrbitLine({ elements, color = '#4B9CD3', opacity = 0.8, scale = 0.05 }: { elements: KeplerianElements; color?: string; opacity?: number; scale?: number }) {
-  const points = useMemo(() => generateOrbitPoints(elements, 200, scale), [elements, scale]);
-  return (
-    <DreiLine points={points} color={color} lineWidth={1.5} transparent opacity={opacity} />
-  );
+function bodyDisplayRadiusKm(radiusKm: number): number {
+  const earthScene = RE / VIS_SCENE_KM_PER_UNIT;
+  const scaled = Math.pow(radiusKm / 6378.137, 0.45) * earthScene;
+  return Math.max(earthScene * 0.12, scaled);
 }
 
-function MissionGlobe({ launchDate, targetPlanetId, optResult, preset, keplerEl }: any) {
-  const planetPos = useMemo(() => getPlanetPosition(launchDate, targetPlanetId), [launchDate, targetPlanetId]);
-  const trajectory = useMemo(() => calculateArtemisTrajectory(launchDate, targetPlanetId), [launchDate, targetPlanetId]);
-  const planet = PLANETS[targetPlanetId] || PLANETS.moon;
-
-  const projectedNodes = useMemo(() => {
-    const R = 24;
-    return preset.nodes.map((n: any) => {
-      const phi = (n.x / 100) * Math.PI * 2;
-      const theta = (n.y / 100) * Math.PI;
-      return {
-        ...n,
-        pos3d: [
-          -R * Math.sin(theta) * Math.cos(phi),
-          R * Math.cos(theta),
-          R * Math.sin(theta) * Math.sin(phi),
-        ] as [number, number, number],
-      };
-    });
-  }, [preset]);
-
-  const pathNodeIds = optResult?.path || [];
+function RadiationOverlay({
+  bodyRadius,
+  atmosphereScaleHeightKm,
+  isPrimary,
+}: {
+  bodyRadius: number;
+  atmosphereScaleHeightKm?: number;
+  isPrimary?: boolean;
+}) {
+  const zones = isPrimary
+    ? [
+        { radius: bodyRadius + Math.max(10, bodyRadius * 0.8), color: '#f59e0b', opacity: 0.08 },
+        { radius: bodyRadius + Math.max(22, bodyRadius * 1.5), color: '#ef4444', opacity: 0.06 },
+        { radius: bodyRadius + Math.max(38, bodyRadius * 2.3), color: '#f97316', opacity: 0.04 },
+      ]
+    : atmosphereScaleHeightKm
+      ? [
+          { radius: bodyRadius + Math.max(2.5, atmosphereScaleHeightKm / 3), color: '#fb7185', opacity: 0.035 },
+        ]
+      : [];
 
   return (
     <group>
-      <Earth3D />
-      <VanAllenBelt inner />
-      <VanAllenBelt inner={false} />
+      {zones.map((zone, index) => (
+        <mesh key={index}>
+          <sphereGeometry args={[zone.radius, 40, 40]} />
+          <meshBasicMaterial color={zone.color} transparent opacity={zone.opacity} wireframe />
+        </mesh>
+      ))}
+    </group>
+  );
+}
 
-      {/* Current orbit from Keplerian elements */}
-      {keplerEl && (
-        <OrbitLine elements={keplerEl} color="#00f2ff" opacity={0.5} scale={0.05} />
-      )}
+function MissionGlobe({
+  launchDate,
+  targetPlanetId,
+  launchBodyId,
+  preset,
+  pathNodeIds,
+  keplerEl,
+}: {
+  launchDate: string;
+  targetPlanetId: string;
+  launchBodyId: string;
+  preset: (typeof MISSION_PRESETS)[MissionType];
+  pathNodeIds: string[];
+  keplerEl: KeplerianElements;
+}) {
+  const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
+  const trajectory = useMemo(
+    () => calculateArtemisTrajectory(launchDate, targetPlanetId, launchBodyId, keplerEl),
+    [launchDate, targetPlanetId, launchBodyId, keplerEl],
+  );
+  const outboundTrajectory = useMemo(() => trajectory.slice(0, Math.max(2, Math.floor(trajectory.length * 0.55))), [trajectory]);
+  const inboundTrajectory = useMemo(() => trajectory.slice(Math.max(1, Math.floor(trajectory.length * 0.5))), [trajectory]);
+  const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
+  const heliocentricEarthRadiusScene = RE / VIS_SCENE_KM_PER_UNIT;
+  const earthRadiusScene = isCislunar ? RE / CISLUNAR_VIS_KM_PER_UNIT : heliocentricEarthRadiusScene;
+  const cislunarKmPerUnit = CISLUNAR_VIS_KM_PER_UNIT;
 
-      {/* Planet destination */}
-      <mesh position={planetPos}>
-        <sphereGeometry args={[planet.radius, 32, 32]} />
-        <meshStandardMaterial color={planet.color} roughness={0.8} />
-      </mesh>
+  const systemBodies = useMemo(() => {
+    if (isCislunar) return [];
+    const earthHelio = getApproximateHeliocentricPosition(CELESTIAL_BODY_MAP.earth, sceneDate);
+    return CELESTIAL_BODIES
+      .filter((body) => body.orbit && body.id !== launchBodyId)
+      .map((body) => {
+        const p = getApproximateHeliocentricPosition(body, sceneDate);
+        return {
+          ...body,
+          pos: [p[0] - earthHelio[0], p[1] - earthHelio[1], p[2] - earthHelio[2]] as [number, number, number],
+        };
+      });
+  }, [sceneDate, isCislunar, launchBodyId]);
 
-      {/* Trajectory arc — optimized path: solid Carolina Blue */}
+  const moonScene = useMemo(() => {
+    const km = moonGeocentricPositionKm(sceneDate);
+    const inv = 1 / cislunarKmPerUnit;
+    const trueR = CELESTIAL_BODY_MAP.moon.radiusKm * inv;
+    return {
+      pos: [km[0] * inv, km[1] * inv, km[2] * inv] as [number, number, number],
+      radius: Math.max(2.2, trueR * 2.4),
+    };
+  }, [sceneDate, cislunarKmPerUnit]);
+
+  const moonTexture = useMemo(() => createPlanetTexture('moon', '#c8ccd4'), []);
+
+  const projectedNodes = useMemo<Array<Record<string, any> & { pos3d: [number, number, number] }>>(() => {
+    const inv = 1 / (isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT);
+    const toScene = (km: [number, number, number]): [number, number, number] => [km[0] * inv, km[1] * inv, km[2] * inv];
+    if (isCislunar) {
+      const leo = keplerian2ECI(keplerEl);
+      const leoHat = normalize3(leo.r);
+      const moonKm = moonGeocentricPositionKm(sceneDate);
+      const moonH = normalize3(moonKm);
+      return preset.nodes.map((node) => {
+        const alt = typeof node.altitude_km === 'number' ? node.altitude_km : 400;
+        const rKm = alt > 100_000 ? alt : RE + Math.max(0, alt);
+        const frac = Math.min(1, rKm / 450_000);
+        const dir = slerpUnitVectors(leoHat, moonH, frac);
+        return {
+          ...node,
+          pos3d: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
+        };
+      });
+    }
+    const radius = Math.max(18, heliocentricEarthRadiusScene * 8);
+    return preset.nodes.map((node) => {
+      const phi = (node.x / 100) * Math.PI * 2;
+      const theta = (node.y / 100) * Math.PI;
+      return {
+        ...node,
+        pos3d: [
+          -radius * Math.sin(theta) * Math.cos(phi),
+          radius * Math.cos(theta),
+          radius * Math.sin(theta) * Math.sin(phi),
+        ] as [number, number, number],
+      };
+    });
+  }, [preset, isCislunar, keplerEl, sceneDate, heliocentricEarthRadiusScene, cislunarKmPerUnit]);
+
+  const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
+  const targetBody = CELESTIAL_BODY_MAP[targetPlanetId] ?? CELESTIAL_BODY_MAP.moon;
+  const stageList = isCislunar ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES;
+  const stageMarkers = stageList.map((stage) => {
+    const idx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
+    return { ...stage, point: trajectory[idx]?.pos ?? [0, 0, 0] };
+  });
+
+  return (
+    <group>
+      <PrimaryBody3D bodyId={launchBody.id} color={launchBody.color} radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} />
+      <RadiationOverlay bodyRadius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} atmosphereScaleHeightKm={launchBody.atmosphereScaleHeightKm} isPrimary />
+      <OrbitLine elements={keplerEl} kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT} lineWidth={isCislunar ? 2.4 : 1.5} />
+      {isCislunar ? (
+        <group position={moonScene.pos}>
+          <mesh>
+            <sphereGeometry args={[moonScene.radius, 48, 48]} />
+            <meshStandardMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.9} metalness={0.04} emissive="#0a0c10" emissiveIntensity={0.08} />
+          </mesh>
+          <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
+            Moon
+          </Text>
+        </group>
+      ) : null}
+      {systemBodies.map((body) => {
+        const isTarget = body.id === targetBody.id;
+        const radius = bodyDisplayRadiusKm(body.radiusKm);
+        return (
+          <group key={body.id} position={body.pos as [number, number, number]}>
+            <mesh>
+              <sphereGeometry args={[radius, 32, 32]} />
+              <meshStandardMaterial color={body.color} roughness={0.82} metalness={0.06} />
+            </mesh>
+            <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={body.atmosphereScaleHeightKm} isPrimary={isTarget} />
+            <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
+              {body.name}
+            </Text>
+          </group>
+        );
+      })}
+      <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
+      <DreiLine points={inboundTrajectory.map((point) => point.pos)} color="#f59e0b" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
       {trajectory.length > 0 && (
         <DreiLine
-          points={trajectory.map(t => t.pos)}
-          color="#4B9CD3"
-          lineWidth={2}
-          transparent
-          opacity={0.9}
-        />
-      )}
-
-      {/* Baseline (naive) path — dashed style via low opacity */}
-      {optResult?.naivePath && (
-        <DreiLine
-          points={trajectory.map(t => [t.pos[0] * 1.06, t.pos[1] * 1.06, t.pos[2] * 1.06] as [number,number,number])}
-          color="#6b7280"
+          points={trajectory.filter((_, index) => index % 8 === 0).map((point) => point.pos)}
+          color="#ef4444"
           lineWidth={1}
           transparent
-          opacity={0.25}
+          opacity={0.22}
+          dashed
+          dashScale={10}
+          dashSize={0.8}
+          gapSize={0.55}
         />
       )}
-
-      {/* Graph nodes */}
-      {projectedNodes.map((node: any) => {
-        const inPath = pathNodeIds.includes(node.id);
+      {projectedNodes.map((node) => {
+        const selected = pathNodeIds.includes(node.id);
+        const nr = isCislunar ? (selected ? 2.4 : 1.55) : (selected ? 2.2 : 1.4);
+        const lift = isCislunar ? 5.5 : 6;
+        const fs = isCislunar ? 2.6 : 3;
         return (
           <group key={node.id}>
-            {node.radiation > 0.5 && (
-              <mesh position={node.pos3d}>
-                <sphereGeometry args={[node.radiation * 18, 24, 24]} />
-                <meshBasicMaterial color="#ff3b3b" transparent opacity={node.radiation * 0.08} />
-              </mesh>
-            )}
             <mesh position={node.pos3d}>
-              <sphereGeometry args={[inPath ? 2.2 : 1.5, 16, 16]} />
-              <meshBasicMaterial color={inPath ? "#4B9CD3" : (node.radiation > 0.6 ? "#f87171" : "#64748b")} />
+              <sphereGeometry args={[nr, 18, 18]} />
+              <meshBasicMaterial color={selected ? CB : node.radiation > 0.5 ? '#ef4444' : '#64748b'} />
             </mesh>
-            <Text
-              position={[node.pos3d[0], node.pos3d[1] + 6, node.pos3d[2]]}
-              fontSize={3.5}
-              color={inPath ? "#4B9CD3" : "#94a3b8"}
-              anchorX="center"
-            >
+            <Text position={[node.pos3d[0], node.pos3d[1] + lift, node.pos3d[2]]} fontSize={fs} color={selected ? '#e0f2fe' : '#94a3b8'} anchorX="center">
               {node.name}
             </Text>
           </group>
         );
       })}
-
-      {/* Trajectory milestone labels */}
-      {trajectory.filter(t => t.label).map((t, i) => (
-        <group key={i} position={t.pos}>
-          <mesh>
-            <sphereGeometry args={[2.5, 16, 16]} />
-            <meshBasicMaterial color="#ffffff" />
-          </mesh>
-        </group>
-      ))}
-
-      <Stars radius={800} depth={500} count={12000} factor={10} saturation={0} fade speed={0.5} />
+      {stageMarkers.map((stage) => {
+        const sr = isCislunar ? 2.5 : 2.8;
+        const ty = isCislunar ? 5.2 : 5.5;
+        const tf = isCislunar ? 2.2 : 2.4;
+        return (
+          <group key={stage.label} position={stage.point as [number, number, number]}>
+            <mesh>
+              <sphereGeometry args={[sr, 16, 16]} />
+              <meshBasicMaterial color={stage.color} />
+            </mesh>
+            <Text position={[0, ty, 0]} fontSize={tf} color={stage.color} anchorX="center">
+              {stage.label}
+            </Text>
+          </group>
+        );
+      })}
+      <Stars radius={800} depth={500} count={10000} factor={10} saturation={0} fade speed={0.4} />
     </group>
   );
 }
 
-// ─── Fuel Calculator Panel ────────────────────────────────────────────────────
-
-function FuelCalculator({ missionType, fuelType }: { missionType: MissionType; fuelType: FuelType }) {
-  const [m0, setM0] = useState(10000);
-  const [dv, setDv] = useState(3900);
-  const prop = PROPELLANTS[fuelType];
-  const mf = tsiolkovskyFuelMass(dv, m0, prop.isp_vac);
-  const mProp = mf;
-  const mDry = m0 - mf;
-  const massRatio = m0 / mDry;
-  const propFraction = mf / m0;
-
-  return (
-    <div className="space-y-2">
-      <p className="text-[10px] text-slate-300 uppercase font-bold tracking-widest">Tsiolkovsky Rocket Equation</p>
-      <div className="bg-slate-900/80 border border-slate-700 p-2 rounded font-mono text-[10px] text-amber-400">
-        Δm = m₀ · (1 - e^(-Δv / (Isp · g₀)))
-      </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        <label className="text-[9px] text-slate-400 uppercase">Initial Mass (kg)
-          <input type="number" value={m0} onChange={e => setM0(+e.target.value)}
-            className="w-full bg-slate-900 border border-slate-700 text-[10px] p-1 mt-0.5 text-slate-200 rounded" />
-        </label>
-        <label className="text-[9px] text-slate-400 uppercase">Δv Required (m/s)
-          <input type="number" value={dv} onChange={e => setDv(+e.target.value)}
-            className="w-full bg-slate-900 border border-slate-700 text-[10px] p-1 mt-0.5 text-slate-200 rounded" />
-        </label>
-      </div>
-      <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-700/50">
-        <MetricBadge label="Propellant Mass" value={mProp.toFixed(0)} unit="kg" color="#f59e0b" />
-        <MetricBadge label="Mass Ratio" value={massRatio.toFixed(3)} unit="m₀/m_dry" color="#a78bfa" />
-        <MetricBadge label="Prop. Fraction" value={(propFraction * 100).toFixed(1)} unit="%" color="#4ade80" />
-        <MetricBadge label={`Isp (${fuelType})`} value={prop.isp_vac} unit="s (vacuum)" color={CB} />
-      </div>
-      <div className="bg-slate-900/60 p-1.5 rounded border border-slate-700/50">
-        <div className="flex gap-0 h-3 rounded overflow-hidden">
-          <div style={{ width: `${propFraction * 100}%`, background: prop.color }} className="transition-all duration-300" />
-          <div style={{ width: `${(1 - propFraction) * 100}%`, background: '#334155' }} />
-        </div>
-        <div className="flex justify-between mt-1 text-[9px] text-slate-400">
-          <span>Propellant {(propFraction * 100).toFixed(0)}%</span>
-          <span>Dry mass {((1 - propFraction) * 100).toFixed(0)}%</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Physics Panel ────────────────────────────────────────────────────────────
-
-function PhysicsPanel({ keplerEl, fuelType }: { keplerEl: KeplerianElements; fuelType: FuelType }) {
-  const prop = PROPELLANTS[fuelType];
-  const h1 = keplerEl.a - 6371;
-  const h2 = 35786;
-  const hohmann = computeHohmann(h1, h2);
-  const j2 = j2NodalPrecession(h1, keplerEl.e, keplerEl.i);
-  const dose = vanAllenDose(h1, keplerEl.i);
-  const atm = atmosphericDensity(h1);
+function SourceStatus({
+  weatherData,
+  nasaWeather,
+  stlAnalysis,
+  simResult,
+}: {
+  weatherData: any;
+  nasaWeather: any;
+  stlAnalysis: STLAnalysis | null;
+  simResult: LaunchOptimizationResponse | null;
+}) {
+  const rows = [
+    { label: 'Surface weather', source: weatherData?.source ?? 'Unavailable', kind: weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Space weather', source: nasaWeather?.source ?? 'Unavailable', kind: nasaWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Ascent dynamics', source: simResult ? 'Formula-driven 2D ascent solver' : 'Not run', kind: simResult ? 'formula' : 'preset' },
+    { label: 'Vehicle geometry', source: stlAnalysis ? 'User STL-derived geometry' : 'No uploaded vehicle', kind: stlAnalysis ? 'formula' : 'preset' },
+    { label: 'Mission graph', source: 'Scenario graph still uses preset nodes and edges', kind: 'preset' },
+    { label: 'Conjunction panel', source: 'Shell-spacing heuristic only', kind: 'heuristic' },
+  ] as const;
 
   return (
     <div className="space-y-2">
-      <p className="text-[10px] text-slate-300 uppercase font-bold tracking-widest">Live Orbital Physics</p>
-
-      <div className="bg-slate-900/80 border border-slate-700 p-2.5 rounded font-mono text-[10px] space-y-1">
-        <div><span className="text-amber-400">Hohmann ΔV₁ =</span> <span className="text-green-400 font-bold">{hohmann.dv1_ms.toFixed(1)}</span> <span className="text-slate-400">m/s</span></div>
-        <div><span className="text-amber-400">Hohmann ΔV₂ =</span> <span className="text-green-400 font-bold">{hohmann.dv2_ms.toFixed(1)}</span> <span className="text-slate-400">m/s</span></div>
-        <div><span className="text-amber-400">TOF =</span> <span className="text-green-400 font-bold">{hohmann.tof_days.toFixed(2)}</span> <span className="text-slate-400">days</span></div>
-        <div><span className="text-amber-400">J2 RAAN drift =</span> <span className="text-green-400 font-bold">{j2.toFixed(4)}</span> <span className="text-slate-400">°/day</span></div>
-        <div><span className="text-amber-400">Van Allen dose =</span> <span className={cn("font-bold", dose > 500 ? "text-red-400" : "text-green-400")}>{dose.toFixed(1)}</span> <span className="text-slate-400">mrad/day</span></div>
-        <div><span className="text-amber-400">Atm. density =</span> <span className="text-green-400 font-bold">{atm.toExponential(2)}</span> <span className="text-slate-400">kg/m³</span></div>
-      </div>
-
-      <div className="grid grid-cols-3 gap-1.5">
-        <MetricBadge label="v_circ" value={hohmann.v_circ1_kms.toFixed(2)} unit="km/s" color={CB} />
-        <MetricBadge label="Isp" value={prop.isp_vac} unit="s (vac)" color={prop.color} />
-        <MetricBadge label="Total ΔV" value={(hohmann.dvTotal_ms / 1000).toFixed(2)} unit="km/s" color="#a78bfa" />
-      </div>
-    </div>
-  );
-}
-
-// ─── Satellite Conjunction Panel ──────────────────────────────────────────────
-
-function ConjunctionPanel({ altitude, inclination }: { altitude: number; inclination: number }) {
-  const threats = useMemo(() => {
-    // Simulate known debris shells (ISS orbit, Starlink, Iridium, debris field)
-    const shells = [
-      { name: 'ISS Shell',      alt: 415, inc: 51.6  },
-      { name: 'Starlink V1',    alt: 550, inc: 53.0  },
-      { name: 'Iridium Belt',   alt: 780, inc: 86.4  },
-      { name: 'ASAT Debris',    alt: 500, inc: 97.0  },
-      { name: 'GPS Debris',     alt: 20200, inc: 55.0 },
-    ];
-    return shells.map(s => {
-      const risk = estimateConjunctionRisk(altitude, inclination, s.alt, s.inc);
-      return {
-        ...s,
-        ...risk,
-        level: risk.probability > 0.005 ? 'high' : risk.probability > 0.001 ? 'medium' : 'low'
-      };
-    }).sort((a, b) => b.probability - a.probability);
-  }, [altitude, inclination]);
-
-  const riskColor = (l: string) => l === 'high' ? '#f87171' : l === 'medium' ? '#fbbf24' : '#34d399';
-
-  return (
-    <div className="space-y-1.5">
-      <p className="text-[10px] text-slate-300 uppercase font-bold tracking-widest">Conjunction Analysis (TCA)</p>
-      {threats.map((t, i) => (
-        <div key={i} className="flex items-center gap-2 p-2 rounded border border-slate-700/60 bg-slate-900/40 text-[9px]">
-          <div className="w-2 h-2 rounded-full shrink-0" style={{ background: riskColor(t.level) }} />
-          <span className="text-slate-300 flex-1 truncate">{t.name}</span>
-          <span className="text-slate-200 font-bold">{t.closestApproach_km.toFixed(1)} km</span>
-          <span style={{ color: riskColor(t.level) }} className="font-bold uppercase text-[8px] w-12 text-right">{t.level}</span>
+      {rows.map((row) => (
+        <div key={row.label} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.14em] text-slate-400">{row.label}</p>
+            <p className="text-sm text-slate-200">{row.source}</p>
+          </div>
+          <ProvenancePill kind={row.kind} />
         </div>
       ))}
     </div>
   );
 }
 
-// ─── QAOA Energy Chart ────────────────────────────────────────────────────────
+function FuelCalculator({ fuelType }: { fuelType: FuelType }) {
+  const [m0, setM0] = useState(10000);
+  const [dv, setDv] = useState(3900);
+  const prop = PROPELLANTS[fuelType];
+  const mProp = tsiolkovskyFuelMass(dv, m0, prop.isp_vac);
+  const mDry = Math.max(1, m0 - mProp);
+  const massRatio = m0 / mDry;
 
-const QAOAChart = ({ layers }: { layers: any[] }) => (
-  <div>
-    <p className="text-[9px] text-slate-300 uppercase font-bold tracking-widest mb-1.5">QAOA Energy Landscape (p={layers.length})</p>
-    <ResponsiveContainer width="100%" height={80}>
-      <LineChart data={layers.map((l, i) => ({ p: i + 1, E: l.energyExpectation, γ: l.gamma.toFixed(2), β: l.beta.toFixed(2) }))}>
-        <CartesianGrid strokeDasharray="2 2" stroke="#ffffff08" />
-        <XAxis dataKey="p" tick={{ fontSize: 8, fill: '#94a3b8' }} label={{ value: 'Layer p', position: 'right', fontSize: 8, fill: '#94a3b8' }} />
-        <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} />
-        <Tooltip contentStyle={{ background: '#0d1224', border: '1px solid #334155', fontSize: 9, color: '#e2e8f0' }}
-          formatter={(v: any, name: string) => [typeof v === 'number' ? v.toFixed(4) : v, name]} />
-        <Line type="monotone" dataKey="E" stroke="#a78bfa" dot={{ r: 3, fill: '#a78bfa' }} strokeWidth={2} name="⟨E⟩ Expectation" />
-      </LineChart>
-    </ResponsiveContainer>
-  </div>
-);
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[11px] text-amber-300">
+        Δm = m₀ · (1 - e^(-Δv / (Isp · g₀)))
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+          Initial Mass
+          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100" type="number" value={m0} onChange={(event) => setM0(+event.target.value)} />
+        </label>
+        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+          Delta-v
+          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100" type="number" value={dv} onChange={(event) => setDv(+event.target.value)} />
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <MetricBadge label="Propellant" value={mProp.toFixed(0)} unit="kg" tone="warn" />
+        <MetricBadge label="Mass Ratio" value={massRatio.toFixed(3)} unit="m0 / mf" />
+        <MetricBadge label="Propellant Fraction" value={`${((mProp / m0) * 100).toFixed(1)}%`} unit="of initial mass" />
+        <MetricBadge label="Isp" value={String(prop.isp_vac)} unit="s vacuum" tone="good" />
+      </div>
+    </div>
+  );
+}
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+function PhysicsPanel({ keplerEl, fuelType }: { keplerEl: KeplerianElements; fuelType: FuelType }) {
+  const altitude = keplerEl.a - 6371;
+  const hohmann = computeHohmann(altitude, 35786);
+  const j2 = j2NodalPrecession(altitude, keplerEl.e, keplerEl.i);
+  const dose = vanAllenDose(altitude, keplerEl.i);
+  const density = atmosphericDensity(altitude);
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[11px]">
+        <div className="flex justify-between text-slate-300"><span>Hohmann ΔV</span><span className="text-green-300">{hohmann.dvTotal_ms.toFixed(1)} m/s</span></div>
+        <div className="mt-1 flex justify-between text-slate-300"><span>Transfer Time</span><span className="text-green-300">{hohmann.tof_days.toFixed(2)} days</span></div>
+        <div className="mt-1 flex justify-between text-slate-300"><span>J2 RAAN Drift</span><span className="text-green-300">{j2.toFixed(4)} deg/day</span></div>
+        <div className="mt-1 flex justify-between text-slate-300"><span>Van Allen Dose</span><span className={dose > 500 ? 'text-red-300' : 'text-green-300'}>{dose.toFixed(1)} mrad/day</span></div>
+        <div className="mt-1 flex justify-between text-slate-300"><span>Atmospheric Density</span><span className="text-green-300">{density.toExponential(2)} kg/m³</span></div>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <MetricBadge label="Circular Velocity" value={hohmann.v_circ1_kms.toFixed(2)} unit="km/s" />
+        <MetricBadge label="Propellant" value={String(PROPELLANTS[fuelType].isp_vac)} unit="s vacuum" tone="good" />
+        <MetricBadge label="Altitude" value={altitude.toFixed(0)} unit="km" />
+      </div>
+    </div>
+  );
+}
+
+function ConjunctionPanel({ importedNodes }: { importedNodes: GeneratedMissionNode[] }) {
+  const assessments = useMemo(() => {
+    const results = [];
+    for (let i = 0; i < importedNodes.length; i++) {
+      for (let j = i + 1; j < importedNodes.length; j++) {
+        results.push(assessConjunction(importedNodes[i], importedNodes[j]));
+      }
+    }
+    return results.sort((a, b) => a.closestApproachKm - b.closestApproachKm).slice(0, 6);
+  }, [importedNodes]);
+
+  return (
+    <div className="space-y-2">
+      {assessments.length === 0 ? <p className="text-sm text-slate-400">Import at least two orbital states or TLEs to compute propagated closest approach.</p> : null}
+      {assessments.map((threat) => {
+        const tone = threat.collisionProbability > 0.1 ? 'bad' : threat.collisionProbability > 0.01 ? 'warn' : 'good';
+        return (
+          <div key={`${threat.objectA}-${threat.objectB}`} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-slate-200">{threat.objectA} vs {threat.objectB}</span>
+              <MetricBadge label="CA" value={threat.closestApproachKm.toFixed(2)} unit="km" tone={tone} />
+            </div>
+            <p className="mt-1 text-xs text-slate-400">TCA {Math.round(threat.tcaSeconds / 60)} min | RelVel {threat.relativeVelocityKms.toFixed(2)} km/s | P {threat.collisionProbability.toExponential(2)}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'mission' | 'physics' | 'quantum'>('mission');
+  const [activeTab, setActiveTab] = useState<Tab>('mission');
   const [missionType, setMissionType] = useState<MissionType>('lunar');
   const [fuelType, setFuelType] = useState<FuelType>('LH2');
-  const [windSpeed, setWindSpeed] = useState(0);
-  const [launchDate, setLaunchDate] = useState(new Date().toISOString().split('T')[0]);
   const [targetPlanet, setTargetPlanet] = useState('moon');
+  const [launchBodyId, setLaunchBodyId] = useState('earth');
+  const [launchDate, setLaunchDate] = useState(new Date().toISOString().split('T')[0]);
   const [spacecraftMass, setSpacecraftMass] = useState(26500);
   const [spacecraftThrust, setSpacecraftThrust] = useState(111200);
-
+  const [windSpeed, setWindSpeed] = useState(0);
+  const [launchLatitude, setLaunchLatitude] = useState(28.5729);
+  const [launchLongitude, setLaunchLongitude] = useState(-80.649);
+  const [launchAltitudeKm, setLaunchAltitudeKm] = useState(0);
+  const [bodySearch, setBodySearch] = useState('');
   const [weatherData, setWeatherData] = useState<any>(null);
   const [nasaWeather, setNasaWeather] = useState<any>(null);
-  const [tleData, setTleData] = useState<any>(null);
-
-  const [optimizing, setOptimizing] = useState(false);
-  const [qaoa_p, setQaoa_p] = useState(3);
-  const [qaoaRerunning, setQaoaRerunning] = useState(false);
-  const [showGraph2D, setShowGraph2D] = useState(false);
-  const [weightsChanged, setWeightsChanged] = useState(false);
-  const [weights, setWeights] = useState<QUBOWeights>({ fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 });
   const [optResult, setOptResult] = useState<OptimizationResult | null>(null);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [importedMissionConfig, setImportedMissionConfig] = useState<ImportedMissionConfig | null>(null);
+  const [importedGraph, setImportedGraph] = useState<{ nodes: GeneratedMissionNode[]; edges: any[] } | null>(null);
   const [logLines, setLogLines] = useState<string[]>([
-    '> ARTEMIS-Q Competition Edition v2.0',
-    '> Quantum optimizer ready',
-    '> Awaiting mission parameters...',
+    '> ARTEMIS-Q analysis console ready',
+    '> Live sources are labeled explicitly',
+    '> Upload a vehicle STL to run ascent optimization',
   ]);
+  const [stlAnalysis, setStlAnalysis] = useState<STLAnalysis | null>(null);
+  const [stlFilename, setStlFilename] = useState<string>('');
+  const [simResult, setSimResult] = useState<LaunchOptimizationResponse | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
+  const [simulating, setSimulating] = useState(false);
 
-  const updateWeight = (key: keyof QUBOWeights, val: number) => {
-    setWeights(prev => ({ ...prev, [key]: val }));
-    if (optResult) setWeightsChanged(true);
-  };
-
-  const addLog = useCallback((msg: string) => {
-    setLogLines(prev => [...prev.slice(-20), `> ${msg}`]);
-  }, []);
-
-  // Keplerian elements (live editable)
   const [keplerEl, setKeplerEl] = useState<KeplerianElements>({
-    a: 6778,    // 400 km altitude
+    a: 6778,
     e: 0.0008,
     i: 51.6,
     raan: 247,
@@ -669,725 +897,701 @@ export default function App() {
     nu: 0,
   });
 
-  const updateKepler = (key: keyof KeplerianElements, val: number) =>
-    setKeplerEl(prev => ({ ...prev, [key]: val }));
+  const addLog = useCallback((message: string) => {
+    setLogLines((previous) => [...previous.slice(-14), `> ${message}`]);
+  }, []);
 
   const preset = MISSION_PRESETS[missionType];
+  const activeGraph = importedGraph ?? { nodes: preset.nodes, edges: preset.edges };
+  const altitude = keplerEl.a - 6371;
+  const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
+  const bodyMatches = useMemo(() => searchBodies(bodySearch), [bodySearch]);
+  const currentDose = vanAllenDose(altitude, keplerEl.i);
+  const localGravity = getDateAdjustedLocalGravity(launchBody, launchLatitude, launchLongitude, launchAltitudeKm, new Date(launchDate));
+  const targetBody = CELESTIAL_BODY_MAP[targetPlanet] ?? CELESTIAL_BODY_MAP.moon;
 
-  // ── Data Fetch ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const fetchAll = async () => {
       try {
-        addLog('Fetching surface weather (OpenWeather API)...');
-        const wxRes = await fetch('/api/weather');
-        const wx = await wxRes.json();
-        setWeatherData(wx);
-        if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
-        addLog(`Weather: ${wx.temp?.toFixed(1)}°C | Wind: ${wx.wind_speed?.toFixed(1)} km/h [${wx.source}]`);
-
-        addLog('Fetching space weather (NASA DONKI)...');
+        let wx: any = { source: 'NOT APPLICABLE' };
+        if (launchBodyId === 'earth') {
+          const wxRes = await fetch(`/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`);
+          wx = await wxRes.json();
+        }
         const nasaRes = await fetch('/api/space-weather');
         const nasa = await nasaRes.json();
+        setWeatherData(wx);
         setNasaWeather(nasa);
-        addLog(`Space weather: Radiation index ${nasa.radiationIndex?.toFixed(2)}x [${nasa.source}]`);
-      } catch (e) {
-        addLog('WARNING: External API unavailable, using simulated data');
+        if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
+        addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
+        addLog(`Space weather: ${nasa.source}`);
+      } catch (error) {
+        addLog('Data fetch failed; source status remains explicit');
       }
     };
     fetchAll();
-  }, []);
+  }, [addLog, launchBodyId, launchLatitude, launchLongitude]);
 
-  // ── Optimize ────────────────────────────────────────────────────────────────
+  const handleScenarioChange = (scenarioId: string) => {
+    const scenario = MISSION_SCENARIOS.find((item) => item.id === scenarioId);
+    if (!scenario) return;
+    setTargetPlanet(scenario.target);
+    setMissionType(scenario.mode as MissionType);
+    setFuelType(scenario.fuel as FuelType);
+    setLaunchDate(scenario.date);
+    setSpacecraftMass(scenario.mass);
+    setSpacecraftThrust(scenario.thrust);
+    setLaunchBodyId('earth');
+    setOptResult(null);
+    addLog(`Scenario loaded: ${scenario.name}`);
+  };
+
   const handleOptimize = async () => {
     setOptimizing(true);
-    setOptResult(null);
-    setWeightsChanged(false);
-    addLog(`Initialising QUBO formulation (${preset.nodes.length} nodes × ${preset.edges.length} edges)...`);
-    addLog(`Encoding Hamiltonian: H = Σ wf·Δv² + wr·rad² + wc·(1-comm)² + ws·safety`);
-
     try {
-      const res = await fetch('/api/optimize', {
+      const response = await fetch('/api/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          nodes: preset.nodes,
-          edges: preset.edges,
-          weights,
-          start: preset.start,
-          end: preset.end,
-          steps: 8,
+          nodes: activeGraph.nodes,
+          edges: activeGraph.edges,
+          weights: { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
+          start: activeGraph.nodes[0]?.id ?? preset.start,
+          end: activeGraph.nodes[activeGraph.nodes.length - 1]?.id ?? preset.end,
+          steps: Math.max(2, activeGraph.nodes.length),
           date: launchDate,
           radiationIndex: nasaWeather?.radiationIndex || 1.0,
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
-          qaoa_p,
-        })
+        }),
       });
-      const data: OptimizationResult = await res.json();
+      const data = await response.json();
       setOptResult(data);
-      addLog(`Annealing complete: ${data.quboGraph?.annealingSteps?.toLocaleString()} iterations`);
-      addLog(`QAOA p=${data.qaoa?.layers?.length ?? qaoa_p}: ⟨E⟩ = ${data.qaoa?.finalEnergy?.toFixed(4)}`);
-      addLog(`QAOA Match: ${data.qaoa?.qaoaMatchPct?.toFixed(1)}% of brute-force optimal`);
-      addLog(`SA improvement: ${data.qaoa?.classicalSAImprovement_pct?.toFixed(1)}% over greedy baseline`);
-      addLog(`Total Δv = ${data.totalDeltaV_ms?.toFixed(0)} m/s | Fuel = ${data.fuelMass_kg?.toFixed(0)} kg`);
-    } catch (e) {
-      addLog('ERROR: Optimization failed — check server');
-      console.error(e);
+      addLog(`Mission optimization complete: ${data.qaoa.layers.length} QAOA layers`);
+      addLog(`Quantum tab remains simulated; routing cost still uses preset graph data`);
+    } catch (error) {
+      addLog('Mission optimization failed');
     } finally {
       setOptimizing(false);
     }
   };
 
-  // ── QAOA Re-run (p-depth change, no SA) ───────────────────────────────────
-  const handleQAOARerun = async (newP: number) => {
-    if (!optResult) return;
-    setQaoaRerunning(true);
-    addLog(`Re-running QAOA with p=${newP} (keeping SA path)...`);
+  const handleStlUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
     try {
-      const res = await fetch('/api/qaoa', {
+      const analyzer = new STLAnalyzer();
+      const analysis = await analyzer.analyze(file);
+      setStlAnalysis(analysis);
+      setStlFilename(file.name);
+      addLog(`STL parsed: ${file.name}`);
+      addLog(`Derived frontal area ${analysis.frontalArea.toFixed(2)} m² and Cd ${analysis.dragCoeff.toFixed(2)}`);
+    } catch (error) {
+      addLog('STL parsing failed');
+    }
+  };
+
+  const handleMissionConfigImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const config = JSON.parse(text);
+      setImportedMissionConfig(config);
+      if (config.launchBodyId) setLaunchBodyId(config.launchBodyId);
+      if (config.targetBodyId) setTargetPlanet(config.targetBodyId);
+      if (config.launchDate) setLaunchDate(config.launchDate);
+      if (config.missionType) setMissionType(config.missionType);
+      if (config.fuelType) setFuelType(config.fuelType);
+      if (typeof config.launchLatitude === 'number') setLaunchLatitude(config.launchLatitude);
+      if (typeof config.launchLongitude === 'number') setLaunchLongitude(config.launchLongitude);
+      if (typeof config.launchAltitudeKm === 'number') setLaunchAltitudeKm(config.launchAltitudeKm);
+      if (typeof config.spacecraftMass === 'number') setSpacecraftMass(config.spacecraftMass);
+      if (typeof config.spacecraftThrust === 'number') setSpacecraftThrust(config.spacecraftThrust);
+      const graph = buildMissionGraphFromImportedConfig(config);
+      setImportedGraph(graph);
+      addLog(`Mission config imported: ${file.name}`);
+      addLog(`Imported ${graph.nodes.length} orbital objects and generated ${graph.edges.length} reachable edges`);
+    } catch {
+      addLog('Mission config import failed');
+    }
+  };
+
+  const exportMissionReport = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      launchBodyId,
+      targetBodyId: targetPlanet,
+      launchDate,
+      missionType,
+      fuelType,
+      launchLatitude,
+      launchLongitude,
+      launchAltitudeKm,
+      spacecraftMass,
+      spacecraftThrust,
+      localGravity,
+      weatherData,
+      nasaWeather,
+      optimization: optResult,
+      importedMissionConfig,
+      importedGraph,
+      ascent: simResult,
+      stlAnalysis,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `artemisq-report-${launchDate}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    addLog('Mission report exported');
+  };
+
+  const runLaunchSimulation = async () => {
+    const useStl = Boolean(stlAnalysis);
+    const frontalArea = stlAnalysis?.frontalArea ?? 18;
+    const dragCoeff = stlAnalysis?.dragCoeff ?? 0.48;
+    const stlMass = stlAnalysis?.estimatedMass ?? 0;
+
+    if (!useStl) {
+      addLog('No STL loaded — using reference aeroshell (18 m², Cd 0.48). Upload an STL to use mesh-derived geometry.');
+    }
+
+    setSimulating(true);
+    setSimResult(null);
+    try {
+      const response = await fetch('/api/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bestPath: optResult.path,
-          nodes: preset.nodes,
-          edges: preset.edges,
-          weights,
-          qaoa_p: newP,
+          mass: spacecraftMass + stlMass,
+          thrust: spacecraftThrust,
+          frontalArea,
+          dragCoeff,
+          fuel: fuelType,
+          wind: windSpeed,
+          pressure: weatherData?.pressure ?? 101.325,
+          exitArea: Math.max(0.2, frontalArea * 0.16),
+          propellantMassFraction: 0.88,
+          dt: 0.5,
+          maxTime: 420,
+          body: {
+            radiusMeters: launchBody.radiusKm * 1000,
+            muMeters3s2: launchBody.muKm3s2 * 1e9,
+            atmosphereScaleHeightKm: launchBody.atmosphereScaleHeightKm,
+            surfaceDensityKgM3: getSurfaceDensity(launchBody.id),
+          },
+          optimizePath: true,
         }),
       });
-      const data = await res.json();
-      setOptResult(prev => prev ? {
-        ...prev,
-        qaoa: { ...prev.qaoa, ...data.qaoa },
-        circuitMap: data.circuitMap,
-      } : null);
-      addLog(`QAOA p=${newP}: ⟨E⟩ = ${data.qaoa?.finalEnergy?.toFixed(4)}, Match = ${data.qaoa?.qaoaMatchPct?.toFixed(1)}%`);
-    } catch (e) {
-      addLog('ERROR: QAOA re-run failed');
+
+      let data: unknown;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(`Bad response from server (HTTP ${response.status}). Use npm run dev so /api/simulate is available.`);
+      }
+
+      if (!response.ok) {
+        const err = data && typeof data === 'object' && data !== null && 'error' in data;
+        throw new Error(err ? String((data as { error: string }).error) : `Simulation failed (HTTP ${response.status})`);
+      }
+
+      if (!data || typeof data !== 'object' || !('best' in data) || !Array.isArray((data as { best: { steps?: unknown } }).best?.steps)) {
+        throw new Error('Simulation response was missing ascent results');
+      }
+
+      const result = data as LaunchOptimizationResponse;
+      setSimResult(result);
+      addLog(`Ascent optimization complete: apogee ${result.best.apogeeKm.toFixed(1)} km`);
+      addLog(`Best guidance: kick ${result.best.flightPath.pitchKickSpeed} m/s, rate ${result.best.flightPath.pitchRateDegPerSec.toFixed(2)} deg/s`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Launch simulation failed';
+      addLog(`Launch simulation failed: ${message}`);
     } finally {
-      setQaoaRerunning(false);
+      setSimulating(false);
     }
   };
 
-  // ── Save/Load ───────────────────────────────────────────────────────────────
-  const saveConfig = () => {
-    setSaveStatus('saving');
-    localStorage.setItem('artemisq_config', JSON.stringify({
-      targetPlanet, missionType, fuelType, launchDate, windSpeed, keplerEl, spacecraftMass, weights, qaoa_p
-    }));
-    setTimeout(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }, 600);
-  };
-  const loadConfig = () => {
-    const s = localStorage.getItem('artemisq_config');
-    if (s) {
-      const c = JSON.parse(s);
-      setTargetPlanet(c.targetPlanet); setMissionType(c.missionType);
-      setFuelType(c.fuelType); setLaunchDate(c.launchDate);
-      setWindSpeed(c.windSpeed); if (c.keplerEl) setKeplerEl(c.keplerEl);
-      if (c.spacecraftMass) setSpacecraftMass(c.spacecraftMass);
-      if (c.weights) setWeights(c.weights);
-      if (c.qaoa_p) setQaoa_p(c.qaoa_p);
-      setOptResult(null);
-      addLog('Configuration loaded from local storage');
-    }
-  };
+  const cislunarVisualizer = missionType === 'lunar' && targetPlanet === 'moon' && launchBodyId === 'earth';
 
-  // ── Derived metrics ─────────────────────────────────────────────────────────
-  const altitude = keplerEl.a - 6371;
-  const currentDragDensity = atmosphericDensity(altitude);
-  const currentVADose = vanAllenDose(altitude, keplerEl.i);
-  const currentJ2 = j2NodalPrecession(altitude, keplerEl.e, keplerEl.i);
-  const hohmannToGEO = computeHohmann(altitude, 35786);
+  const ascentChartData = simResult?.best.steps.map((step) => ({
+    time: step.time,
+    altitude: step.altitude,
+    velocity: step.velocity,
+    q: step.q,
+    pitch: step.pitch,
+  })) ?? [];
+
+  const annealData = optResult?.annealingHistory ?? [];
 
   return (
-    <div className="min-h-screen bg-bg-dark text-slate-200 font-mono selection:bg-[#4B9CD3]/20 flex flex-col">
-      {/* Background grid */}
-      <div className="fixed inset-0 pointer-events-none opacity-[0.025] overflow-hidden">
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#4B9CD3_1px,transparent_1px),linear-gradient(to_bottom,#4B9CD3_1px,transparent_1px)] bg-[size:48px_48px]" />
-      </div>
-
-      <div className="relative z-10 flex-1 flex flex-col overflow-hidden">
-        {/* ── Header ── */}
-        <header className="h-[58px] border-b border-slate-800 bg-black/60 backdrop-blur-sm flex items-center justify-between px-6 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className="w-7 h-7 [clip-path:polygon(50%_0%,100%_100%,0%_100%)]" style={{ background: CB }} />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-[3px] text-slate-100 uppercase leading-none">ARTEMIS-Q</h1>
-              <p className="text-[9px] text-slate-500 tracking-widest uppercase mt-0.5">Quantum Orbital Intelligence System</p>
-            </div>
+    <div className="min-h-screen bg-[#050810] text-slate-100">
+      <div className="pointer-events-none fixed inset-0 opacity-[0.05]" style={{ backgroundImage: 'linear-gradient(to right, rgba(75,156,211,0.2) 1px, transparent 1px), linear-gradient(to bottom, rgba(75,156,211,0.2) 1px, transparent 1px)', backgroundSize: '42px 42px' }} />
+      <div className="relative z-10 mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-4">
+        <header className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
+          <div>
+            <h1 className="text-xl font-bold uppercase tracking-[0.28em]">ARTEMIS-Q</h1>
+            <p className="text-sm text-slate-400">Physics-informed mission analysis with explicit provenance and STL-driven ascent optimization.</p>
           </div>
-
-          <div className="flex items-center gap-3">
-            {/* Weather strip */}
-            {weatherData && (
-              <div className="hidden md:flex items-center gap-2 text-[9px] text-slate-300 border border-slate-700 bg-slate-900/60 px-3 py-1.5 rounded">
-                <Thermometer className="w-3 h-3 text-red-400" />
-                <span>{weatherData.temp?.toFixed(1)}°C</span>
-                <Wind className="w-3 h-3" style={{ color: CB }} />
-                <span>{weatherData.wind_speed?.toFixed(0)} km/h</span>
-                <div className={cn("w-1.5 h-1.5 rounded-full", weatherData.source === 'LIVE' ? "bg-green-400 animate-pulse" : "bg-yellow-400")} />
-                <span className="text-slate-400">{weatherData.source}</span>
-              </div>
-            )}
-
-            {/* Tab nav */}
-            <nav className="flex items-center gap-1 bg-bg-card rounded-md p-1 border border-slate-700">
-              {([
-                { id: 'mission', icon: MapIcon,  label: 'Mission'  },
-                { id: 'physics', icon: Gauge,     label: 'Physics'  },
-                { id: 'quantum', icon: Atom,      label: 'Quantum'  },
-              ] as const).map(tab => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                  className="px-3 py-1.5 rounded-sm text-[9px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all"
-                  style={activeTab === tab.id
-                    ? { background: CB, color: '#000' }
-                    : { color: '#94a3b8' }}>
-                  <tab.icon className="w-3 h-3" />{tab.label}
-                </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {(['mission', 'physics', 'vehicle', 'quantum'] as const).map((tab) => (
+              <button key={tab} className={cn('rounded-md border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]', activeTab === tab ? 'border-sky-400/60 bg-sky-400/15 text-sky-200' : 'border-slate-700 bg-slate-950/60 text-slate-300')} onClick={() => setActiveTab(tab)}>
+                {tab}
+              </button>
+            ))}
+            <select className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
+              <option value="">Scenarios</option>
+              {MISSION_SCENARIOS.map((scenario) => (
+                <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
               ))}
-            </nav>
-
-            {/* Scenario picker */}
-            <select onChange={e => {
-              const s = MISSION_SCENARIOS.find(sc => sc.id === e.target.value);
-              if (s) {
-                setTargetPlanet(s.target); setMissionType(s.mode as MissionType);
-                setFuelType(s.fuel as FuelType); setLaunchDate(s.date);
-                setSpacecraftMass(s.mass); setSpacecraftThrust(s.thrust);
-                setOptResult(null); addLog(`Scenario loaded: ${s.name}`);
-              }
-            }}
-              className="bg-slate-900 border border-slate-700 text-[9px] text-slate-300 font-bold uppercase p-2 rounded focus:outline-none cursor-pointer">
-              <option value="">— Scenarios —</option>
-              {MISSION_SCENARIOS.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </div>
         </header>
 
-        {/* ── Main Grid ── */}
-        <main className="flex-1 overflow-hidden p-3 grid grid-cols-[1fr_360px] gap-3">
-
-          {/* ── LEFT: Visualisation ── */}
-          <section className="flex flex-col gap-3 overflow-hidden min-w-0">
-
-            {/* Globe / 3D view */}
-            <DashboardCard
-              title={`${preset.title} — ${PLANETS[targetPlanet]?.name}`}
-              icon={Globe} className="flex-1 min-h-0" accent
-              headerRight={
-                <button
-                  onClick={() => setShowGraph2D(v => !v)}
-                  className="flex items-center gap-1 px-2 py-0.5 rounded border text-[8px] font-bold uppercase transition-all"
-                  style={showGraph2D
-                    ? { background: `${CB}30`, borderColor: CB, color: CB }
-                    : { background: '#0f172a', borderColor: '#334155', color: '#94a3b8' }}
-                >
-                  {showGraph2D ? '🌍 3D' : '📊 2D'}
-                </button>
-              }
-            >
-              <div className="w-full h-full rounded-sm bg-black/50 border border-slate-800 overflow-hidden" style={{ minHeight: 320 }}>
-                {showGraph2D ? (
-                  <div className="w-full h-full flex items-center justify-center p-2">
-                    <Graph2DOverlay preset={preset} optResult={optResult} />
-                  </div>
-                ) : (
-                  <Canvas>
-                    <PerspectiveCamera makeDefault position={[0, 80, 500]} />
-                    <OrbitControls minDistance={80} maxDistance={1200} />
-                    <ambientLight intensity={0.3} />
-                    <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff8e1" />
-                    <pointLight position={[-200, -100, -200]} intensity={0.3} color="#0022ff" />
-                    <MissionGlobe
-                      launchDate={launchDate}
-                      targetPlanetId={targetPlanet}
-                      optResult={optResult}
-                      preset={preset}
-                      keplerEl={keplerEl}
-                    />
-                  </Canvas>
-                )}
+        <main className="grid flex-1 gap-4 lg:grid-cols-[1.2fr_420px]">
+          <section className="flex min-h-0 flex-col gap-4">
+            <DashboardCard title={`${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`} icon={Globe} provenance={importedGraph ? 'formula' : 'preset'} className="flex-1">
+              <div className="h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-black/40">
+                <Canvas>
+                  <PerspectiveCamera makeDefault position={cislunarVisualizer ? [0, 72, 520] : [0, 80, 500]} />
+                  <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
+                  <ambientLight intensity={0.45} />
+                  <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
+                  <MissionGlobe launchDate={launchDate} targetPlanetId={targetPlanet} launchBodyId={launchBodyId} preset={{ ...preset, nodes: activeGraph.nodes }} pathNodeIds={optResult?.path ?? []} keplerEl={keplerEl} />
+                </Canvas>
               </div>
+              <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                {cislunarVisualizer ? (
+                  <>
+                    Cislunar view: 1 unit ≈ {CISLUNAR_VIS_KM_PER_UNIT.toLocaleString()} km (Earth radius ≈ {(RE / CISLUNAR_VIS_KM_PER_UNIT).toFixed(1)} units). Moon position from a truncated Meeus-style ephemeris; Moon sphere is slightly enlarged for readability. Transfer uses Hohmann TOF with direction blending along LEO→Moon.
+                  </>
+                ) : (
+                  <>
+                    Heliocentric bodies are shown relative to Earth at the selected date (same scale as orbit polynomials in <code className="text-slate-400">celestial.ts</code>). Trajectory is a smooth guide curve, not a patched-conic solve.
+                  </>
+                )}
+              </p>
             </DashboardCard>
 
-            {/* Status console */}
-            <div className="h-[70px] shrink-0 bg-slate-950 border border-slate-700 rounded overflow-hidden p-2 font-mono text-[9px]">
-              <div className="overflow-y-auto h-full space-y-0.5">
-                {logLines.map((line, i) => (
-                  <div key={i} className={cn("leading-tight",
-                    line.includes('ERROR') ? 'text-red-400' :
-                    line.includes('WARNING') ? 'text-amber-400' :
-                    line.includes('QAOA') || line.includes('Quantum') ? 'text-purple-400' :
-                    line.includes('complete') || line.includes('loaded') ? 'text-green-400' :
-                    'text-slate-400'
-                  )}>{line}</div>
-                ))}
-              </div>
-            </div>
-
-            {/* Bottom charts row */}
-            <div className="h-[160px] shrink-0 grid grid-cols-3 gap-3">
-              {/* Annealing history */}
-              <DashboardCard title="Annealing Convergence" icon={TrendingDown}>
-                {optResult?.annealingHistory?.length ? (
-                  <AnnealingChart history={optResult.annealingHistory} />
-                ) : (
-                  <div className="h-full flex items-center justify-center text-[9px] text-slate-500">Run optimizer to view convergence</div>
-                )}
+            <div className="grid gap-4 lg:grid-cols-3">
+              <DashboardCard title="Mission Metrics" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
+                <div className="grid grid-cols-2 gap-2">
+                  <MetricBadge label="Launch Gravity" value={localGravity.toFixed(3)} unit="m/s²" tone="good" />
+                  <MetricBadge label="Launch Body" value={launchBody.name} unit={launchBody.category} />
+                  <MetricBadge label="Destination" value={targetBody.name} unit={targetBody.category} />
+                  <MetricBadge label="Radiation Context" value={currentDose.toFixed(0)} unit="mrad/day" tone={currentDose > 500 ? 'bad' : 'warn'} />
+                  {optResult ? (
+                    <>
+                    <MetricBadge label="Total Delta-v" value={(optResult.totalDeltaV_ms / 1000).toFixed(2)} unit="km/s" tone="good" />
+                    <MetricBadge label="Propellant" value={optResult.fuelMass_kg.toFixed(0)} unit="kg" tone="warn" />
+                    <MetricBadge label="Path Saving" value={`${((1 - optResult.totalCost / optResult.naiveCost) * 100).toFixed(1)}%`} unit="vs greedy" tone="good" />
+                    <MetricBadge label="Dose" value={optResult.physics.vanAllenDose.toFixed(0)} unit="mrad/day" tone={optResult.physics.vanAllenDose > 500 ? 'bad' : 'warn'} />
+                    <MetricBadge label="Success Prob." value={`${((optResult.stochastic?.successProbability ?? 0) * 100).toFixed(0)}%`} unit={`${optResult.stochastic?.runs ?? 0} MC runs`} tone={(optResult.stochastic?.successProbability ?? 0) > 0.8 ? 'good' : 'warn'} />
+                    <MetricBadge label="E[J]" value={optResult.stochastic?.expectedCost.toFixed(1) ?? '--'} unit="expected cost" />
+                    </>
+                  ) : null}
+                </div>
               </DashboardCard>
 
-              {/* QAOA layers */}
-              <DashboardCard title="QAOA Expectation" icon={Atom}>
-                {optResult?.qaoa?.layers?.length ? (
-                  <QAOAChart layers={optResult.qaoa.layers} />
-                ) : (
-                  <div className="h-full flex items-center justify-center text-[9px] text-slate-500">QAOA data pending</div>
-                )}
-              </DashboardCard>
-
-              {/* Key metrics */}
-              <DashboardCard title="Mission Metrics" icon={Zap}>
-                {optResult ? (
-                  <div className="grid grid-cols-2 gap-1.5 h-full content-start">
-                    <MetricBadge label="Δv Total" value={(optResult.totalDeltaV_ms / 1000).toFixed(2)} unit="km/s" color={CB} />
-                    <MetricBadge label="Fuel Mass" value={optResult.fuelMass_kg.toFixed(0)} unit="kg" color="#f59e0b" />
-                    <MetricBadge label="Q-Advantage" value={`${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}%`} unit="cost saving" color="#a78bfa" />
-                    <MetricBadge label="VA Dose" value={optResult.physics.vanAllenDose.toFixed(0)} unit="mrad/day"
-                      color={optResult.physics.vanAllenDose > 500 ? "#f87171" : "#34d399"}
-                      warning={optResult.physics.vanAllenDose > 500} />
+              <DashboardCard title="Ascent Metrics" icon={Rocket} provenance={simResult ? 'formula' : 'preset'}>
+                {simResult ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    <MetricBadge label="Apogee" value={simResult.best.apogeeKm.toFixed(1)} unit="km" tone="good" />
+                    <MetricBadge label="Max-Q" value={simResult.best.maxQValue.toFixed(1)} unit="kPa" tone={simResult.best.maxQValue > 50 ? 'bad' : 'warn'} />
+                    <MetricBadge label="Peak Accel" value={simResult.best.peakAccelerationGs.toFixed(2)} unit="g" tone={simResult.best.peakAccelerationGs > 6 ? 'bad' : 'good'} />
+                    <MetricBadge label="Stability" value={simResult.best.stabilityScore.toFixed(0)} unit="/100" tone={simResult.best.stabilityScore < 60 ? 'bad' : 'good'} />
                   </div>
                 ) : (
-                  <div className="h-full flex items-center justify-center text-[9px] text-slate-500">Optimize mission first</div>
+                  <p className="text-sm text-slate-400">Upload an STL and run ascent optimization.</p>
                 )}
               </DashboardCard>
+
+              <DashboardCard title="Live Strip" icon={Thermometer} provenance={weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset'}>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span className="flex items-center gap-2"><Thermometer className="h-4 w-4 text-red-300" /> Surface Temp</span>
+                    <span>{weatherData?.temp?.toFixed?.(1) ?? '--'} °C</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span className="flex items-center gap-2"><Wind className="h-4 w-4 text-sky-300" /> Wind</span>
+                    <span>{weatherData?.wind_speed?.toFixed?.(1) ?? '--'} km/h</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span>Space Radiation Index</span>
+                    <span>{nasaWeather?.radiationIndex?.toFixed?.(2) ?? '--'}x</span>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">{weatherData?.source ?? 'Weather unavailable'}</div>
+                </div>
+              </DashboardCard>
             </div>
+
+            <DashboardCard title="Analysis Console" icon={AlertTriangle}>
+              <div className="h-[140px] overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/70 p-3 font-mono text-[11px]">
+                {logLines.map((line, index) => (
+                  <div key={index} className={cn('leading-6', line.includes('failed') ? 'text-red-300' : line.includes('complete') ? 'text-green-300' : 'text-slate-400')}>
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </DashboardCard>
           </section>
 
-          {/* ── RIGHT: Controls ── */}
-          <aside className="flex flex-col gap-3 overflow-y-auto overflow-x-hidden">
-
-            {/* ── Mission Tab ── */}
+          <aside className="flex max-h-[calc(100vh-130px)] flex-col gap-4 overflow-y-auto pb-8">
             <AnimatePresence mode="wait">
-              {activeTab === 'mission' && (
-                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-3">
-
-                  <DashboardCard title="Mission Configuration" icon={Settings}>
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-[9px] text-slate-400 uppercase font-bold block mb-1.5">Mission Mode</label>
-                        {(Object.keys(MISSION_PRESETS) as MissionType[]).map(t => (
-                          <button key={t} onClick={() => { setMissionType(t); setOptResult(null); }}
-                            className="w-full mb-1 p-2 rounded border text-left text-[10px] font-bold transition-all"
-                            style={missionType === t
-                              ? { background: `${CB}18`, borderColor: CB, color: CB }
-                              : { background: '#0f172a', borderColor: '#334155', color: '#94a3b8' }}>
-                            {MISSION_PRESETS[t].title}
-                          </button>
-                        ))}
-                      </div>
-
-                      <div>
-                        <label className="text-[9px] text-slate-400 uppercase font-bold block mb-1.5">Destination</label>
-                        <div className="flex flex-wrap gap-1">
-                          {Object.values(PLANETS).map(p => (
-                            <button key={p.id} onClick={() => setTargetPlanet(p.id)}
-                              className="flex-1 min-w-[54px] py-1.5 text-[9px] font-bold border rounded transition-all"
-                              style={targetPlanet === p.id
-                                ? { background: CB, color: '#000', borderColor: CB }
-                                : { background: '#0f172a', borderColor: '#334155', color: '#94a3b8' }}>
-                              {p.name}
-                            </button>
+              {activeTab === 'mission' ? (
+                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Mission Controls" icon={Globe} provenance={importedGraph ? 'formula' : 'preset'}>
+                    <div className="grid gap-3">
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Search Launch Body
+                        <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="text" list="body-suggestions" value={bodySearch} onChange={(event) => setBodySearch(event.target.value)} placeholder="Earth, Mars, Titan..." />
+                        <datalist id="body-suggestions">
+                          {CELESTIAL_BODIES.map((body) => <option key={body.id} value={body.name} />)}
+                        </datalist>
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Launch Body
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={launchBodyId} onChange={(event) => setLaunchBodyId(event.target.value)}>
+                          {bodyMatches.map((body) => (
+                            <option key={body.id} value={body.id}>{body.name}</option>
                           ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="text-[9px] text-slate-400 uppercase font-bold block mb-1.5">Propellant</label>
-                        <div className="flex gap-1">
-                          {(['RP-1', 'LH2', 'Methane'] as FuelType[]).map(f => (
-                            <button key={f} onClick={() => setFuelType(f)}
-                              className="flex-1 py-1.5 text-[9px] font-bold border rounded transition-all"
-                              style={fuelType === f
-                                ? { background: PROPELLANTS[f].color, color: '#000', borderColor: PROPELLANTS[f].color }
-                                : { background: '#0f172a', borderColor: '#334155', color: '#94a3b8' }}>
-                              {f}
-                            </button>
+                        </select>
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Mission Type
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={missionType} onChange={(event) => setMissionType(event.target.value as MissionType)}>
+                          <option value="lunar">Lunar</option>
+                          <option value="orbital">Orbital</option>
+                          <option value="rover">Rover</option>
+                        </select>
+                      </label>
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Target
+                        <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={targetPlanet} onChange={(event) => setTargetPlanet(event.target.value)}>
+                          {CELESTIAL_BODIES.map((planet) => (
+                            <option key={planet.id} value={planet.id}>{planet.name}</option>
                           ))}
-                        </div>
-                        <p className="text-[9px] text-slate-500 mt-1.5">Isp vac: {PROPELLANTS[fuelType].isp_vac} s &nbsp;|&nbsp; ρ: {PROPELLANTS[fuelType].density} kg/m³</p>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <label className="text-[9px] text-slate-400 uppercase">Launch Date
-                          <input type="date" value={launchDate} onChange={e => setLaunchDate(e.target.value)}
-                            className="w-full bg-slate-900 border border-slate-700 text-[10px] p-1.5 mt-0.5 text-slate-200 rounded" />
+                        </select>
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Latitude
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100" type="number" value={launchLatitude} onChange={(event) => setLaunchLatitude(+event.target.value)} />
                         </label>
-                        <label className="text-[9px] text-slate-400 uppercase">S/C Mass (kg)
-                          <input type="number" value={spacecraftMass} onChange={e => setSpacecraftMass(+e.target.value)}
-                            className="w-full bg-slate-900 border border-slate-700 text-[10px] p-1.5 mt-0.5 text-slate-200 rounded" />
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Longitude
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100" type="number" value={launchLongitude} onChange={(event) => setLaunchLongitude(+event.target.value)} />
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Altitude
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-slate-100" type="number" value={launchAltitudeKm} onChange={(event) => setLaunchAltitudeKm(+event.target.value)} />
                         </label>
                       </div>
-
-                      <div>
-                        <label className="text-[9px] text-slate-400 uppercase font-bold flex justify-between">
-                          Surface Wind <span className="text-slate-200">{windSpeed} m/s</span>
-                        </label>
-                        <input type="range" min="-30" max="30" step="1" value={windSpeed}
-                          onChange={e => setWindSpeed(+e.target.value)} className="w-full mt-1" style={{ accentColor: CB }} />
-                      </div>
-
-                      {/* QUBO Weight Sliders */}
-                      <div className="space-y-2 border border-slate-800 rounded p-2.5">
-                        <p className="text-[9px] text-slate-400 uppercase font-bold">QUBO Weights</p>
-                        {([
-                          { key: 'fuel',   label: 'w_fuel (ΔV)',    color: '#f59e0b' },
-                          { key: 'rad',    label: 'w_rad (Radiation)', color: '#f87171' },
-                          { key: 'comm',   label: 'w_comm (Signal)', color: CB },
-                          { key: 'safety', label: 'w_safety',        color: '#4ade80' },
-                        ] as const).map(({ key, label, color }) => (
-                          <div key={key}>
-                            <div className="flex justify-between text-[9px] mb-0.5">
-                              <span className="text-slate-400">{label}</span>
-                              <span className="font-bold" style={{ color }}>{weights[key].toFixed(1)}</span>
-                            </div>
-                            <input type="range" min={0} max={10} step={0.5} value={weights[key]}
-                              onChange={e => updateWeight(key, +e.target.value)}
-                              className="w-full" style={{ accentColor: color }} />
-                          </div>
-                        ))}
-                      </div>
-
-                      <button onClick={handleOptimize} disabled={optimizing}
-                        id="run-optimizer-btn"
-                        className={cn(
-                          'w-full py-3 font-black uppercase text-[10px] tracking-widest rounded transition-all disabled:opacity-50 border-2',
-                          weightsChanged && !optimizing ? 'stale-pulse' : 'border-transparent'
-                        )}
-                        style={{ background: CB, color: '#000' }}>
-                        {optimizing ? (
-                          <span className="flex items-center justify-center gap-2">
-                            <span className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
-                            Quantum Optimizing...
-                          </span>
-                        ) : weightsChanged ? 'Weights Changed — Re-run →' : 'Run Quantum Optimizer →'}
+                      <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        Launch Date
+                        <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="date" value={launchDate} onChange={(event) => setLaunchDate(event.target.value)} />
+                      </label>
+                      <label className="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
+                        Import Mission Config
+                        <input className="hidden" type="file" accept=".json" onChange={handleMissionConfigImport} />
+                      </label>
+                      <button className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200 disabled:opacity-50" onClick={handleOptimize} disabled={optimizing}>
+                        {optimizing ? 'Optimizing Mission...' : 'Run Mission Optimization'}
                       </button>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <button onClick={saveConfig} disabled={saveStatus !== 'idle'}
-                          className="flex items-center justify-center gap-1.5 py-2 bg-slate-900 border border-slate-700 rounded text-[9px] font-bold uppercase text-slate-400 hover:text-slate-200 transition-colors">
-                          {saveStatus === 'saved' ? <CheckCircle2 className="w-3 h-3 text-green-400" /> : <Save className="w-3 h-3" />}
-                          {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved!' : 'Save Config'}
-                        </button>
-                        <button onClick={loadConfig}
-                          className="flex items-center justify-center gap-1.5 py-2 bg-slate-900 border border-slate-700 rounded text-[9px] font-bold uppercase text-slate-400 hover:text-slate-200 transition-colors">
-                          <Download className="w-3 h-3" /> Load Config
-                        </button>
-                      </div>
+                      <button className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm font-semibold text-emerald-200" onClick={exportMissionReport}>
+                        Export Mission Report
+                      </button>
                     </div>
                   </DashboardCard>
 
-                  {/* ── Mission Output Panel (NEW) ── */}
-                  {optResult && (() => {
-                    // Derive TCA from first conjunction threat for this orbit
-                    const pathNode = preset.nodes.find((n: any) => n.id === optResult.path[0]);
-                    const alt = pathNode?.altitude_km ?? 400;
-                    const inc = pathNode?.inclination ?? 28.5;
-                    const shells = [
-                      { alt: 415, inc: 51.6 }, { alt: 550, inc: 53.0 },
-                      { alt: 780, inc: 86.4 }, { alt: 500, inc: 97.0 },
-                    ];
-                    const closestApproach = Math.min(...shells.map(s =>
-                      estimateConjunctionRisk(alt, inc, s.alt, s.inc).closestApproach_km
-                    ));
-                    const riskLevel = closestApproach < 2 ? 'HIGH' : closestApproach < 10 ? 'MEDIUM' : 'LOW';
-                    const riskColor = riskLevel === 'HIGH' ? '#f87171' : riskLevel === 'MEDIUM' ? '#fbbf24' : '#4ade80';
-                    const commCoverage = (optResult.path.reduce((s: number, id: string) => {
-                      const n = preset.nodes.find((nd: any) => nd.id === id);
-                      return s + (n?.commScore ?? 0);
-                    }, 0) / optResult.path.length * 100);
-
-                    return (
-                      <DashboardCard title="Mission Output" icon={Satellite} accent>
-                        <div className="space-y-0">
-                          {[
-                            { label: 'Total ΔV',              value: `${(optResult.totalDeltaV_ms / 1000).toFixed(3)} km/s`,              color: CB },
-                            { label: 'Propellant Mass',        value: `${optResult.fuelMass_kg.toFixed(0)} kg`,                             color: '#f59e0b' },
-                            { label: 'Propellant Fraction',    value: `${(optResult.propellantFraction * 100).toFixed(1)}%`,                 color: '#f59e0b' },
-                            { label: 'Closest Approach (TCA)', value: `${closestApproach.toFixed(2)} km`,                                   color: riskColor },
-                            { label: 'Collision Risk',         value: riskLevel,                                                             color: riskColor },
-                            { label: 'Radiation Score',        value: `${optResult.radiationExposure.toFixed(3)}`,                          color: optResult.radiationExposure > 1.5 ? '#f87171' : '#4ade80' },
-                            { label: 'Comm. Coverage',         value: `${commCoverage.toFixed(1)}%`,                                        color: commCoverage > 70 ? '#4ade80' : '#fbbf24' },
-                            { label: 'Mission Time',           value: `${optResult.physics.transferTime_days.toFixed(2)} days`,              color: '#a78bfa' },
-                            { label: 'Quantum Advantage',      value: `${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}% cost reduction`,  color: CB },
-                          ].map(({ label, value, color }) => (
-                            <div key={label} className="flex items-center justify-between py-1.5 border-b border-slate-800">
-                              <span className="text-[10px] text-slate-400">{label}</span>
-                              <span className="text-[11px] font-bold font-mono" style={{ color }}>{value}</span>
-                            </div>
-                          ))}
+                  <DashboardCard title="Flight Sequence" icon={Rocket} provenance="formula">
+                    <div className="space-y-2">
+                      {(cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES).map((stage, index) => (
+                        <div key={stage.label} className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+                          <div className="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold text-slate-950" style={{ background: stage.color }}>
+                            {index + 1}
+                          </div>
+                          <div>
+                            <p className="text-sm text-slate-100">{stage.label}</p>
+                            <p className="text-xs text-slate-400">{stage.progress < 0.5 ? 'Outbound phase' : stage.progress < 0.8 ? 'Return phase' : 'Recovery phase'}</p>
+                          </div>
                         </div>
-                      </DashboardCard>
-                    );
-                  })()}
+                      ))}
+                    </div>
+                  </DashboardCard>
 
-                  {/* ── Path Rationale (NEW) ── */}
-                  {optResult && (() => {
-                    const radScore = optResult.radiationExposure;
-                    const commScore = 1 - optResult.commLoss;
-                    const saving = ((1 - optResult.totalCost / optResult.naiveCost) * 100).toFixed(0);
-                    const bullets: string[] = [];
-                    if (radScore < 0.5) bullets.push(`Avoids high-density Van Allen belt — radiation score ${(radScore).toFixed(2)} (${radScore < 0.3 ? 'low' : 'moderate'} exposure)`);
-                    else bullets.push(`Routes through partial radiation zone — ${(optResult.physics.vanAllenDose).toFixed(0)} mrad/day dose monitored`);
-                    if (commScore > 0.7) bullets.push(`Maintains strong comm. window coverage (${(commScore * 100).toFixed(0)}%) — no blackout gaps along path`);
-                    else bullets.push(`Trades ${((1 - commScore) * 100).toFixed(0)}% comms loss for lower fuel expenditure along shadow corridor`);
-                    bullets.push(`Quantum optimizer reduced total mission cost by ${saving}% vs. greedy baseline — ${optResult.quboGraph.annealingSteps.toLocaleString()} annealing steps`);
-
-                    return (
-                      <DashboardCard title="Path Rationale" icon={Database}>
-                        <ul className="space-y-2">
-                          {bullets.map((b, i) => (
-                            <li key={i} className="flex gap-2 text-[10px] text-slate-300 leading-snug">
-                              <span className="mt-0.5 shrink-0 w-1.5 h-1.5 rounded-full" style={{ background: CB }} />
-                              {b}
-                            </li>
-                          ))}
-                        </ul>
-                      </DashboardCard>
-                    );
-                  })()}
-
-                  {/* Optimization Results (existing, cleaned up) */}
-                  {optResult && (
-                    <DashboardCard title="Optimization Details" icon={Target} accent>
+                  <DashboardCard title="Route Output" icon={ChevronRight} provenance={importedGraph ? 'formula' : optResult ? 'formula' : 'preset'}>
+                    {optResult ? (
                       <div className="space-y-3">
-                        <div className="grid grid-cols-2 gap-1.5">
-                          <MetricBadge label="Cost Saved" value={`${((1 - optResult.totalCost / optResult.naiveCost) * 100).toFixed(1)}%`} color="#4ade80" />
-                          <MetricBadge label="QUBO Vars" value={optResult.quboGraph.binaryVars} color="#a78bfa" />
-                          <MetricBadge label="Transfer Time" value={optResult.physics.transferTime_days.toFixed(1)} unit="days" color={CB} />
-                          <MetricBadge label="Prop. Fraction" value={`${(optResult.propellantFraction * 100).toFixed(1)}%`} color="#f59e0b" />
+                        <div className="flex flex-wrap gap-1">
+                          {optResult.path.map((nodeId, index) => (
+                            <span key={nodeId + index} className="flex items-center gap-1">
+                              <span className="rounded-md border border-sky-400/30 bg-sky-400/10 px-2 py-1 text-[11px] text-sky-100">{nodeId}</span>
+                              {index < optResult.path.length - 1 ? <ChevronRight className="h-3 w-3 text-slate-600" /> : null}
+                            </span>
+                          ))}
                         </div>
-
-                        <div>
-                          <p className="text-[9px] text-slate-400 uppercase mb-1.5">Optimal Path</p>
-                          <div className="flex flex-wrap gap-1">
-                            {optResult.path.map((id, i) => (
-                              <span key={i} className="flex items-center gap-0.5">
-                                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border"
-                                  style={{ background: `${CB}18`, borderColor: `${CB}55`, color: CB }}>{id}</span>
-                                {i < optResult.path.length - 1 && <ChevronRight className="w-2.5 h-2.5 text-slate-600" />}
-                              </span>
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Anneal Steps" value={optResult.quboGraph.annealingSteps.toLocaleString()} />
+                          <MetricBadge label="QUBO Vars" value={String(optResult.quboGraph.binaryVars)} />
+                          <MetricBadge label="Violations" value={String(optResult.constraintViolations?.length ?? 0)} tone={(optResult.constraintViolations?.length ?? 0) > 0 ? 'warn' : 'good'} />
+                          <MetricBadge label="QUBO Terms" value={String(optResult.quboGraph.nonZeroTerms ?? '--')} />
+                        </div>
+                        {optResult.explanation?.summary?.length ? (
+                          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
+                            {optResult.explanation.summary.map((line, index) => (
+                              <p key={index} className={index > 0 ? 'mt-1' : ''}>{line}</p>
                             ))}
                           </div>
-                        </div>
-
-                        <div className="space-y-1.5 pt-1 border-t border-slate-800">
-                          <p className="text-[9px] text-slate-400 uppercase">Space Weather Inputs</p>
-                          <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-slate-400">CME Radiation Index</span>
-                            <span className={cn("font-bold", (nasaWeather?.radiationIndex || 1) > 1.2 ? "text-red-400" : "text-green-400")}>
-                              {(nasaWeather?.radiationIndex || 1.0).toFixed(2)}×
-                            </span>
+                        ) : null}
+                        {optResult.benchmarks ? (
+                          <div className="space-y-2">
+                            {[optResult.benchmarks.optimized, optResult.benchmarks.shortestPath, optResult.benchmarks.greedy].map((benchmark) => (
+                              <div key={benchmark.label} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">
+                                <div className="flex items-center justify-between">
+                                  <span>{benchmark.label}</span>
+                                  <span className="text-sky-200">{benchmark.totalCost.toFixed(1)}</span>
+                                </div>
+                                <div className="mt-1 text-xs text-slate-400">
+                                  Violations {benchmark.constraintViolations} | Success {(benchmark.successProbability * 100).toFixed(0)}%
+                                </div>
+                              </div>
+                            ))}
                           </div>
-                          <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-slate-400">Anneal Temp Final</span>
-                            <span className="text-slate-200 font-bold">{optResult.quboGraph.temperature.toExponential(2)} K</span>
-                          </div>
-                        </div>
+                        ) : null}
                       </div>
-                    </DashboardCard>
-                  )}
+                    ) : (
+                      <p className="text-sm text-slate-400">{importedGraph ? 'Imported orbital states loaded. Run optimization to solve on generated reachable edges.' : 'Import a mission config with `orbitalObjects` or `tleObjects` to replace the preset graph.'}</p>
+                    )}
+                  </DashboardCard>
 
-                  {/* Fuel Calculator */}
-                  <DashboardCard title="Fuel Calculator (Tsiolkovsky)" icon={Rocket}>
-                    <FuelCalculator missionType={missionType} fuelType={fuelType} />
+                  <DashboardCard title="Provenance Audit" icon={ShieldAlert}>
+                    <SourceStatus weatherData={weatherData} nasaWeather={nasaWeather} stlAnalysis={stlAnalysis} simResult={simResult} />
                   </DashboardCard>
                 </motion.div>
-              )}
+              ) : null}
 
-              {/* ── Physics Tab ── */}
-              {activeTab === 'physics' && (
-                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-3">
-                  <DashboardCard title="Keplerian Elements" icon={Globe} accent>
-                    <div className="space-y-2.5">
+              {activeTab === 'physics' ? (
+                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Keplerian Controls" icon={Gauge} provenance="formula">
+                    <div className="space-y-3">
                       {([
-                        { key: 'a',    label: 'Semi-major axis a',  min: 6571,  max: 42164, step: 10,    fmt: (v: number) => `${(v-6371).toFixed(0)} km alt` },
-                        { key: 'e',    label: 'Eccentricity e',     min: 0,     max: 0.9,   step: 0.001, fmt: (v: number) => v.toFixed(4) },
-                        { key: 'i',    label: 'Inclination i',      min: 0,     max: 180,   step: 0.1,   fmt: (v: number) => `${v.toFixed(1)}°` },
-                        { key: 'raan', label: 'RAAN Ω',             min: 0,     max: 360,   step: 0.5,   fmt: (v: number) => `${v.toFixed(1)}°` },
-                        { key: 'argp', label: 'Arg. Perigee ω',     min: 0,     max: 360,   step: 0.5,   fmt: (v: number) => `${v.toFixed(1)}°` },
-                        { key: 'nu',   label: 'True anomaly ν',     min: 0,     max: 360,   step: 1,     fmt: (v: number) => `${v.toFixed(1)}°` },
-                      ] as const).map(({ key, label, min, max, step, fmt }) => (
-                        <label key={key} className="flex flex-col gap-0.5">
-                          <div className="flex justify-between text-[9px]">
-                            <span className="text-slate-400 uppercase">{label}</span>
-                            <span className="font-bold" style={{ color: CB }}>{fmt(keplerEl[key as keyof KeplerianElements] as number)}</span>
+                        { key: 'a', label: 'Semi-major axis', min: 6571, max: 42164, step: 10, suffix: 'km' },
+                        { key: 'e', label: 'Eccentricity', min: 0, max: 0.9, step: 0.001, suffix: '' },
+                        { key: 'i', label: 'Inclination', min: 0, max: 180, step: 0.1, suffix: 'deg' },
+                        { key: 'raan', label: 'RAAN', min: 0, max: 360, step: 0.5, suffix: 'deg' },
+                        { key: 'argp', label: 'Arg Perigee', min: 0, max: 360, step: 0.5, suffix: 'deg' },
+                        { key: 'nu', label: 'True Anomaly', min: 0, max: 360, step: 1, suffix: 'deg' },
+                      ] as const).map((item) => (
+                        <label key={item.key} className="block text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          <div className="mb-1 flex items-center justify-between">
+                            <span>{item.label}</span>
+                            <span className="text-sky-200">{String(keplerEl[item.key as keyof KeplerianElements])} {item.suffix}</span>
                           </div>
-                          <input type="range" min={min} max={max} step={step}
-                            value={keplerEl[key as keyof KeplerianElements] as number}
-                            onChange={e => updateKepler(key as keyof KeplerianElements, +e.target.value)}
-                            style={{ accentColor: CB }} className="w-full" />
+                          <input className="w-full" type="range" min={item.min} max={item.max} step={item.step} value={keplerEl[item.key as keyof KeplerianElements] as number} onChange={(event) => setKeplerEl((prev) => ({ ...prev, [item.key]: +event.target.value }))} />
                         </label>
                       ))}
                     </div>
                   </DashboardCard>
 
-                  <DashboardCard title="Live Orbital Physics" icon={Cpu}>
+                  <DashboardCard title="Orbital Physics" icon={Globe} provenance="formula">
                     <PhysicsPanel keplerEl={keplerEl} fuelType={fuelType} />
                   </DashboardCard>
 
-                  <DashboardCard title="Conjunction Analysis" icon={ShieldAlert}>
-                    <ConjunctionPanel altitude={altitude} inclination={keplerEl.i} />
+                  <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : 'preset'}>
+                    <ConjunctionPanel importedNodes={importedGraph?.nodes ?? []} />
                   </DashboardCard>
 
-                  <DashboardCard title="Fuel Calculator" icon={Rocket}>
-                    <FuelCalculator missionType={missionType} fuelType={fuelType} />
+                  <DashboardCard title="Fuel Calculator" icon={Rocket} provenance="formula">
+                    <FuelCalculator fuelType={fuelType} />
                   </DashboardCard>
                 </motion.div>
-              )}
+              ) : null}
 
-              {/* ── Quantum Tab ── */}
-              {activeTab === 'quantum' && (
-                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-3">
-                  <DashboardCard title="QUBO Formulation" icon={Atom} accent>
-                    <div className="space-y-2">
-                      <p className="text-[10px] text-slate-300 leading-relaxed">
-                        Quadratic Unconstrained Binary Optimization encodes the mission planning problem as a spin-glass Hamiltonian.
+              {activeTab === 'vehicle' ? (
+                <motion.div key="vehicle" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Vehicle Inputs" icon={Upload} provenance={stlAnalysis ? 'formula' : 'preset'}>
+                    <div className="space-y-3">
+                      <label className="block">
+                        <span className="mb-2 block text-[10px] uppercase tracking-[0.14em] text-slate-400">Upload STL</span>
+                        <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-slate-600 bg-slate-950/60 px-4 py-6 text-sm text-slate-300">
+                          <Upload className="h-4 w-4" />
+                          {stlFilename || 'Choose a rocket STL'}
+                          <input className="hidden" type="file" accept=".stl" onChange={handleStlUpload} />
+                        </label>
+                      </label>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Vehicle Mass
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" value={spacecraftMass} onChange={(event) => setSpacecraftMass(+event.target.value)} />
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Thrust
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" value={spacecraftThrust} onChange={(event) => setSpacecraftThrust(+event.target.value)} />
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Fuel
+                          <select className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" value={fuelType} onChange={(event) => setFuelType(event.target.value as FuelType)}>
+                            <option value="LH2">LH2</option>
+                            <option value="RP-1">RP-1</option>
+                            <option value="Methane">Methane</option>
+                          </select>
+                        </label>
+                        <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          Wind
+                          <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100" type="number" value={windSpeed} onChange={(event) => setWindSpeed(+event.target.value)} />
+                        </label>
+                      </div>
+
+                      <p className="text-[10px] leading-snug text-slate-500">
+                        Runs on the dev server (<code className="text-slate-400">npm run dev</code>). Without an STL, a reference 18 m² / Cd 0.48 vehicle is used.
                       </p>
-                      <div className="bg-slate-900/80 border border-slate-700 p-2.5 rounded font-mono text-[10px] space-y-1">
-                        <div className="text-amber-400">H(x) = Σᵢ Qᵢᵢ xᵢ + Σᵢ&lt;ⱼ Qᵢⱼ xᵢxⱼ</div>
-                        <div className="text-slate-500">xᵢₖ ∈ &#123;0,1&#125;: node i at step k</div>
-                        <div className="text-slate-300">HC = Σ wf·fuelCost² + Σ wr·rad² + Σ wc·(1-comm)²</div>
-                        <div className="text-slate-300">HB = Σᵢ Xᵢ  (mixer — uniform superposition)</div>
-                        <div className="text-[9px] text-slate-500 mt-1">U(γ,β) = e&#123;-iβH_B&#125; · e&#123;-iγH_C&#125; per layer</div>
-                      </div>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        <MetricBadge label="QUBO Vars" value={optResult ? `${optResult.quboGraph.binaryVars}` : '-'} unit="binary vars" color="#a78bfa" />
-                        <MetricBadge label="w_fuel" value={weights.fuel.toFixed(1)} color="#f59e0b" />
-                        <MetricBadge label="w_rad" value={weights.rad.toFixed(1)} color="#f87171" />
-                        <MetricBadge label="w_comm" value={weights.comm.toFixed(1)} color={CB} />
-                        <MetricBadge label="w_safety" value={weights.safety.toFixed(1)} color="#4ade80" />
-                        <MetricBadge label="Penalty λ" value="1000" color="#a78bfa" />
-                      </div>
+                      <button type="button" className="w-full rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200 disabled:opacity-50" onClick={runLaunchSimulation} disabled={simulating}>
+                        {simulating ? 'Optimizing Flight Path...' : 'Run STL-Based Ascent Optimization'}
+                      </button>
                     </div>
                   </DashboardCard>
 
-                  {/* QAOA Circuit Depth Slider + circuit display */}
-                  <DashboardCard title="QAOA Circuit" icon={Cpu}>
-                    <div className="space-y-2">
-                      {/* p-depth slider */}
-                      <div className="space-y-1.5 border border-slate-800 rounded p-2.5">
-                        <div className="flex items-center justify-between text-[9px]">
-                          <span className="text-slate-400 uppercase font-bold">Circuit Depth p</span>
-                          <span className="font-bold" style={{ color: CB }}>p = {qaoa_p}</span>
+                  <DashboardCard title="STL-Derived Geometry" icon={Rocket} provenance={stlAnalysis ? 'formula' : 'preset'}>
+                    {stlAnalysis ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Frontal Area" value={stlAnalysis.frontalArea.toFixed(2)} unit="m²" />
+                          <MetricBadge label="Drag Coefficient" value={stlAnalysis.dragCoeff.toFixed(2)} unit="estimated" tone="warn" />
+                          <MetricBadge label="Volume" value={stlAnalysis.volume.toFixed(2)} unit="m³" />
+                          <MetricBadge label="Est. Mass" value={stlAnalysis.estimatedMass.toFixed(0)} unit="kg" />
+                          <MetricBadge label="Surface Area" value={stlAnalysis.surfaceArea.toFixed(2)} unit="m²" />
+                          <MetricBadge label="Strength" value={(stlAnalysis.materialStrength / 1e6).toFixed(0)} unit="MPa" />
+                          <MetricBadge label="Axis" value={stlAnalysis.principalAxis.toUpperCase()} unit="principal body axis" />
+                          <MetricBadge label="Center Pressure" value={stlAnalysis.centerOfPressure.map((v) => v.toFixed(2)).join(', ')} unit="mesh coordinates" />
                         </div>
-                        <input type="range" min={1} max={5} step={1} value={qaoa_p}
-                          onChange={e => setQaoa_p(+e.target.value)}
-                          className="w-full" style={{ accentColor: CB }} />
-                        <div className="flex justify-between text-[7px] text-slate-600">
-                          {[1,2,3,4,5].map(v => <span key={v}>{v}</span>)}
-                        </div>
-                        <button
-                          onClick={() => handleQAOARerun(qaoa_p)}
-                          disabled={!optResult || qaoaRerunning}
-                          className="w-full py-1.5 text-[9px] font-bold uppercase tracking-widest rounded border transition-all disabled:opacity-40"
-                          style={{ borderColor: CB, color: CB, background: `${CB}18` }}>
-                          {qaoaRerunning ? (
-                            <span className="flex items-center justify-center gap-1.5">
-                              <span className="w-2.5 h-2.5 border border-[#4B9CD3]/40 border-t-[#4B9CD3] rounded-full animate-spin" />
-                              Re-running QAOA...
-                            </span>
-                          ) : !optResult ? 'Run optimizer first' : `Re-run QAOA (p=${qaoa_p}) →`}
-                        </button>
-                      </div>
-
-                      <div className="bg-slate-900/80 border border-slate-700 p-2.5 rounded font-mono text-[10px] space-y-1">
-                        <div className="text-amber-400">U(γ,β) = e&#123;-iβH_B&#125; · e&#123;-iγH_C&#125;</div>
-                        <div className="text-slate-300">|ψ₀⟩ = H^⊗n|0⟩  (uniform superposition)</div>
-                        <div className="text-slate-300">|ψ_p⟩ = U(γ_p,β_p)···U(γ₁,β₁)|ψ₀⟩</div>
-                        <div className="text-[9px] text-slate-500">Full complex amplitudes: re+im ✓ | Grid 20×20/layer ✓</div>
-                      </div>
-                      {optResult?.circuitMap?.length ? (
-                        <QuantumCircuit gates={optResult.circuitMap.slice(0, Math.max(60, (optResult.qaoa.layers.length) * 20 + 20))} />
-                      ) : (
-                        <div className="text-[10px] text-slate-500 text-center py-4">Run optimizer to generate circuit</div>
-                      )}
-                    </div>
-                  </DashboardCard>
-
-                  {/* QAOA Probability Distribution */}
-                  {optResult?.qaoa?.distribution && optResult.qaoa.distribution.length > 0 && (
-                    <DashboardCard title="Probability Distribution" icon={BarChart3}>
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-[9px]">
-                          <span className="text-slate-400">Feasible basis states, sorted by amplitude</span>
-                          <span className="font-bold" style={{ color: CB }}>n={optResult.path.length} qubits</span>
-                        </div>
-                        <QuantumDistribution
-                          distribution={optResult.qaoa.distribution}
-                          nQubits={optResult.path.length}
-                        />
-                      </div>
-                    </DashboardCard>
-                  )}
-
-                  {optResult?.qaoa && (
-                    <DashboardCard title="QAOA Metrics" icon={Zap}>
-                      <div className="space-y-2">
-                        {optResult.qaoa.layers.map((l, i) => (
-                          <div key={i} className="flex items-center gap-2 text-[10px] border-b border-slate-800 pb-1.5">
-                            <span className="text-slate-400 w-14">Layer {i + 1}</span>
-                            <span className="text-amber-400">γ={l.gamma.toFixed(3)}</span>
-                            <span style={{ color: CB }}>β={l.beta.toFixed(3)}</span>
-                            <span className="ml-auto text-green-400 font-bold">⟨E⟩={l.energyExpectation.toFixed(4)}</span>
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <p className="mb-2 text-[10px] uppercase tracking-[0.14em] text-slate-400">Mesh Panel Aero / Stress Distribution</p>
+                          <div className="space-y-2">
+                            {stlAnalysis.panelLoads.map((panel, index) => (
+                              <div key={index}>
+                                <div className="mb-1 flex justify-between text-xs text-slate-400">
+                                  <span>Station {(panel.station * 100).toFixed(0)}%</span>
+                                  <span>Cp {panel.loadCoefficient.toFixed(2)} | σ {(panel.stressPa / 1e6).toFixed(1)} MPa</span>
+                                </div>
+                                <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                                  <div className="h-full rounded-full bg-gradient-to-r from-sky-500 to-amber-400" style={{ width: `${Math.min(100, Math.max(panel.loadCoefficient * 55, (panel.stressPa / Math.max(1, stlAnalysis.materialStrength)) * 100))}%` }} />
+                                </div>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                        <div className="grid grid-cols-2 gap-1.5 pt-1">
-                          <MetricBadge label="QAOA Match %" value={`${optResult.qaoa.qaoaMatchPct?.toFixed(1) ?? '-'}%`} color="#4ade80" />
-                          <MetricBadge label="Approx. Ratio" value={optResult.qaoa.approximationRatio.toFixed(4)} color="#a78bfa" />
-                          <MetricBadge label="Final ⟨E⟩" value={optResult.qaoa.finalEnergy.toFixed(4)} color={CB} />
-                          <MetricBadge label="SA Improvement" value={`${optResult.qaoa.classicalSAImprovement_pct?.toFixed(1) ?? '-'}%`} color="#f59e0b" />
                         </div>
-                        <p className="text-[8px] text-slate-500 pt-1 border-t border-slate-800">
-                          QAOA Match = E_optimal / ⟨E⟩ × 100% — how close QAOA gets to the brute-force QUBO optimum.
-                          SA Improvement = classical cost reduction vs. greedy baseline (not quantum).
-                        </p>
                       </div>
-                    </DashboardCard>
-                  )}
+                    ) : (
+                      <p className="text-sm text-slate-400">No vehicle uploaded yet. Geometry is parsed locally from the user STL.</p>
+                    )}
+                  </DashboardCard>
 
-                  <DashboardCard title="Simulated Annealing" icon={TrendingDown}>
-                    <div className="space-y-2">
-                      <div className="bg-slate-900/80 border border-slate-700 p-2.5 rounded font-mono text-[10px] space-y-1">
-                        <div className="text-amber-400">P(accept) = e^(-ΔE / T)</div>
-                        <div className="text-slate-300">T(k) = T₀ · α^k,  α = (T_f/T₀)^(1/N)</div>
-                        <div className="text-slate-300">N = 20,000 iterations</div>
-                        <div className="text-slate-300">T₀ = 8000 K → T_f = 0.01 K</div>
-                        <div className="text-[9px] text-slate-500">Metropolis-Hastings criterion · swap + replace moves</div>
-                      </div>
-                      {optResult && (
-                        <div className="grid grid-cols-2 gap-1.5">
-                          <MetricBadge label="Final Temp" value={optResult.quboGraph.temperature.toExponential(1)} unit="K" color="#f59e0b" />
-                          <MetricBadge label="Iterations" value={optResult.quboGraph.annealingSteps.toLocaleString()} color="#4ade80" />
+                  <DashboardCard title="Best Flight Path" icon={Gauge} provenance={simResult ? 'formula' : 'preset'}>
+                    {simResult ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Pitch Kick" value={String(simResult.best.flightPath.pitchKickSpeed)} unit="m/s" />
+                          <MetricBadge label="Pitch Rate" value={simResult.best.flightPath.pitchRateDegPerSec.toFixed(2)} unit="deg/s" />
+                          <MetricBadge label="Max Pitch" value={simResult.best.flightPath.maxPitchDeg.toFixed(0)} unit="deg" />
+                          <MetricBadge label="Burnout V" value={simResult.best.burnoutVelocity.toFixed(0)} unit="m/s" />
                         </div>
-                      )}
+                        <div className="space-y-2">
+                          {simResult.candidates.slice(0, 4).map((candidate, index) => (
+                            <div key={index} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">
+                              <div className="flex justify-between"><span>Candidate {index + 1}</span><span className="text-sky-200">{candidate.score.toFixed(1)}</span></div>
+                              <div className="mt-1 text-xs text-slate-400">Kick {candidate.flightPath.pitchKickSpeed} m/s | Rate {candidate.flightPath.pitchRateDegPerSec.toFixed(2)} deg/s | Max Pitch {candidate.flightPath.maxPitchDeg} deg</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">The ascent solver sweeps several gravity-turn programs and returns the best candidate by apogee, stability, and Max-Q penalties.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Ascent Trace" icon={Wind} provenance={simResult ? 'formula' : 'preset'}>
+                    {simResult ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={ascentChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="left" stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="right" orientation="right" stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} />
+                          <Legend wrapperStyle={{ fontSize: 10 }} />
+                          <Line yAxisId="left" type="monotone" dataKey="altitude" stroke="#4B9CD3" dot={false} name="Altitude (km)" />
+                          <Line yAxisId="left" type="monotone" dataKey="velocity" stroke="#34d399" dot={false} name="Velocity (m/s)" />
+                          <Line yAxisId="right" type="monotone" dataKey="q" stroke="#f59e0b" dot={false} name="Dynamic Pressure (kPa)" />
+                          <Line yAxisId="right" type="monotone" dataKey="pitch" stroke="#a78bfa" dot={false} name="Pitch (deg)" />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-slate-400">The chart appears after a successful ascent run.</p>
+                    )}
+                  </DashboardCard>
+                </motion.div>
+              ) : null}
+
+              {activeTab === 'quantum' ? (
+                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Quantum Layer" icon={Atom} provenance="heuristic">
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>The route optimizer still uses a classical simulated annealer with a QAOA-style visualization layer. It is not quantum hardware, and its “advantage” metric is still a comparison against the greedy baseline on preset graphs.</p>
+                      {optResult ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="QAOA Layers" value={String(optResult.qaoa.layers.length)} />
+                          <MetricBadge label="Approx Ratio" value={optResult.qaoa.approximationRatio.toFixed(4)} />
+                          <MetricBadge label="Final Energy" value={optResult.qaoa.finalEnergy.toFixed(4)} />
+                          <MetricBadge label="Displayed Saving" value={`${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}%`} tone="warn" />
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Annealing History" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
+                    {optResult ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={annealData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis dataKey="step" stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <YAxis stroke="#64748b" tick={{ fontSize: 10 }} />
+                          <Tooltip contentStyle={{ background: '#020617', border: '1px solid #334155' }} />
+                          <Legend wrapperStyle={{ fontSize: 10 }} />
+                          <Line type="monotone" dataKey="energy" stroke="#4B9CD3" dot={false} name="Energy" />
+                          <Line type="monotone" dataKey="temperature" stroke="#f59e0b" dot={false} name="Temperature" />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-slate-400">Run mission optimization to inspect the annealing trace.</p>
+                    )}
+                  </DashboardCard>
+
+                  <DashboardCard title="Reality Boundary" icon={ShieldAlert}>
+                    <div className="space-y-2 text-sm text-slate-300">
+                      <p>What is mathematically grounded now:</p>
+                      <ul className="list-disc pl-5 text-slate-400">
+                        <li>Hohmann transfer, Tsiolkovsky, J2 drift, atmosphere, and the 2D ascent solver.</li>
+                        <li>STL-derived frontal area, surface area, volume, and a coarse drag estimate.</li>
+                      </ul>
+                      <p>What is still not NASA-grade:</p>
+                      <ul className="list-disc pl-5 text-slate-400">
+                        <li>Mission node graph values remain preset.</li>
+                        <li>Conjunction panel is still a shell-spacing heuristic.</li>
+                        <li>Quantum view is still explanatory, not operational.</li>
+                      </ul>
                     </div>
                   </DashboardCard>
                 </motion.div>
-              )}
+              ) : null}
             </AnimatePresence>
           </aside>
         </main>
-
-        <footer className="h-7 border-t border-slate-800 bg-slate-950/80 px-4 flex items-center justify-between text-[9px] text-slate-500 uppercase tracking-widest">
-          <span>Artemis-Q v2.0 — Competition Edition</span>
-          <span className="flex items-center gap-2">
-            <span className="w-1 h-1 rounded-full animate-pulse" style={{ background: CB }} />
-            QUBO · QAOA · Tsiolkovsky · J2/J3 · Van Allen · SGP4
-          </span>
-          <span>© 2026 Hackathon</span>
-        </footer>
       </div>
     </div>
   );
