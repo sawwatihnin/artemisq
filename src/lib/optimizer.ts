@@ -52,7 +52,7 @@ import {
   type UncertaintyModel,
 } from './monteCarlo';
 import { generateReplanOptions, type ReplanOption } from './replan';
-import { assessDecisionCost, type DecisionCostAssessment } from './replanCost';
+import { assessDecisionCost, compareDecisionCosts, type DecisionCostAssessment } from './replanCost';
 import { runMissionSupportVerification, type MissionSupportVerification } from './verification';
 
 export interface OptimizerNode {
@@ -1156,7 +1156,7 @@ export class SimulatedAnnealer {
         shieldingBenefitFraction: 0.18,
       },
     );
-    const decisionCosts = replanOptions.map((option) => assessDecisionCost(option));
+    const decisionCosts = compareDecisionCosts(replanOptions);
     const decisionMonteCarlo = replanOptions.map((option) =>
       runDecisionOptionMonteCarlo(
         option.name,

@@ -15,6 +15,9 @@ import {
   Wind,
 } from 'lucide-react';
 import {
+  Bar,
+  BarChart,
+  Cell,
   CartesianGrid,
   Legend,
   Line,
@@ -86,7 +89,15 @@ interface OptimizationResult {
   fuelMass_kg: number;
   propellantFraction: number;
   annealingHistory: { step: number; temperature: number; energy: number }[];
-  qaoa: { layers: Array<{ gamma: number; beta: number; energyExpectation: number }>; finalEnergy: number; approximationRatio: number; quantumAdvantage_pct: number };
+  qaoa: {
+    layers: Array<{ gamma: number; beta: number; energyExpectation: number }>;
+    finalEnergy: number;
+    approximationRatio: number;
+    quantumAdvantage_pct: number;
+    qaoaMatchPct?: number;
+    classicalSAImprovement_pct?: number;
+    distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean }>;
+  };
   physics: { hohmannDeltaV: number; j2Correction: number; vanAllenDose: number; transferTime_days: number };
   stochastic?: { expectedCost: number; variance: number; successProbability: number; runs: number };
   explanation?: {
@@ -105,6 +116,7 @@ interface OptimizationResult {
   };
   medicalValidation?: {
     passedConsistencyChecks: boolean;
+    consistencyChecks?: Array<{ name: string; passed: boolean; note: string }>;
     monotonicityChecks: Array<{ name: string; passed: boolean; note: string }>;
     thresholdTrace: string;
     dominantRiskDriver: string;
@@ -411,6 +423,91 @@ function ProvenancePill({ kind }: { kind: Provenance }) {
     kind === 'preset' ? 'Preset' :
     'Heuristic';
   return <span className={cn('rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em]', provenanceTone(kind))}>{label}</span>;
+}
+
+function StatusPill({ value, tone }: { value: string; tone: 'good' | 'warn' | 'bad' | 'default' }) {
+  const classes =
+    tone === 'good' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' :
+    tone === 'warn' ? 'border-amber-500/30 bg-amber-500/10 text-amber-200' :
+    tone === 'bad' ? 'border-red-500/30 bg-red-500/10 text-red-200' :
+    'border-slate-700 bg-slate-900/70 text-slate-200';
+  return <span className={cn('rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]', classes)}>{value}</span>;
+}
+
+function QuantumCircuit({ gates }: { gates: OptimizationResult['circuitMap'] }) {
+  if (!gates?.length) return <p className="text-sm text-slate-400">Run mission optimization to inspect the synthesized circuit.</p>;
+
+  const gateColors: Record<string, string> = {
+    H: '#a78bfa',
+    RX: '#4B9CD3',
+    RZ: '#4ade80',
+    CNOT: '#f87171',
+  };
+  const layers = gates.reduce<Record<number, typeof gates>>((acc, gate) => {
+    const key = gate.layer ?? 0;
+    acc[key] ??= [];
+    acc[key].push(gate);
+    return acc;
+  }, {});
+  const nQubits = Math.max(...gates.map((gate) => Math.max(gate.qubit, gate.target ?? 0))) + 1;
+
+  return (
+    <div className="overflow-x-auto">
+      <div className="min-w-[320px] space-y-2">
+        {Array.from({ length: nQubits }, (_, qubit) => (
+          <div key={qubit} className="flex items-center gap-2">
+            <span className="w-7 text-[10px] text-slate-400">q{qubit}</span>
+            <div className="flex flex-1 items-center gap-1">
+              {Object.entries(layers).map(([layer, layerGates]) => {
+                const gate = layerGates.find((candidate) => candidate.qubit === qubit || candidate.target === qubit);
+                if (!gate) return <div key={layer} className="h-7 w-8 rounded border border-transparent" />;
+                const color = gateColors[gate.gate] ?? '#94a3b8';
+                return (
+                  <div key={`${layer}-${qubit}`} className="flex h-7 w-8 flex-col items-center justify-center rounded border text-[9px] font-semibold" style={{ borderColor: color, color, backgroundColor: `${color}22` }}>
+                    <span>{gate.gate}</span>
+                    {gate.angle ? <span className="text-[7px] opacity-80">{gate.angle}</span> : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        <div className="flex flex-wrap gap-3 text-[9px] text-slate-500">
+          {Object.entries(gateColors).map(([gate, color]) => (
+            <div key={gate} className="flex items-center gap-1">
+              <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} />
+              <span>{gate}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuantumDistribution({ distribution }: { distribution?: Array<{ state: string; probability: number; energy: number; isOptimal: boolean }> }) {
+  if (!distribution?.length) return <p className="text-sm text-slate-400">Probability distribution becomes available after optimization.</p>;
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <BarChart data={distribution} margin={{ top: 4, right: 8, left: 0, bottom: 8 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+        <XAxis dataKey="state" stroke="#64748b" tick={{ fontSize: 9 }} />
+        <YAxis stroke="#64748b" tick={{ fontSize: 9 }} tickFormatter={(value) => `${(value * 100).toFixed(0)}%`} />
+        <Tooltip
+          contentStyle={{ background: '#020617', border: '1px solid #334155' }}
+          formatter={(value: number, _name, payload: { payload?: { energy: number; isOptimal: boolean } }) => [
+            `${(value * 100).toFixed(2)}%`,
+            `E=${payload.payload?.energy?.toFixed?.(2) ?? '--'}${payload.payload?.isOptimal ? ' · optimal' : ''}`,
+          ]}
+        />
+        <Bar dataKey="probability" radius={[3, 3, 0, 0]}>
+          {distribution.map((entry, index) => (
+            <Cell key={index} fill={entry.isOptimal ? '#f59e0b' : '#4B9CD3'} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
 }
 
 function OrbitLine({ elements, kmPerUnit = VIS_SCENE_KM_PER_UNIT, lineWidth = 1.5 }: { elements: KeplerianElements; kmPerUnit?: number; lineWidth?: number }) {
@@ -887,6 +984,8 @@ export default function App() {
   const [simResult, setSimResult] = useState<LaunchOptimizationResponse | null>(null);
   const [optimizing, setOptimizing] = useState(false);
   const [simulating, setSimulating] = useState(false);
+  const [qaoaDepth, setQaoaDepth] = useState(3);
+  const [qaoaRefreshing, setQaoaRefreshing] = useState(false);
 
   const [keplerEl, setKeplerEl] = useState<KeplerianElements>({
     a: 6778,
@@ -963,6 +1062,7 @@ export default function App() {
           radiationIndex: nasaWeather?.radiationIndex || 1.0,
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
+          qaoa_p: qaoaDepth,
         }),
       });
       const data = await response.json();
@@ -975,6 +1075,34 @@ export default function App() {
       setOptimizing(false);
     }
   };
+
+  const rerunQAOA = useCallback(async (nextDepth: number) => {
+    if (!optResult?.path?.length) return;
+    setQaoaRefreshing(true);
+    try {
+      const response = await fetch('/api/qaoa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bestPath: optResult.path,
+          nodes: activeGraph.nodes,
+          edges: activeGraph.edges,
+          weights: { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
+          qaoa_p: nextDepth,
+          isp_s: PROPELLANTS[fuelType].isp_vac,
+          spacecraft_mass_kg: spacecraftMass,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || 'QAOA refresh failed');
+      setOptResult((previous) => previous ? { ...previous, qaoa: data.qaoa, circuitMap: data.circuitMap } : previous);
+      addLog(`QAOA rerun complete at depth p=${nextDepth}`);
+    } catch (error) {
+      addLog(error instanceof Error ? error.message : 'QAOA refresh failed');
+    } finally {
+      setQaoaRefreshing(false);
+    }
+  }, [optResult, activeGraph.nodes, activeGraph.edges, fuelType, spacecraftMass, addLog]);
 
   const handleStlUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1238,6 +1366,131 @@ export default function App() {
                 ))}
               </div>
             </DashboardCard>
+
+            {optResult?.crewRisk ? (
+              <>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DashboardCard title="Crew Health Panel" icon={ShieldAlert} provenance="formula">
+                    <div className="grid grid-cols-2 gap-2">
+                      <MetricBadge label="Cumulative Dose" value={optResult.crewRisk.cumulativeDose.toFixed(2)} unit="arb. dose" tone={optResult.crewRisk.cumulativeDose > 18 ? 'bad' : 'warn'} />
+                      <MetricBadge label="Peak Exposure" value={optResult.crewRisk.peakExposure.toFixed(2)} unit="dose-rate proxy" tone={optResult.crewRisk.peakExposure > 1 ? 'bad' : 'warn'} />
+                      <MetricBadge label="Unsafe Duration" value={optResult.crewRisk.unsafeDuration.toFixed(1)} unit="hours" tone={optResult.crewRisk.unsafeDuration > 6 ? 'bad' : 'warn'} />
+                      <MetricBadge label="Risk Score" value={optResult.crewRisk.riskScore.toFixed(2)} unit={optResult.crewRisk.classification} tone={optResult.crewRisk.riskScore > 1 ? 'bad' : optResult.crewRisk.riskScore > 0.6 ? 'warn' : 'good'} />
+                    </div>
+                    <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Embarkation</p>
+                        <p className="text-sm text-slate-100">{optResult.crewRisk.embarkationDecision.replaceAll('_', ' ')}</p>
+                      </div>
+                      <StatusPill
+                        value={optResult.crewRisk.classification}
+                        tone={optResult.crewRisk.classification === 'SAFE' ? 'good' : optResult.crewRisk.classification === 'MONITOR' ? 'warn' : 'bad'}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Dominant segment: {optResult.crewRisk.dominantSegment.nodeName} ({(optResult.crewRisk.dominantSegment.share * 100).toFixed(0)}% of cumulative modeled dose).
+                    </p>
+                  </DashboardCard>
+
+                  <DashboardCard title="Mission Decision Panel" icon={AlertTriangle} provenance="formula">
+                    {optResult.missionDecision ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <StatusPill
+                            value={optResult.missionDecision.decision}
+                            tone={optResult.missionDecision.decision === 'CONTINUE' ? 'good' : optResult.missionDecision.decision === 'REPLAN' ? 'warn' : 'bad'}
+                          />
+                          <StatusPill
+                            value={optResult.missionDecision.urgencyLevel}
+                            tone={optResult.missionDecision.urgencyLevel === 'LOW' ? 'good' : optResult.missionDecision.urgencyLevel === 'MODERATE' ? 'warn' : 'bad'}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge label="Risk Reduction" value={`${(optResult.missionDecision.expectedRiskReduction * 100).toFixed(0)}%`} unit="estimated" />
+                          <MetricBadge label="Driver" value={optResult.medicalValidation?.dominantRiskDriver ?? '--'} unit="dominant factor" />
+                        </div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
+                          <p>{optResult.missionDecision.rationale}</p>
+                          {optResult.missionDecision.candidateActions?.length ? (
+                            <div className="mt-2 space-y-1 text-xs text-slate-400">
+                              {optResult.missionDecision.candidateActions.map((action, index) => (
+                                <p key={index}>• {action}</p>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Run mission optimization to derive continue, replan, or abort logic.</p>
+                    )}
+                  </DashboardCard>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-[1.3fr_0.7fr]">
+                  <DashboardCard title="Decision Intelligence Board" icon={Gauge} provenance="formula">
+                    <div className="space-y-3">
+                      {optResult.replanOptions?.slice(0, 6).map((option) => {
+                        const cost = optResult.decisionCosts?.find((item) => item.optionName === option.name);
+                        const mc = optResult.decisionMonteCarlo?.find((item) => item.optionName === option.name);
+                        const isPreferred = optResult.replanOptions?.[0]?.name === option.name;
+                        return (
+                          <div key={option.name} className={cn('rounded-xl border p-3', isPreferred ? 'border-sky-400/40 bg-sky-400/5' : 'border-slate-800 bg-slate-950/60')}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm text-slate-100">{option.name}</p>
+                                <p className="mt-1 text-xs text-slate-400">{option.recommendation}</p>
+                              </div>
+                              <StatusPill value={isPreferred ? 'PRIMARY' : option.type} tone={isPreferred ? 'good' : 'default'} />
+                            </div>
+                            <div className="mt-3 grid grid-cols-2 gap-2 xl:grid-cols-5">
+                              <MetricBadge label="Crew Risk" value={option.newTotalMissionRisk.toFixed(2)} unit="score" tone={option.newTotalMissionRisk > 1 ? 'bad' : option.newTotalMissionRisk > 0.6 ? 'warn' : 'good'} />
+                              <MetricBadge label="P(Success)" value={`${(option.probabilityOfSuccess * 100).toFixed(0)}%`} unit="point estimate" />
+                              <MetricBadge label="Duration" value={`${option.missionDurationChange >= 0 ? '+' : ''}${option.missionDurationChange.toFixed(0)}`} unit="hours" />
+                              <MetricBadge label="Delta-v" value={`${option.deltaVChange >= 0 ? '+' : ''}${option.deltaVChange.toFixed(0)}`} unit="m/s" />
+                              <MetricBadge label="Risk Cost" value={formatMoney(cost?.riskAdjustedCost ?? 0)} unit="expected" tone="warn" />
+                            </div>
+                            <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
+                              <MetricBadge label="Direct Cost" value={formatMoney(cost?.directCost ?? 0)} unit="direct" />
+                              <MetricBadge label="Indirect Cost" value={formatMoney(cost?.indirectCost ?? 0)} unit="indirect" />
+                              <MetricBadge label="Value Score" value={(cost?.recommendationValueScore ?? 0).toExponential(2)} unit="risk / $" tone="good" />
+                              <MetricBadge label="P(Unsafe)" value={`${(((mc?.probabilityUnsafe ?? 0) * 100)).toFixed(0)}%`} unit="MC estimate" tone={(mc?.probabilityUnsafe ?? 0) > 0.25 ? 'bad' : 'warn'} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Verification Summary" icon={Atom} provenance="formula">
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <MetricBadge label="Consistency" value={optResult.medicalValidation?.passedConsistencyChecks ? 'PASS' : 'REVIEW'} unit="medical checks" tone={optResult.medicalValidation?.passedConsistencyChecks ? 'good' : 'warn'} />
+                        <MetricBadge label="Verification" value={optResult.verification?.verificationPassed ? 'PASS' : 'REVIEW'} unit="formal harness" tone={optResult.verification?.verificationPassed ? 'good' : 'warn'} />
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
+                        <p>{optResult.medicalValidation?.thresholdTrace ?? 'Threshold trace unavailable.'}</p>
+                        <p className="mt-2 text-xs text-slate-400">{optResult.medicalValidation?.confidenceNote}</p>
+                      </div>
+                      <div className="space-y-1 text-xs text-slate-400">
+                        {(optResult.medicalValidation?.consistencyChecks ?? []).slice(0, 3).map((check, index) => (
+                          <p key={index}>• {check.name}: {check.passed ? 'pass' : 'review'}</p>
+                        ))}
+                        {(optResult.medicalValidation?.monotonicityChecks ?? []).slice(0, 3).map((check, index) => (
+                          <p key={`m-${index}`}>• {check.name}: {check.passed ? 'pass' : 'review'}</p>
+                        ))}
+                      </div>
+                      {optResult.decisionNarrative ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          <p>{optResult.decisionNarrative.medicalRisk}</p>
+                          <p className="mt-2">{optResult.decisionNarrative.operationalDecision}</p>
+                          <p className="mt-2">{optResult.decisionNarrative.financialRecommendation}</p>
+                        </div>
+                      ) : null}
+                    </div>
+                  </DashboardCard>
+                </div>
+              </>
+            ) : null}
           </section>
 
           <aside className="flex max-h-[calc(100vh-130px)] flex-col gap-4 overflow-y-auto pb-8">
@@ -1549,9 +1802,40 @@ export default function App() {
                           <MetricBadge label="Approx Ratio" value={optResult.qaoa.approximationRatio.toFixed(4)} />
                           <MetricBadge label="Final Energy" value={optResult.qaoa.finalEnergy.toFixed(4)} />
                           <MetricBadge label="Displayed Saving" value={`${optResult.qaoa.quantumAdvantage_pct.toFixed(1)}%`} tone="warn" />
+                          <MetricBadge label="QAOA Match" value={`${(optResult.qaoa.qaoaMatchPct ?? 0).toFixed(1)}%`} unit="feasible-optimality proxy" tone="good" />
+                          <MetricBadge label="SA Improvement" value={`${(optResult.qaoa.classicalSAImprovement_pct ?? optResult.qaoa.quantumAdvantage_pct).toFixed(1)}%`} unit="vs baseline" />
                         </div>
                       ) : null}
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          <span>QAOA Depth</span>
+                          <span>p = {qaoaDepth}</span>
+                        </div>
+                        <input
+                          className="w-full"
+                          type="range"
+                          min={1}
+                          max={6}
+                          step={1}
+                          value={qaoaDepth}
+                          onChange={(event) => setQaoaDepth(+event.target.value)}
+                          onMouseUp={() => rerunQAOA(qaoaDepth)}
+                          onTouchEnd={() => rerunQAOA(qaoaDepth)}
+                          disabled={!optResult || qaoaRefreshing}
+                        />
+                        <p className="mt-2 text-xs text-slate-500">
+                          Uses the pulled `/api/qaoa` rerun path so QAOA diagnostics can update without re-running the full annealer.
+                        </p>
+                      </div>
                     </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Quantum Circuit" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
+                    <QuantumCircuit gates={optResult?.circuitMap ?? []} />
+                  </DashboardCard>
+
+                  <DashboardCard title="State Distribution" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
+                    <QuantumDistribution distribution={optResult?.qaoa.distribution} />
                   </DashboardCard>
 
                   <DashboardCard title="Annealing History" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>

@@ -16,11 +16,10 @@ export interface MissionSupportVerification {
   notes: string[];
 }
 
-export function runMissionSupportVerification(
+export function verifyMedicalMonotonicity(
   samples: RadiationSamplePoint[],
   params: CrewRadiationParams,
-  replans: ReplanOption[],
-): MissionSupportVerification {
+): string[] {
   const failedChecks: string[] = [];
   const baseline = computeCrewRadiationReadiness(samples, params);
   const moreShielding = computeCrewRadiationReadiness(samples, { ...params, shieldingFactor: (params.shieldingFactor ?? 0.72) * 0.85 });
@@ -29,12 +28,23 @@ export function runMissionSupportVerification(
     samples.map((sample, index) => index === Math.floor(samples.length * 0.55) ? { ...sample, radiation: sample.radiation * 1.6 } : sample),
     params,
   );
-  const validation = validateCrewRadiationReadiness(samples, baseline, params);
-
   if (moreShielding.riskScore > baseline.riskScore + 1e-9) failedChecks.push('Medical monotonicity: increasing shielding raised risk.');
   if (longerMission.cumulativeDose < baseline.cumulativeDose - 1e-9) failedChecks.push('Medical monotonicity: longer exposure lowered cumulative dose.');
   if (acuteMission.peakExposure < baseline.peakExposure - 1e-9) failedChecks.push('Medical monotonicity: acute spike lowered peak exposure.');
+  return failedChecks;
+}
 
+export function verifyDecisionMonotonicity(
+  samples: RadiationSamplePoint[],
+  params: CrewRadiationParams,
+  replans: ReplanOption[],
+): string[] {
+  const failedChecks: string[] = [];
+  const baseline = computeCrewRadiationReadiness(samples, params);
+  const acuteMission = computeCrewRadiationReadiness(
+    samples.map((sample, index) => index === Math.floor(samples.length * 0.55) ? { ...sample, radiation: sample.radiation * 1.6 } : sample),
+    params,
+  );
   const baselineDecision = evaluateMissionDecision(['earth', 'transfer', 'moon'], baseline, { alternateCorridorAvailable: true });
   const worseDecision = evaluateMissionDecision(['earth', 'transfer', 'moon'], acuteMission, { alternateCorridorAvailable: true });
   const decisionRank = { CONTINUE: 0, REPLAN: 1, ABORT: 2 } as const;
@@ -42,22 +52,22 @@ export function runMissionSupportVerification(
     failedChecks.push('Decision monotonicity: higher crew risk yielded a more permissive mission decision.');
   }
 
-  const sortedByRiskCost = [...replans]
-    .sort((a, b) => (a.newTotalMissionRisk - b.newTotalMissionRisk) || (a.score - b.score));
+  const sortedByRiskCost = [...replans].sort((a, b) => (a.newTotalMissionRisk - b.newTotalMissionRisk) || (a.score - b.score));
   const bestReplan = sortedByRiskCost[0];
   const worstReplan = sortedByRiskCost[sortedByRiskCost.length - 1];
   if (bestReplan && worstReplan) {
     const bestCost = assessDecisionCost(bestReplan);
     const worstCost = assessDecisionCost(worstReplan);
-    if (
-      bestReplan.newTotalMissionRisk <= worstReplan.newTotalMissionRisk &&
-      bestCost.riskAdjustedCost <= worstCost.riskAdjustedCost &&
-      bestReplan.score < worstReplan.score
-    ) {
+    if (bestReplan.newTotalMissionRisk <= worstReplan.newTotalMissionRisk && bestCost.riskAdjustedCost <= worstCost.riskAdjustedCost && bestReplan.score < worstReplan.score) {
       failedChecks.push('Decision monotonicity: a weakly dominant replan was scored below an inferior alternative.');
     }
   }
 
+  return failedChecks;
+}
+
+export function verifyFinancialConsistency(replans: ReplanOption[]): string[] {
+  const failedChecks: string[] = [];
   const delayOption = replans.find((option) => option.type === 'DELAYED_LAUNCH');
   if (delayOption) {
     const shortDelayCost = assessDecisionCost({ ...delayOption, missionDurationChange: 6 });
@@ -82,12 +92,58 @@ export function runMissionSupportVerification(
     }
   }
 
+  return failedChecks;
+}
+
+export function verifyCounterfactuals(
+  samples: RadiationSamplePoint[],
+  params: CrewRadiationParams,
+): string[] {
+  const baseline = computeCrewRadiationReadiness(samples, params);
+  const noEvent = computeCrewRadiationReadiness(samples.map((sample) => ({ ...sample, radiation: sample.radiation * 0.82 })), params);
+  const strongerShielding = computeCrewRadiationReadiness(samples, { ...params, shieldingFactor: (params.shieldingFactor ?? 0.72) * 0.82 });
+  const failedChecks: string[] = [];
+  if (noEvent.riskScore > baseline.riskScore + 1e-9) failedChecks.push('Counterfactual verification: removing a solar-event-like amplification increased risk.');
+  if (strongerShielding.riskScore > baseline.riskScore + 1e-9) failedChecks.push('Counterfactual verification: stronger shielding increased risk.');
+  return failedChecks;
+}
+
+export function verifyExplainability(
+  samples: RadiationSamplePoint[],
+  params: CrewRadiationParams,
+): string[] {
+  const failedChecks: string[] = [];
+  const baseline = computeCrewRadiationReadiness(samples, params);
+  const validation = validateCrewRadiationReadiness(samples, baseline, params);
   if (!validation.thresholdTrace.includes('Do not embark') && baseline.classification === 'DO_NOT_EMBARK') {
     failedChecks.push('Explainability verification: threshold trace does not match final classification.');
   }
   if (!['peak acute exposure', 'unsafe duration', 'cumulative dose'].includes(validation.dominantRiskDriver)) {
     failedChecks.push('Explainability verification: dominant risk driver was not one of the computed metrics.');
   }
+  return failedChecks;
+}
+
+export function runMissionSupportVerification(
+  samples: RadiationSamplePoint[],
+  params: CrewRadiationParams,
+  replans: ReplanOption[],
+): MissionSupportVerification {
+  const baseline = computeCrewRadiationReadiness(samples, params);
+  const moreShielding = computeCrewRadiationReadiness(samples, { ...params, shieldingFactor: (params.shieldingFactor ?? 0.72) * 0.85 });
+  const longerMission = computeCrewRadiationReadiness([...samples, ...(samples.length ? [samples[samples.length - 1]] : [])], params);
+  const acuteMission = computeCrewRadiationReadiness(
+    samples.map((sample, index) => index === Math.floor(samples.length * 0.55) ? { ...sample, radiation: sample.radiation * 1.6 } : sample),
+    params,
+  );
+  const validation = validateCrewRadiationReadiness(samples, baseline, params);
+  const failedChecks = [
+    ...verifyMedicalMonotonicity(samples, params),
+    ...verifyDecisionMonotonicity(samples, params, replans),
+    ...verifyFinancialConsistency(replans),
+    ...verifyCounterfactuals(samples, params),
+    ...verifyExplainability(samples, params),
+  ];
 
   return {
     verificationPassed: failedChecks.length === 0,
