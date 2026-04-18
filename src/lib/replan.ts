@@ -21,6 +21,8 @@ export interface ReplanContext {
   baselineCommunication: number;
   missionProgress: number;
   currentSuccessProbability: number;
+  anomalyType?: string | null;
+  anomalySeverity?: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL' | null;
 }
 
 export interface ReplanOption {
@@ -95,6 +97,16 @@ export function generateReplanOptions(
   const conservativeReturnBufferHours = params.conservativeReturnBufferHours ?? 18;
   const shieldingBenefitFraction = params.shieldingBenefitFraction ?? 0.16;
   const saferPath = deriveLowRadiationPath(currentState.currentPath, missionGraph);
+  const anomalyPenalty = currentState.anomalySeverity === 'CRITICAL'
+    ? 0.12
+    : currentState.anomalySeverity === 'HIGH'
+      ? 0.07
+      : currentState.anomalySeverity === 'MODERATE'
+        ? 0.03
+        : 0;
+  const propulsionCase = currentState.anomalyType === 'PROPULSION_DEVIATION';
+  const commCase = currentState.anomalyType === 'COMM_LOSS';
+  const radiationCase = currentState.anomalyType === 'RADIATION_SPIKE';
 
   const options: ReplanOption[] = [
     {
@@ -119,10 +131,10 @@ export function generateReplanOptions(
       newTotalMissionRisk: clamp(currentState.currentRiskScore * 0.72, 0, 1.5),
       deltaVChange: 380,
       missionDurationChange: 10,
-      communicationImpact: clamp(currentState.baselineCommunication + 0.08, 0, 1),
+      communicationImpact: clamp(currentState.baselineCommunication + 0.08 + (commCase ? 0.05 : 0), 0, 1),
       operationalComplexity: 0.46,
-      probabilityOfSuccess: clamp(currentState.currentSuccessProbability + 0.04, 0, 1),
-      riskReduction: clamp(currentState.currentRiskScore * 0.28, 0, 1.5),
+      probabilityOfSuccess: clamp(currentState.currentSuccessProbability + 0.04 - anomalyPenalty * 0.2, 0, 1),
+      riskReduction: clamp(currentState.currentRiskScore * (0.28 + (radiationCase ? 0.06 : 0)), 0, 1.5),
       feasibility: 0.82,
       score: 0,
       recommendation: 'Preferred when a lower-radiation corridor remains reachable without large schedule slip.',
@@ -132,7 +144,7 @@ export function generateReplanOptions(
       type: 'DELAYED_LAUNCH',
       path: currentState.currentPath,
       newTotalMissionRisk: clamp(currentState.currentRiskScore * 0.67, 0, 1.5),
-      deltaVChange: 90,
+      deltaVChange: 90 + (propulsionCase ? -35 : 0),
       missionDurationChange: 24,
       communicationImpact: clamp(currentState.baselineCommunication + 0.03, 0, 1),
       operationalComplexity: 0.34,
@@ -147,7 +159,7 @@ export function generateReplanOptions(
       type: 'FREE_RETURN',
       path: [currentState.currentPath[0], currentState.currentPath[Math.max(1, Math.floor(currentState.currentPath.length / 2))], currentState.currentPath[0]],
       newTotalMissionRisk: clamp(currentState.currentRiskScore * 0.58, 0, 1.5),
-      deltaVChange: 620,
+      deltaVChange: 620 + (propulsionCase ? 90 : 0),
       missionDurationChange: -Math.min(currentState.baselineDurationHours * 0.2, 20),
       communicationImpact: clamp(currentState.baselineCommunication + 0.05, 0, 1),
       operationalComplexity: 0.52,
@@ -178,11 +190,11 @@ export function generateReplanOptions(
       path: currentState.currentPath,
       newTotalMissionRisk: clamp(currentState.currentRiskScore * (1 - shieldingBenefitFraction), 0, 1.5),
       deltaVChange: 140,
-      missionDurationChange: 4,
+      missionDurationChange: 4 + (radiationCase ? 2 : 0),
       communicationImpact: currentState.baselineCommunication,
       operationalComplexity: 0.29,
       probabilityOfSuccess: currentState.currentSuccessProbability,
-      riskReduction: clamp(currentState.currentRiskScore * shieldingBenefitFraction, 0, 1.5),
+      riskReduction: clamp(currentState.currentRiskScore * (shieldingBenefitFraction + (radiationCase ? 0.05 : 0)), 0, 1.5),
       feasibility: 0.88,
       score: 0,
       recommendation: 'Useful when localized sheltering or configuration changes materially reduce absorbed dose.',

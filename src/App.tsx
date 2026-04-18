@@ -50,9 +50,11 @@ import { AscentDynamicsVisualizer } from './components/AscentDynamicsVisualizer'
 import type { GeometryStabilityHints } from './lib/ascentDynamics';
 import { explainAscentDynamics } from './lib/explain';
 import { j2NodalPrecession, tsiolkovskyFuelMass, vanAllenDose } from './lib/optimizer';
+import { LaunchSimulator } from './lib/simulator';
 import { STLAnalyzer, type STLAnalysis } from './lib/stlAnalyzer';
 import { CELESTIAL_BODIES, CELESTIAL_BODY_MAP, getApproximateHeliocentricPosition, getDateAdjustedLocalGravity, searchBodies } from './lib/celestial';
 import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
+import { generateMissionReport } from './lib/report';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -215,6 +217,48 @@ interface OptimizationResult {
   scenario?: { type: ScenarioType; summary: string };
   missionConfidence?: { confidenceScore: number; interpretation: string };
   stakeholderView?: { crewView: string; controlView: string; financeView: string };
+  bayesianRisk?: {
+    current?: { posteriorRisk: number; evidence: string[] };
+  };
+  decisionTree?: {
+    optimalPolicy: { sequence: string[]; expectedRisk: number; expectedCost: number };
+  };
+  recommendations?: {
+    recommendedPolicy: { shieldingMassKg: number; launchDelayHours: number; profile: PolicyProfile };
+    rationale: string[];
+  };
+  inversePlanning?: {
+    recommendedWeights: { fuel: number; rad: number; comm: number; safety: number; time: number };
+    shieldingLevel: number;
+    launchWindow: number;
+    expectedOutcome: { risk: number; cost: number; successProbability: number };
+    policy: PolicyProfile;
+  };
+  calibration?: {
+    updatedParameters: { radiationScale?: number; communicationScale?: number; costScale?: number };
+    errorReduction: number;
+    appliedParameters: { radiationScale: number; communicationScale: number; costScale: number };
+  };
+  phasePolicies?: Record<string, { rationale: string }>;
+  counterfactuals?: {
+    scenarios: Array<{ name: string; deltaRisk: number; deltaCost: number; deltaSuccessProbability: number; explanation: string }>;
+    outcomeDifferences: string[];
+  };
+  regret?: { regretScore: number; missedOpportunity: string };
+  policySwitch?: { newPolicy: PolicyProfile; reason: string };
+  voi?: { valueOfWaiting: number; recommendation: string };
+  hierarchy?: { lowLevelAction: string; midLevelDecision: string; highLevelDecision: 'CONTINUE' | 'REPLAN' | 'ABORT' };
+  reportPreview?: { summary: string; findings: string[]; recommendations: string[] };
+  multiMission?: {
+    missionPlans: Array<{ name: string; funded: boolean; portfolioScore: number }>;
+    tradeoffs: string[];
+  };
+  adaptiveNarrative?: {
+    bayesian: string;
+    decisionTree: string;
+    coupling: string;
+    recommendations: string;
+  };
 }
 
 interface LaunchSimulationStep {
@@ -273,6 +317,14 @@ interface LaunchOptimizationResponse {
     flightPath: LaunchSimulationResult['flightPath'];
   }>;
   source: 'formula-driven';
+}
+
+interface StageDisplay {
+  label: string;
+  progress: number;
+  color: string;
+  phase: string;
+  timeS?: number;
 }
 
 const PROPELLANTS: Record<FuelType, PropellantType> = {
@@ -380,6 +432,111 @@ const CISLUNAR_MISSION_STAGES = [
   { label: 'Entry', progress: 0.86, color: '#ef4444' },
   { label: 'Landing', progress: 0.97, color: '#84cc16' },
 ];
+
+function stageColor(label: string): string {
+  const lower = label.toLowerCase();
+  if (lower.includes('launch') || lower.includes('departure') || lower.includes('parking') || lower.includes('landing') || lower.includes('gateway')) return '#84cc16';
+  if (lower.includes('sep') || lower.includes('max q')) return '#eab308';
+  if (lower.includes('transfer') || lower.includes('burn') || lower.includes('meco')) return '#38bdf8';
+  if (lower.includes('entry')) return '#ef4444';
+  if (lower.includes('encounter') || lower.includes('approach')) return '#f59e0b';
+  return '#a78bfa';
+}
+
+function stagePhase(progress: number): string {
+  if (progress < 0.2) return 'Launch and ascent';
+  if (progress < 0.55) return 'Outbound phase';
+  if (progress < 0.82) return 'Return phase';
+  return 'Recovery phase';
+}
+
+function normalizeStageLabel(label: string): string {
+  switch (label) {
+    case 'LEO / Departure':
+      return 'Parking Orbit';
+    case 'TLI':
+      return 'Transfer Burn';
+    case 'NRHO / Gateway':
+      return 'Encounter';
+    case 'Earth return':
+      return 'Entry';
+    case 'Lunar approach':
+      return 'Approach';
+    case 'Launch / Takeoff':
+      return 'Launch';
+    case 'Landing / Splashdown':
+      return 'Landing';
+    default:
+      return label;
+  }
+}
+
+function deriveTrajectoryStages(trajectory: Array<{ label?: string; time_s?: number }>): StageDisplay[] {
+  const labeled = trajectory.filter((point): point is { label: string; time_s?: number } => Boolean(point.label));
+  if (labeled.length < 2) {
+    return [];
+  }
+  const totalTime = Math.max(1, labeled.at(-1)?.time_s ?? trajectory.at(-1)?.time_s ?? 1);
+  return labeled.map((point, index) => {
+    const normalized = normalizeStageLabel(point.label);
+    const rawProgress = Math.max(0, Math.min(1, (point.time_s ?? 0) / totalTime));
+    const progress = index === 0 ? Math.max(0.015, rawProgress) : index === labeled.length - 1 ? Math.min(0.985, Math.max(rawProgress, 0.96)) : rawProgress;
+    return {
+      label: normalized,
+      progress,
+      color: stageColor(normalized),
+      phase: stagePhase(progress),
+      timeS: point.time_s ?? 0,
+    };
+  });
+}
+
+function findClosestStepTime(steps: LaunchSimulationStep[], predicate: (step: LaunchSimulationStep) => boolean): number | null {
+  for (const step of steps) {
+    if (predicate(step)) return step.time;
+  }
+  return null;
+}
+
+function deriveAscentTimelineStages(
+  simResult: LaunchOptimizationResponse | null,
+  transferTimeDays?: number,
+): StageDisplay[] {
+  if (!simResult) {
+    return DEFAULT_MISSION_STAGES.map((stage) => ({
+      ...stage,
+      phase: stagePhase(stage.progress),
+    }));
+  }
+
+  const steps = simResult.best.steps;
+  const transonicTime = findClosestStepTime(steps, (step) => step.mach >= 0.95) ?? simResult.best.maxQTime * 0.85;
+  const stageSepTime = Math.min(simResult.best.mecoTime * 0.58, Math.max(transonicTime, simResult.best.maxQTime * 1.08));
+  const parkingOrbitTime = simResult.best.mecoTime + Math.max(120, Math.min(900, simResult.best.mecoTime * 0.4));
+  const transferBurnTime = parkingOrbitTime + Math.max(120, Math.min(1800, simResult.best.mecoTime * 1.2));
+  const transferDurationS = Math.max(1, (transferTimeDays ?? 5) * 86400);
+  const encounterTime = transferBurnTime + transferDurationS;
+  const entryTime = encounterTime + transferDurationS * 0.82;
+  const landingTime = encounterTime + transferDurationS;
+  const totalTime = Math.max(landingTime, 1);
+  const events = [
+    { label: 'Launch', timeS: 0 },
+    { label: 'Stage Sep', timeS: stageSepTime },
+    { label: 'Parking Orbit', timeS: parkingOrbitTime },
+    { label: 'Transfer Burn', timeS: transferBurnTime },
+    { label: 'Encounter', timeS: encounterTime },
+    { label: 'Entry', timeS: entryTime },
+    { label: 'Landing', timeS: landingTime },
+  ];
+
+  return events.map((event, index) => ({
+    label: event.label,
+    progress: index === 0 ? 0.015 : index === events.length - 1 ? 0.985 : Math.max(0.02, Math.min(0.97, event.timeS / totalTime)),
+    color: stageColor(event.label),
+    phase: stagePhase(event.timeS / totalTime),
+    timeS: event.timeS,
+  }));
+}
 
 function getSurfaceDensity(bodyId: string): number | undefined {
   switch (bodyId) {
@@ -804,9 +961,21 @@ function MissionGlobe({
 
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
   const targetBody = CELESTIAL_BODY_MAP[targetPlanetId] ?? CELESTIAL_BODY_MAP.moon;
-  const stageList = isCislunar ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES;
+  const stageList = deriveTrajectoryStages(trajectory);
   const stageMarkers = stageList.map((stage) => {
-    const idx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
+    let idx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
+    if (stage.timeS != null) {
+      let bestIdx = idx;
+      let bestDt = Infinity;
+      for (let i = 0; i < trajectory.length; i++) {
+        const dt = Math.abs((trajectory[i].time_s ?? 0) - stage.timeS);
+        if (dt < bestDt) {
+          bestDt = dt;
+          bestIdx = i;
+        }
+      }
+      idx = bestIdx;
+    }
     return { ...stage, point: trajectory[idx]?.pos ?? [0, 0, 0] };
   });
 
@@ -1199,7 +1368,12 @@ export default function App() {
       addLog(`STL parsed: ${file.name}`);
       addLog(`Derived frontal area ${analysis.frontalArea.toFixed(2)} m² and Cd ${analysis.dragCoeff.toFixed(2)}`);
     } catch (error) {
-      addLog('STL parsing failed');
+      const detail = error instanceof Error ? error.message : String(error);
+      addLog(`STL parsing failed: ${detail}`);
+      setStlAnalysis(null);
+      setStlFilename('');
+    } finally {
+      event.target.value = '';
     }
   };
 
@@ -1274,52 +1448,38 @@ export default function App() {
     setSimulating(true);
     setSimResult(null);
     try {
-      const response = await fetch('/api/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mass: spacecraftMass + stlMass,
-          thrust: spacecraftThrust,
-          frontalArea,
-          dragCoeff,
-          fuel: fuelType,
-          wind: windSpeed,
-          pressure: weatherData?.pressure ?? 101.325,
-          exitArea: Math.max(0.2, frontalArea * 0.16),
-          propellantMassFraction: 0.88,
-          targetDeltaV_ms: ascentTargetDeltaV,
-          maxQThresholdKpa: maxQThresholdKpa,
-          geometryHints: buildGeometryHints(stlAnalysis),
-          dt: 0.5,
-          maxTime: 420,
-          body: {
-            radiusMeters: launchBody.radiusKm * 1000,
-            muMeters3s2: launchBody.muKm3s2 * 1e9,
-            atmosphereScaleHeightKm: launchBody.atmosphereScaleHeightKm,
-            surfaceDensityKgM3: getSurfaceDensity(launchBody.id),
-          },
-          optimizePath: true,
-        }),
+      await new Promise((r) => setTimeout(r, 0));
+      const pressure = weatherData?.pressure ?? 101.325;
+      const sim = new LaunchSimulator(
+        spacecraftMass + stlMass,
+        spacecraftThrust,
+        frontalArea,
+        dragCoeff,
+        fuelType,
+        windSpeed,
+        pressure,
+      );
+      const result = sim.optimizeFlightPath({
+        exitArea: Math.max(0.2, frontalArea * 0.16),
+        propellantMassFraction: 0.88,
+        targetDeltaV_ms: ascentTargetDeltaV,
+        maxQThresholdKpa: maxQThresholdKpa,
+        geometryHints: buildGeometryHints(stlAnalysis),
+        dt: 0.5,
+        maxTime: 420,
+        body: {
+          radiusMeters: launchBody.radiusKm * 1000,
+          muMeters3s2: launchBody.muKm3s2 * 1e9,
+          atmosphereScaleHeightKm: launchBody.atmosphereScaleHeightKm,
+          surfaceDensityKgM3: getSurfaceDensity(launchBody.id),
+        },
       });
 
-      let data: unknown;
-      try {
-        data = await response.json();
-      } catch {
-        throw new Error(`Bad response from server (HTTP ${response.status}). Use npm run dev so /api/simulate is available.`);
+      if (!result?.best?.steps?.length) {
+        throw new Error('Ascent solver returned no trajectory steps');
       }
 
-      if (!response.ok) {
-        const err = data && typeof data === 'object' && data !== null && 'error' in data;
-        throw new Error(err ? String((data as { error: string }).error) : `Simulation failed (HTTP ${response.status})`);
-      }
-
-      if (!data || typeof data !== 'object' || !('best' in data) || !Array.isArray((data as { best: { steps?: unknown } }).best?.steps)) {
-        throw new Error('Simulation response was missing ascent results');
-      }
-
-      const result = data as LaunchOptimizationResponse;
-      setSimResult(result);
+      setSimResult(result as LaunchOptimizationResponse);
       addLog(`Ascent optimization complete: apogee ${result.best.apogeeKm.toFixed(1)} km`);
       addLog(`Best guidance: kick ${result.best.flightPath.pitchKickSpeed} m/s, rate ${result.best.flightPath.pitchRateDegPerSec.toFixed(2)} deg/s`);
       addLog(
@@ -1337,6 +1497,23 @@ export default function App() {
   };
 
   const cislunarVisualizer = missionType === 'lunar' && targetPlanet === 'moon' && launchBodyId === 'earth';
+  const missionTrajectory = useMemo(
+    () => calculateArtemisTrajectory(launchDate, targetPlanet, launchBodyId, keplerEl),
+    [launchDate, targetPlanet, launchBodyId, keplerEl],
+  );
+  const missionStages = useMemo(() => {
+    const derived = deriveTrajectoryStages(missionTrajectory);
+    return derived.length
+      ? derived
+      : (cislunarVisualizer ? CISLUNAR_MISSION_STAGES : DEFAULT_MISSION_STAGES).map((stage) => ({
+          ...stage,
+          phase: stagePhase(stage.progress),
+        }));
+  }, [missionTrajectory, cislunarVisualizer]);
+  const vehicleTimelineStages = useMemo(
+    () => deriveAscentTimelineStages(simResult, optResult?.physics.transferTime_days),
+    [simResult, optResult?.physics.transferTime_days],
+  );
 
   const ascentChartData = simResult?.best.steps.map((step) => ({
     time: step.time,
@@ -1397,10 +1574,16 @@ export default function App() {
                   />
                 ) : (
                   <div className="flex h-[420px] flex-col items-center justify-center gap-2 rounded-xl border border-slate-800 bg-black/40 px-6 text-center">
-                    <p className="text-sm text-slate-300">Open the Vehicle tab, upload your STL, and run ascent optimization.</p>
-                    <p className="max-w-md text-xs text-slate-500">
-                      The plot shows altitude vs downrange with the path colored by dynamic pressure (q = ½ρv²). Orange marks Max Q; cyan marks MECO. Geometry for area, Cd, and stability heuristics comes from your uploaded mesh.
+                    <p className="text-sm text-slate-300">
+                      On this tab, click <span className="font-medium text-sky-200">Run STL-Based Ascent Optimization</span> (right column). The trajectory appears here after the run; upload an STL first if you want mesh-derived area and drag.
                     </p>
+                    {stlAnalysis ? (
+                      <p className="text-xs text-sky-200/90">Mesh ready ({stlFilename}) — press Run to compute the ascent.</p>
+                    ) : (
+                      <p className="max-w-md text-xs text-slate-500">
+                        Without an STL, the solver uses a reference 18 m² / Cd 0.48 vehicle. The plot uses q = ½ρv² along the path (blue → red).
+                      </p>
+                    )}
                   </div>
                 )
               ) : (
@@ -1469,7 +1652,17 @@ export default function App() {
                     <MetricBadge label="Stability" value={simResult.best.stabilityScore.toFixed(0)} unit="/100" tone={simResult.best.stabilityScore < 60 ? 'bad' : 'good'} />
                   </div>
                 ) : (
-                  <p className="text-sm text-slate-400">Upload an STL and run ascent optimization.</p>
+                  <div className="space-y-2 text-sm text-slate-400">
+                    <p>
+                      Go to the <span className="font-medium text-slate-300">Vehicle</span> tab and click{' '}
+                      <span className="font-medium text-slate-300">Run STL-Based Ascent Optimization</span>. The solver runs in your browser; an STL refines area, Cd, and stability heuristics but is not required.
+                    </p>
+                    {stlAnalysis ? (
+                      <p className="text-xs text-sky-200/90">
+                        STL loaded ({stlFilename || 'mesh'}) — run ascent once to fill these metrics.
+                      </p>
+                    ) : null}
+                  </div>
                 )}
               </DashboardCard>
 
@@ -1979,9 +2172,9 @@ export default function App() {
                       </div>
 
                       <p className="text-[10px] leading-snug text-slate-500">
-                        Runs on the dev server (<code className="text-slate-400">npm run dev</code>). Without an STL, a reference 18 m² / Cd 0.48 vehicle is used. Atmosphere: ρ(h)=ρ₀e^(−h/H) with body-specific H and ρ₀. Ascent ΔV updates when you run mission optimization.
+                        Ascent runs <span className="text-slate-300">in your browser</span> (no API required). Mission routing still uses <code className="text-slate-400">npm run dev</code> for <code className="text-slate-400">/api/optimize</code>. Without an STL, a reference 18 m² / Cd 0.48 vehicle is used.
                       </p>
-                      <button type="button" className="w-full rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200 disabled:opacity-50" onClick={runLaunchSimulation} disabled={simulating}>
+                      <button type="button" className="w-full rounded-lg border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm font-semibold text-sky-200 disabled:opacity-50" onClick={() => void runLaunchSimulation()} disabled={simulating}>
                         {simulating ? 'Optimizing Flight Path...' : 'Run STL-Based Ascent Optimization'}
                       </button>
                     </div>

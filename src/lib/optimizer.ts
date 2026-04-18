@@ -22,10 +22,14 @@
  */
 
 import {
+  explainBayesianRisk,
+  explainCoupling,
   explainCrewRisk,
+  explainDecisionTree,
   explainFinancialRecommendation,
   explainMissionDecision,
   explainPath,
+  explainRecommendations,
   type ExplainNodeMetric,
   type PathExplanation,
 } from './explain';
@@ -40,6 +44,7 @@ import {
 import {
   evaluateMissionDecision,
   recommendAbortOrReplan,
+  withHierarchicalDecision,
   type DecisionPathCandidate,
   type MissionDecisionResult,
 } from './missionDecision';
@@ -65,6 +70,25 @@ import { simulateMissionTimeline, type TelemetryTimeline } from './telemetry';
 import { applyScenario, type ScenarioType } from './scenarios';
 import { computeMissionConfidence, type MissionConfidence } from './confidence';
 import { buildStakeholderView, type StakeholderView } from './stakeholder';
+import { initializeRiskPrior, updateRiskPosterior, type BayesianRiskUpdate } from './bayes';
+import { detectAnomalies, type AnomalyAssessment } from './fdi';
+import { buildDecisionTree, evaluateBranch, selectOptimalPolicy, type DecisionTree, type OptimalPolicy } from './decisionTree';
+import { optimizeForWorstCase, type RobustOptimizationResult } from './robust';
+import { evaluateRelaxationImpact, type ConstraintRelaxationResult } from './relaxation';
+import { runSensitivityAnalysis, type SensitivityAnalysisResult } from './sensitivity';
+import { computeRobustness, type RobustnessResult } from './robustness';
+import { buildRecommendations, type RecommendationBundle, type RecommendationHistoryEntry } from './recommender';
+import { computeCoupledEffects, type CoupledEffectsResult } from './coupling';
+import { optimizeMissionPortfolio, type MissionPortfolioResult } from './multiMission';
+import { optimizeForTargetOutcome, type InverseOptimizationResult } from './inverse';
+import { calibrateModel, updateParameters, type CalibrationResult } from './calibration';
+import { applyPhasePolicy, type MissionPhase, type PhasePolicyResult } from './phases';
+import { generateCounterfactuals, type CounterfactualResult } from './counterfactual';
+import { computeRegret, type RegretResult } from './regret';
+import { evaluatePolicySwitch, type PolicySwitchResult } from './policySwitch';
+import { computeVOI, type VOIResult } from './voi';
+import { evaluateHierarchicalDecision, type HierarchicalDecision } from './hierarchy';
+import { generateMissionReport, type MissionReport } from './report';
 
 export interface OptimizerNode {
   id: string;
@@ -152,6 +176,8 @@ export interface MissionTimeProfile {
   reentrySafeAngleMaxDeg?: number;
   reentrySafeVelocityMinMs?: number;
   reentrySafeVelocityMaxMs?: number;
+  inverseTargetRisk?: number;
+  inverseTargetCost?: number;
 }
 
 export interface MissionTimelinePoint {
@@ -273,6 +299,45 @@ export interface OptimizationResult {
   reentry: ReentryEvaluation;
   gravityAssist: GravityAssistResult;
   telemetry: TelemetryTimeline;
+  bayesianRisk: {
+    prior: ReturnType<typeof initializeRiskPrior>;
+    updates: BayesianRiskUpdate[];
+    current: BayesianRiskUpdate | null;
+  };
+  anomalies: AnomalyAssessment[];
+  decisionTree: {
+    tree: DecisionTree;
+    evaluation: ReturnType<typeof evaluateBranch>;
+    optimalPolicy: OptimalPolicy;
+  };
+  robustOptimization: RobustOptimizationResult;
+  constraintRelaxation: ConstraintRelaxationResult[];
+  sensitivity: SensitivityAnalysisResult;
+  robustness: RobustnessResult;
+  recommendations: RecommendationBundle;
+  coupling: CoupledEffectsResult;
+  multiMission: MissionPortfolioResult;
+  inversePlanning: InverseOptimizationResult;
+  calibration: CalibrationResult & {
+    appliedParameters: {
+      radiationScale: number;
+      communicationScale: number;
+      costScale: number;
+    };
+  };
+  phasePolicies: Record<MissionPhase, PhasePolicyResult>;
+  counterfactuals: CounterfactualResult;
+  regret: RegretResult;
+  policySwitch: PolicySwitchResult;
+  voi: VOIResult;
+  hierarchy: HierarchicalDecision;
+  reportPreview: MissionReport;
+  adaptiveNarrative: {
+    bayesian: string;
+    decisionTree: string;
+    coupling: string;
+    recommendations: string;
+  };
   scenario: {
     type: ScenarioType;
     summary: string;
@@ -1222,6 +1287,57 @@ export class SimulatedAnnealer {
       0,
       1.5,
     );
+    const bayesPrior = initializeRiskPrior(
+      stochastic.samples.map((sample) => ({
+        risk: clamp((sample.metrics.safety / 180 + sample.metrics.radiation / Math.max(missionProfile.radiationThreshold * 8, 1)) / 2, 0, 1.5),
+        unsafe: !sample.success,
+        success: sample.success,
+        cost: sample.cost,
+      })),
+    );
+    const anomalies = bestCost.timeline.flatMap((point, index) =>
+      detectAnomalies({
+        time: point.t,
+        radiation: point.radiation,
+        previousRadiation: bestCost.timeline[index - 1]?.radiation,
+        communicationOpen: point.communicationOpen,
+        previousCommunicationOpen: bestCost.timeline[index - 1]?.communicationOpen,
+        communicationReliability: point.communicationReliability,
+        propulsionDeviation: Math.abs((point.fuelMultiplier ?? 1) - 1),
+        riskScore: point.riskScore,
+      }),
+    );
+    const bayesianUpdates: BayesianRiskUpdate[] = [];
+    let currentPosterior = bayesPrior;
+    for (let i = 0; i < bestCost.timeline.length; i++) {
+      const point = bestCost.timeline[i];
+      const pointAnomalies = detectAnomalies({
+        time: point.t,
+        radiation: point.radiation,
+        previousRadiation: bestCost.timeline[i - 1]?.radiation,
+        communicationOpen: point.communicationOpen,
+        previousCommunicationOpen: bestCost.timeline[i - 1]?.communicationOpen,
+        communicationReliability: point.communicationReliability,
+        propulsionDeviation: Math.abs((point.fuelMultiplier ?? 1) - 1),
+        riskScore: point.riskScore,
+      });
+      const update = updateRiskPosterior(currentPosterior, {
+        radiationReading: point.radiation,
+        communicationOpen: point.communicationOpen,
+        commSignalStrength: point.communicationReliability,
+        anomalySignals: pointAnomalies.map((anomaly) => ({
+          type: anomaly.anomalyType,
+          severity: anomaly.severity === 'CRITICAL' ? 1 : anomaly.severity === 'HIGH' ? 0.8 : anomaly.severity === 'MODERATE' ? 0.5 : 0.2,
+          confidence: anomaly.confidence,
+        })),
+      });
+      bayesianUpdates.push(update);
+      currentPosterior = update.posterior;
+    }
+    const dominantAnomaly = [...anomalies].sort((a, b) => (
+      (b.severity === 'CRITICAL' ? 4 : b.severity === 'HIGH' ? 3 : b.severity === 'MODERATE' ? 2 : 1) -
+      (a.severity === 'CRITICAL' ? 4 : a.severity === 'HIGH' ? 3 : a.severity === 'MODERATE' ? 2 : 1)
+    ))[0] ?? null;
     const candidateDecisionPaths: DecisionPathCandidate[] = [
       {
         name: 'Shortest path',
@@ -1257,6 +1373,8 @@ export class SimulatedAnnealer {
       communicationStability,
       missionProgress,
       alternateCorridorAvailable: candidateDecisionPaths.some((candidate) => candidate.projectedRiskScore < crewRisk.riskScore),
+      bayesianRiskPosterior: bayesianUpdates[bayesianUpdates.length - 1]?.posteriorRisk ?? bayesPrior.priorRisk,
+      anomalyAssessment: dominantAnomaly,
       ...appliedPolicy.missionDecision,
     });
     const missionDecision = baseMissionDecision.decision === 'CONTINUE'
@@ -1277,6 +1395,8 @@ export class SimulatedAnnealer {
         baselineCommunication: communicationStability,
         missionProgress,
         currentSuccessProbability: stochastic.successProbability,
+        anomalyType: dominantAnomaly?.anomalyType ?? null,
+        anomalySeverity: dominantAnomaly?.severity ?? null,
       },
       {
         nodes: [...this.nodes.values()],
@@ -1391,6 +1511,271 @@ export class SimulatedAnnealer {
       success: summarizeDistribution(decisionMonteCarlo.map((item) => item.probabilityOfSuccessfulCompletion)),
     };
     const telemetry = simulateMissionTimeline(bestPath, bestCost.timeline);
+    const decisionTree = buildDecisionTree({
+      currentRisk: crewRisk.riskScore,
+      posteriorRisk: bayesianUpdates[bayesianUpdates.length - 1]?.posteriorRisk ?? crewRisk.riskScore,
+      currentCost: financiallyPreferred?.riskAdjustedCost ?? bestCost.total,
+      communicationStability,
+      returnFeasibility,
+      missionProgress,
+      anomaly: dominantAnomaly,
+      replanOptions,
+    }, 3);
+    const decisionTreeEvaluation = evaluateBranch(decisionTree.root);
+    const optimalPolicy = selectOptimalPolicy(decisionTree);
+    const robustCandidates = [
+      {
+        name: 'Optimized',
+        path: bestPath,
+        expectedRisk: crewRisk.riskScore,
+        expectedCost: stochastic.expectedCost,
+        riskSamples: stochastic.samples.map((sample) => clamp(
+          sample.metrics.radiation / Math.max(missionProfile.radiationThreshold * 8, 1) + sample.metrics.safety / 220,
+          0,
+          1.5,
+        )),
+      },
+      {
+        name: 'Shortest Path',
+        path: shortestPath,
+        expectedRisk: shortestCrewRisk.riskScore,
+        expectedCost: shortestCostData.total,
+        riskSamples: stochastic.samples.map((sample) => clamp(shortestCrewRisk.riskScore * sample.sample.radiationScale, 0, 1.5)),
+      },
+      {
+        name: 'Greedy',
+        path: greedyPath,
+        expectedRisk: greedyCrewRisk.riskScore,
+        expectedCost: greedyCostData.total,
+        riskSamples: stochastic.samples.map((sample) => clamp(greedyCrewRisk.riskScore * sample.sample.radiationScale, 0, 1.5)),
+      },
+    ];
+    const robustOptimization = optimizeForWorstCase(robustCandidates);
+    const constraintRelaxation = [
+      evaluateRelaxationImpact({
+        baselineRisk: crewRisk.riskScore,
+        baselineCost: bestCost.total,
+        baselineCommunication: communicationStability,
+        baselineDurationHours: bestCost.timeline.length * (crewRiskParams.timestepHours ?? 6),
+        relaxedConstraint: 'COMM_BLACKOUT',
+        params: { communicationBlackoutMinutes: 15 },
+      }),
+      evaluateRelaxationImpact({
+        baselineRisk: crewRisk.riskScore,
+        baselineCost: bestCost.total,
+        baselineCommunication: communicationStability,
+        baselineDurationHours: bestCost.timeline.length * (crewRiskParams.timestepHours ?? 6),
+        relaxedConstraint: 'RADIATION_THRESHOLD',
+        params: { radiationThreshold: missionProfile.radiationThreshold },
+      }),
+    ];
+    const sensitivity = runSensitivityAnalysis(
+      {
+        radiationWeight: effectiveWeights.rad,
+        fuelWeight: effectiveWeights.fuel,
+        shieldingFactor: missionProfile.shieldingMassKg ?? 0,
+        communicationWeight: effectiveWeights.comm,
+      },
+      bestPath,
+      (params) => {
+        const adjustedProfile = {
+          ...missionProfile,
+          radiationThreshold: clamp(missionProfile.radiationThreshold * (1 + (params.radiationWeight - effectiveWeights.rad) * 0.02), 0.4, 1.4),
+          shieldingMassKg: Math.max(0, params.shieldingFactor),
+        };
+        const adjustedPath = this.evaluatePath(bestPath, adjustedProfile, start, end);
+        const adjustedCrewRisk = computeCrewRadiationReadiness(timelineToRadiationSamples(adjustedPath.timeline), {
+          ...crewRiskParams,
+          shieldingFactor: (crewRiskParams.shieldingFactor ?? 0.74) * computeShieldingEffect(Math.max(0, params.shieldingFactor), {
+            habitatAreaM2: missionProfile.habitatAreaM2,
+          }).radiationMultiplier,
+        });
+        return {
+          cost: adjustedPath.total * (1 + 0.015 * (params.fuelWeight - effectiveWeights.fuel)),
+          risk: adjustedCrewRisk.riskScore * (1 + 0.01 * (params.communicationWeight - effectiveWeights.comm)),
+          success: clamp(1 - adjustedPath.violations.length * 0.08 - adjustedCrewRisk.riskScore * 0.3, 0, 1),
+        };
+      },
+    );
+    const robustness = computeRobustness([
+      ...stochastic.samples.map((sample) => ({
+        cost: sample.cost,
+        risk: clamp(sample.metrics.radiation / Math.max(missionProfile.radiationThreshold * 8, 1), 0, 1.5),
+        success: sample.success ? 1 : 0,
+      })),
+      ...decisionMonteCarlo.map((sample) => ({
+        cost: sample.expectedMissionCost,
+        risk: sample.expectedCrewRisk,
+        success: sample.probabilityOfSuccessfulCompletion,
+      })),
+    ]);
+    const recommendationHistory: RecommendationHistoryEntry[] = [
+      {
+        weights: {
+          fuel: effectiveWeights.fuel,
+          rad: effectiveWeights.rad,
+          comm: effectiveWeights.comm,
+          safety: effectiveWeights.safety,
+          time: effectiveWeights.time,
+        },
+        crewRisk: crewRisk.riskScore,
+        successProbability: stochastic.successProbability,
+        expectedCost: stochastic.expectedCost,
+        shieldingMassKg: missionProfile.shieldingMassKg ?? 0,
+        launchDelayHours: launchWindows[0]?.window.offsetHours ?? 0,
+        policyProfile: (missionProfile.policyProfile ?? 'BALANCED') as RecommendationHistoryEntry['policyProfile'],
+      },
+      ...decisionMonteCarlo.map((item, index) => ({
+        weights: {
+          fuel: effectiveWeights.fuel,
+          rad: effectiveWeights.rad + (item.expectedCrewRisk > crewRisk.riskScore ? 0.08 : -0.04),
+          comm: effectiveWeights.comm,
+          safety: effectiveWeights.safety + (item.probabilityUnsafe > 0.2 ? 0.06 : 0),
+          time: effectiveWeights.time,
+        },
+        crewRisk: item.expectedCrewRisk,
+        successProbability: item.probabilityOfSuccessfulCompletion,
+        expectedCost: item.expectedMissionCost,
+        shieldingMassKg: (missionProfile.shieldingMassKg ?? 0) + (index === 0 ? 0 : 40),
+        launchDelayHours: launchWindows[Math.min(index, launchWindows.length - 1)]?.window.offsetHours ?? 0,
+        policyProfile: (item.expectedCrewRisk > 0.75 ? 'CREW_FIRST' : 'BALANCED') as RecommendationHistoryEntry['policyProfile'],
+      })),
+    ];
+    const recommendations = buildRecommendations(recommendationHistory);
+    const coupling = computeCoupledEffects({
+      shieldingMassKg: recommendations.recommendedPolicy.shieldingMassKg,
+      launchDelayHours: recommendations.recommendedPolicy.launchDelayHours,
+      replanCount: missionDecision.decision === 'REPLAN' ? 1 : missionDecision.decision === 'ABORT' ? 1 : 0,
+      baselineDeltaV_ms: totalDeltaV,
+      baselineCost: financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost,
+      baselineRadiationRisk: crewRisk.riskScore,
+    });
+    const calibration = calibrateModel({
+      radiation: bestCost.timeline.map((point, index) => ({
+        predicted: point.radiation,
+        observed: point.radiation * (1 + 0.02 * Math.sin(index + 1)),
+      })),
+      communication: bestCost.timeline.map((point) => ({
+        predicted: point.communicationReliability,
+        observed: point.communicationReliability * (point.communicationOpen ? 1.02 : 0.9),
+      })),
+      cost: stochastic.samples.slice(0, 20).map((sample) => ({
+        predicted: bestCost.total,
+        observed: sample.cost,
+      })),
+    });
+    const appliedCalibration = updateParameters(
+      { radiationScale: 1, communicationScale: 1, costScale: 1 },
+      calibration.updatedParameters,
+    );
+    const phasePolicies: Record<MissionPhase, PhasePolicyResult> = {
+      launch: applyPhasePolicy('launch', {
+        weights: effectiveWeights,
+        thresholds: { risk: 0.6, acute: 1.05, abort: 1.0 },
+        policyProfile: missionProfile.policyProfile ?? 'BALANCED',
+      }),
+      transit: applyPhasePolicy('transit', {
+        weights: effectiveWeights,
+        thresholds: { risk: 0.6, acute: 1.05, abort: 1.0 },
+        policyProfile: missionProfile.policyProfile ?? 'BALANCED',
+      }),
+      lunar_flyby: applyPhasePolicy('lunar_flyby', {
+        weights: effectiveWeights,
+        thresholds: { risk: 0.6, acute: 1.05, abort: 1.0 },
+        policyProfile: missionProfile.policyProfile ?? 'BALANCED',
+      }),
+      return: applyPhasePolicy('return', {
+        weights: effectiveWeights,
+        thresholds: { risk: 0.6, acute: 1.05, abort: 1.0 },
+        policyProfile: missionProfile.policyProfile ?? 'BALANCED',
+      }),
+    };
+    const counterfactuals = generateCounterfactuals(bestPath, {
+      baselineRisk: crewRisk.riskScore,
+      baselineCost: stochastic.expectedCost,
+      baselineSuccessProbability: stochastic.successProbability,
+      delayedLaunchHours: recommendations.recommendedPolicy.launchDelayHours,
+      increasedShieldingKg: recommendations.recommendedPolicy.shieldingMassKg,
+      alternateRouteRisk: preferredReplan?.newTotalMissionRisk,
+      alternateRouteCost: financiallyPreferred?.riskAdjustedCost,
+    });
+    const regret = computeRegret(
+      {
+        expectedRisk: crewRisk.riskScore,
+        expectedCost: stochastic.expectedCost,
+        successProbability: stochastic.successProbability,
+      },
+      {
+        expectedRisk: preferredReplan?.newTotalMissionRisk ?? crewRisk.riskScore,
+        expectedCost: financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost,
+        successProbability: preferredReplan?.probabilityOfSuccess ?? stochastic.successProbability,
+      },
+    );
+    const policySwitch = evaluatePolicySwitch({
+      currentPolicy: missionProfile.policyProfile ?? 'BALANCED',
+      crewRisk: crewRisk.riskScore,
+      posteriorRisk: bayesianUpdates[bayesianUpdates.length - 1]?.posteriorRisk,
+      anomalySeverity: dominantAnomaly?.severity ?? null,
+      costPressure: (financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost) / Math.max(stochastic.expectedCost, 1),
+      uncertaintyVariance: uncertaintySummary.cost.variance / Math.max(stochastic.expectedCost ** 2, 1),
+    });
+    const hierarchy = evaluateHierarchicalDecision({
+      crewRisk: Math.max(crewRisk.riskScore, bayesianUpdates[bayesianUpdates.length - 1]?.posteriorRisk ?? 0),
+      anomalySeverity: dominantAnomaly?.severity ?? null,
+      communicationStability,
+      returnFeasibility,
+      preferredReplan: preferredReplan?.name,
+    });
+    const missionDecisionWithHierarchy = withHierarchicalDecision(missionDecision, hierarchy);
+    const voi = computeVOI(
+      {
+        name: missionDecisionWithHierarchy.decision,
+        expectedUtility: 100 * stochastic.successProbability - 80 * crewRisk.riskScore - 0.0000015 * stochastic.expectedCost,
+      },
+      launchWindows.slice(0, 3).map((window) => ({
+        probability: 1 / Math.max(launchWindows.slice(0, 3).length, 1),
+        bestUtilityAfterObservation: 100 * Math.max(0.4, 1 - window.score / 2) - 70 * (window.radiationExposure / Math.max(crewRisk.cumulativeDose, 1)) - 0.0000012 * window.deltaV_ms * 10000,
+      })),
+    );
+    const inversePlanning = optimizeForTargetOutcome({
+      targetRisk: missionProfile.inverseTargetRisk ?? Math.min(0.55, crewRisk.riskScore * 0.82),
+      targetCost: missionProfile.inverseTargetCost ?? stochastic.expectedCost,
+      maxShieldingKg: 520,
+      maxLaunchDelayHours: 36,
+    });
+    const multiMission = optimizeMissionPortfolio([
+      {
+        id: 'primary',
+        name: 'Primary crew transfer',
+        expectedCost: stochastic.expectedCost,
+        expectedRisk: crewRisk.riskScore,
+        successProbability: stochastic.successProbability,
+        priority: 1,
+        resources: { fuel: totalDeltaV, timeHours: bestCost.timeline.length * 6, crewHours: bestCost.timeline.length * 24 },
+      },
+      {
+        id: 'backup',
+        name: 'Backup route validation',
+        expectedCost: shortestCostData.total * 1_000_000,
+        expectedRisk: shortestCrewRisk.riskScore,
+        successProbability: benchmarks.shortestPath.successProbability,
+        priority: 0.74,
+        resources: { fuel: Math.max(1, shortestCostData.deltaV_ms || totalDeltaV * 0.82), timeHours: shortestCostData.timeline.length * 5, crewHours: shortestCostData.timeline.length * 12 },
+      },
+      {
+        id: 'recovery',
+        name: 'Recovery contingency',
+        expectedCost: (financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost) * 0.35,
+        expectedRisk: preferredReplan?.newTotalMissionRisk ?? crewRisk.riskScore * 0.7,
+        successProbability: preferredReplan?.probabilityOfSuccess ?? stochastic.successProbability,
+        priority: 0.8,
+        resources: { fuel: totalDeltaV * 0.45, timeHours: 48, crewHours: 72 },
+      },
+    ], {
+      fuel: totalDeltaV * 1.4,
+      timeHours: bestCost.timeline.length * 8.5,
+      crewHours: bestCost.timeline.length * 36,
+    });
     const missionConfidence = computeMissionConfidence({
       crewRiskScore: crewRisk.riskScore,
       expectedCost: stochastic.expectedCost,
@@ -1404,7 +1789,17 @@ export class SimulatedAnnealer {
       riskAdjustedCost: financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost,
       confidenceScore: missionConfidence.confidenceScore,
       embarkationDecision: crewRisk.embarkationDecision,
-      missionDecision: missionDecision.decision,
+      missionDecision: missionDecisionWithHierarchy.decision,
+    });
+    const reportPreview = generateMissionReport({
+      missionName: `${start} to ${end}`,
+      crewRisk,
+      cost: { expectedCost: stochastic.expectedCost, riskAdjustedCost: financiallyPreferred?.riskAdjustedCost },
+      missionDecision: missionDecisionWithHierarchy,
+      confidence: missionConfidence,
+      counterfactuals,
+      regret,
+      voi,
     });
 
       return {
@@ -1450,13 +1845,13 @@ export class SimulatedAnnealer {
       explanation,
       crewRisk,
       medicalValidation,
-      missionDecision,
+      missionDecision: missionDecisionWithHierarchy,
       replanOptions,
       decisionCosts,
       decisionMonteCarlo,
       decisionNarrative: {
         medicalRisk: explainCrewRisk(crewRisk, medicalValidation),
-        operationalDecision: explainMissionDecision(missionDecision, preferredReplan),
+        operationalDecision: explainMissionDecision(missionDecisionWithHierarchy, preferredReplan),
         financialRecommendation: financiallyPreferred
           ? explainFinancialRecommendation(financiallyPreferred, costBenchmark)
           : 'No financially differentiated replan recommendation was available.',
@@ -1521,6 +1916,53 @@ export class SimulatedAnnealer {
       reentry,
       gravityAssist,
       telemetry,
+      bayesianRisk: {
+        prior: bayesPrior,
+        updates: bayesianUpdates,
+        current: bayesianUpdates[bayesianUpdates.length - 1] ?? null,
+      },
+      anomalies,
+      decisionTree: {
+        tree: decisionTree,
+        evaluation: decisionTreeEvaluation,
+        optimalPolicy,
+      },
+      robustOptimization,
+      constraintRelaxation,
+      sensitivity,
+      robustness,
+      recommendations,
+      coupling,
+      multiMission,
+      inversePlanning,
+      calibration: {
+        ...calibration,
+        appliedParameters: {
+          radiationScale: appliedCalibration.radiationScale ?? 1,
+          communicationScale: appliedCalibration.communicationScale ?? 1,
+          costScale: appliedCalibration.costScale ?? 1,
+        },
+      },
+      phasePolicies,
+      counterfactuals,
+      regret,
+      policySwitch,
+      voi,
+      hierarchy,
+      reportPreview,
+      adaptiveNarrative: {
+        bayesian: bayesianUpdates.length
+          ? explainBayesianRisk({
+              priorRisk: bayesianUpdates[bayesianUpdates.length - 1].priorRisk,
+              posteriorRisk: bayesianUpdates[bayesianUpdates.length - 1].posteriorRisk,
+              confidenceShift: bayesianUpdates[bayesianUpdates.length - 1].confidenceShift,
+              evidence: bayesianUpdates[bayesianUpdates.length - 1].evidence,
+            })
+          : 'No Bayesian risk updates were generated.',
+        decisionTree: explainDecisionTree(optimalPolicy),
+        coupling: explainCoupling(coupling),
+        recommendations: explainRecommendations(recommendations),
+      },
       scenario: {
         type: missionProfile.scenarioType ?? 'NOMINAL',
         summary: applyScenario(missionProfile as Parameters<typeof applyScenario>[0], missionProfile.scenarioType ?? 'NOMINAL').summary,

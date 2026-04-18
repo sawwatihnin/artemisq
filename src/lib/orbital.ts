@@ -48,6 +48,12 @@ export interface TrajectoryPoint {
   time_s?: number;
 }
 
+interface TrajectoryEvent {
+  timeS: number;
+  label: string;
+  step: number;
+}
+
 export interface Planet {
   id: string;
   name: string;
@@ -260,21 +266,20 @@ export function buildEarthMoonTransferTrajectory(
   }
 
   const combined = [...outbound, ...inbound];
-  const n = combined.length;
-  const labels: { idx: number; label: string; step: number }[] = [
-    { idx: 0, label: 'LEO / Departure', step: 1 },
-    { idx: Math.floor(n * 0.12), label: 'TLI', step: 2 },
-    { idx: Math.floor(n * 0.28), label: 'Translunar coast', step: 3 },
-    { idx: Math.floor(n * 0.48), label: 'Lunar approach', step: 4 },
-    { idx: Math.floor(n * 0.62), label: 'NRHO / Gateway', step: 5 },
-    { idx: Math.floor(n * 0.78), label: 'Return coast', step: 6 },
-    { idx: n - 1, label: 'Earth return', step: 7 },
+  const parkingOrbitPeriodS = 2 * Math.PI * Math.sqrt((state0.r[0] ** 2 + state0.r[1] ** 2 + state0.r[2] ** 2) ** 1.5 / MU);
+  const tliTimeS = Math.min(Math.max(900, 0.08 * tofS), 0.45 * tofS, parkingOrbitPeriodS);
+  const totalTimeS = 2 * tofS + stayS;
+  const events: TrajectoryEvent[] = [
+    { timeS: 0, label: 'LEO / Departure', step: 1 },
+    { timeS: tliTimeS, label: 'TLI', step: 2 },
+    { timeS: 0.5 * (tliTimeS + tofS), label: 'Translunar coast', step: 3 },
+    { timeS: 0.92 * tofS, label: 'Lunar approach', step: 4 },
+    { timeS: tofS + 0.35 * stayS, label: 'NRHO / Gateway', step: 5 },
+    { timeS: tofS + stayS + 0.45 * tofS, label: 'Return coast', step: 6 },
+    { timeS: totalTimeS, label: 'Earth return', step: 7 },
   ];
 
-  return combined.map((point, i) => {
-    const key = labels.find((entry) => entry.idx === i);
-    return { ...point, label: key?.label ?? point.label, step: key?.step };
-  });
+  return annotateTrajectoryEvents(combined, events);
 }
 
 function relativeHeliocentricPosition(bodyId: string, date: Date): THREE.Vector3 {
@@ -468,23 +473,40 @@ export function calculateArtemisTrajectory(
   );
 
   const combined = [...outbound, ...inbound.slice(1)];
-  const labels = [
-    { idx: 0, label: 'Launch / Takeoff', step: 1 },
-    { idx: Math.floor(combined.length * 0.12), label: 'Stage Separation', step: 2 },
-    { idx: Math.floor(combined.length * 0.22), label: 'Transfer Burn', step: 3 },
-    { idx: Math.floor(combined.length * 0.48), label: `${destinationBody.name} Encounter`, step: 4 },
-    { idx: Math.floor(combined.length * 0.72), label: 'Return Burn', step: 5 },
-    { idx: Math.floor(combined.length * 0.92), label: 'Entry Interface', step: 6 },
-    { idx: combined.length - 1, label: 'Landing / Splashdown', step: 7 },
+  const outboundDurationS = transferDays * 86400;
+  const inboundDurationS = transferDays * 86400;
+  const totalTimeS = outboundDurationS + inboundDurationS;
+  const events: TrajectoryEvent[] = [
+    { timeS: 0, label: 'Launch / Takeoff', step: 1 },
+    { timeS: 0.08 * outboundDurationS, label: 'Transfer Burn', step: 2 },
+    { timeS: 0.55 * outboundDurationS, label: 'Outbound Cruise', step: 3 },
+    { timeS: outboundDurationS, label: `${destinationBody.name} Encounter`, step: 4 },
+    { timeS: outboundDurationS + 0.06 * inboundDurationS, label: 'Return Burn', step: 5 },
+    { timeS: totalTimeS - 0.08 * inboundDurationS, label: 'Entry Interface', step: 6 },
+    { timeS: totalTimeS, label: 'Landing / Splashdown', step: 7 },
   ];
 
-  return combined.map((point, i) => {
-    const key = labels.find((entry) => entry.idx === i);
-    return {
-      ...point,
-      label: key?.label ?? point.label,
-      step: key?.step,
-    };
+  return annotateTrajectoryEvents(combined, events);
+}
+
+function annotateTrajectoryEvents(points: TrajectoryPoint[], events: TrajectoryEvent[]): TrajectoryPoint[] {
+  const annotations = new Map<number, { label: string; step: number }>();
+  for (const event of events) {
+    let bestIdx = 0;
+    let bestDt = Infinity;
+    for (let i = 0; i < points.length; i++) {
+      const dt = Math.abs((points[i].time_s ?? 0) - event.timeS);
+      if (dt < bestDt) {
+        bestDt = dt;
+        bestIdx = i;
+      }
+    }
+    annotations.set(bestIdx, { label: event.label, step: event.step });
+  }
+
+  return points.map((point, idx) => {
+    const annotation = annotations.get(idx);
+    return annotation ? { ...point, label: annotation.label, step: annotation.step } : point;
   });
 }
 

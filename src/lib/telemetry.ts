@@ -5,6 +5,15 @@ export interface TelemetryPoint {
   radiation: number;
   communicationOpen: boolean;
   riskScore: number;
+  communicationReliability?: number;
+  fuelMultiplier?: number;
+}
+
+export interface TelemetryObservation {
+  radiationReading: number;
+  communicationOpen: boolean;
+  commSignalStrength: number;
+  anomalySignals: string[];
 }
 
 export interface MissionTimelineEvent {
@@ -18,6 +27,26 @@ export interface TelemetryTimeline {
   events: MissionTimelineEvent[];
   peakRadiationIndex: number;
   maxRiskIndex: number;
+}
+
+export function deriveTelemetryObservation(
+  point: TelemetryPoint,
+  previous?: TelemetryPoint,
+): TelemetryObservation {
+  const anomalySignals: string[] = [];
+
+  if (!point.communicationOpen) anomalySignals.push('COMM_LOSS');
+  if ((point.fuelMultiplier ?? 1) > 1.08) anomalySignals.push('PROPULSION_DEVIATION');
+  if (point.radiation > 1 || (previous && point.radiation - previous.radiation > 0.25)) {
+    anomalySignals.push('RADIATION_SPIKE');
+  }
+
+  return {
+    radiationReading: point.radiation,
+    communicationOpen: point.communicationOpen,
+    commSignalStrength: point.communicationOpen ? (point.communicationReliability ?? 0.85) : 0.1,
+    anomalySignals,
+  };
 }
 
 export function simulateMissionTimeline(

@@ -134,3 +134,36 @@ export function explainFinancialRecommendation(
   }
   return `${preferred.optionName} offers the strongest risk-reduction-per-cost ratio (${preferred.recommendationValueScore.toExponential(2)}) in the current decision set.`;
 }
+
+export function explainBayesianRisk(update: {
+  priorRisk: number;
+  posteriorRisk: number;
+  confidenceShift: number;
+  evidence?: string[];
+}): string {
+  const evidence = update.evidence?.length
+    ? ` Evidence: ${update.evidence.join(', ')}.`
+    : '';
+  return `Bayesian risk updated from ${update.priorRisk.toFixed(2)} to ${update.posteriorRisk.toFixed(2)} with confidence shift ${update.confidenceShift >= 0 ? '+' : ''}${update.confidenceShift.toFixed(2)}.${evidence}`;
+}
+
+export function explainDecisionTree(policy: {
+  sequence: string[];
+  expectedRisk: number;
+  expectedCost: number;
+}): string {
+  return `Sequential policy ${policy.sequence.join(' -> ')} yields expected risk ${policy.expectedRisk.toFixed(2)} and expected cost ${policy.expectedCost.toFixed(1)} across the current planning horizon.`;
+}
+
+export function explainCoupling(coupling: {
+  aggregate: { deltaVShift_ms: number; costShift: number; radiationRiskShift: number; durationShiftHours: number };
+}): string {
+  return `Cross-system coupling projects delta-v shift ${coupling.aggregate.deltaVShift_ms.toFixed(0)} m/s, cost shift ${coupling.aggregate.costShift.toFixed(0)}, radiation-risk shift ${coupling.aggregate.radiationRiskShift.toFixed(2)}, and duration shift ${coupling.aggregate.durationShiftHours.toFixed(1)} h.`;
+}
+
+export function explainRecommendations(recommendation: {
+  rationale: string[];
+  recommendedPolicy: { profile: string; shieldingMassKg: number; launchDelayHours: number };
+}): string {
+  return `Recommended policy is ${recommendation.recommendedPolicy.profile.toLowerCase()} with shielding ${recommendation.recommendedPolicy.shieldingMassKg.toFixed(0)} kg and launch delay ${recommendation.recommendedPolicy.launchDelayHours.toFixed(0)} h. ${recommendation.rationale.join(' ')}`;
+}

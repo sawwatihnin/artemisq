@@ -1,4 +1,5 @@
 import type { CrewRadiationReadiness } from './crewRisk';
+import type { AnomalyAssessment } from './fdi';
 
 export type MissionDecision = 'CONTINUE' | 'REPLAN' | 'ABORT';
 export type UrgencyLevel = 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL';
@@ -21,6 +22,8 @@ export interface MissionDecisionParams {
   missionProgress?: number;
   forecastRemainingRisk?: number;
   alternateCorridorAvailable?: boolean;
+  bayesianRiskPosterior?: number;
+  anomalyAssessment?: AnomalyAssessment | null;
 }
 
 export interface MissionDecisionResult {
@@ -29,6 +32,24 @@ export interface MissionDecisionResult {
   rationale: string;
   candidateActions: string[];
   expectedRiskReduction: number;
+  posteriorRisk?: number;
+  triggers?: string[];
+  hierarchicalDecision?: {
+    lowLevelAction: string;
+    midLevelDecision: string;
+    highLevelDecision: MissionDecision;
+  };
+}
+
+export function withHierarchicalDecision(
+  decision: MissionDecisionResult,
+  hierarchy: NonNullable<MissionDecisionResult['hierarchicalDecision']>,
+): MissionDecisionResult {
+  return {
+    ...decision,
+    hierarchicalDecision: hierarchy,
+    candidateActions: [...decision.candidateActions, hierarchy.lowLevelAction, hierarchy.midLevelDecision],
+  };
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -114,18 +135,34 @@ export function evaluateMissionDecision(
   const communicationStability = params.communicationStability ?? 0.8;
   const missionProgress = params.missionProgress ?? 0;
   const alternateCorridorAvailable = params.alternateCorridorAvailable ?? false;
+  const posteriorRisk = params.bayesianRiskPosterior ?? crewRisk.riskScore;
+  const anomalyAssessment = params.anomalyAssessment;
 
   const severeAcute = crewRisk.peakExposure >= acuteThreshold;
-  const excessiveForecast = forecastRemainingRisk >= continuationRiskThreshold;
+  const excessiveForecast = Math.max(forecastRemainingRisk, posteriorRisk) >= continuationRiskThreshold;
+  const anomalySeverity = anomalyAssessment?.severity;
+  const anomalyDrivenAction = anomalySeverity === 'CRITICAL' || anomalySeverity === 'HIGH';
 
   let decision: MissionDecision = 'CONTINUE';
   let urgencyLevel: UrgencyLevel = 'LOW';
   const candidateActions: string[] = [];
+  const triggers: string[] = [];
+
+  if (posteriorRisk > crewRisk.riskScore + 0.08) {
+    triggers.push(`Bayesian posterior risk increased to ${posteriorRisk.toFixed(2)}`);
+  }
+  if (anomalyAssessment && anomalyAssessment.anomalyType !== 'NONE') {
+    triggers.push(`${anomalyAssessment.anomalyType} detected with ${anomalyAssessment.severity.toLowerCase()} severity`);
+  }
 
   if (crewRisk.embarkationDecision === 'DO_NOT_EMBARK' && missionProgress <= 0.05) {
     decision = alternateCorridorAvailable ? 'REPLAN' : 'ABORT';
     urgencyLevel = severeAcute ? 'CRITICAL' : 'HIGH';
     candidateActions.push(alternateCorridorAvailable ? 'Delay launch and shift to lower-radiation corridor' : 'Hold mission and preserve crew on ground');
+  } else if (anomalyDrivenAction) {
+    decision = alternateCorridorAvailable ? 'REPLAN' : (returnFeasibility >= 0.58 ? 'ABORT' : 'REPLAN');
+    urgencyLevel = anomalySeverity === 'CRITICAL' ? 'CRITICAL' : 'HIGH';
+    candidateActions.push(anomalyAssessment?.recommendedAction ?? 'Investigate anomaly and re-evaluate corridor');
   } else if (severeAcute || excessiveForecast) {
     if (alternateCorridorAvailable && communicationStability >= 0.55) {
       decision = 'REPLAN';
@@ -151,18 +188,20 @@ export function evaluateMissionDecision(
     decision,
     urgencyLevel,
     rationale: generateDecisionRationale(decision, {
-      crewRiskScore: crewRisk.riskScore,
+      crewRiskScore: Math.max(crewRisk.riskScore, posteriorRisk),
       peakExposure: crewRisk.peakExposure,
-      forecastRemainingRisk,
+      forecastRemainingRisk: Math.max(forecastRemainingRisk, posteriorRisk),
       returnFeasibility,
       communicationStability,
       missionProgress,
     }),
     candidateActions,
+    posteriorRisk,
+    triggers,
     expectedRiskReduction: decision === 'CONTINUE'
       ? 0
       : decision === 'REPLAN'
-        ? clamp(crewRisk.riskScore - Math.max(0.2, forecastRemainingRisk * 0.75), 0, 1.5)
-        : clamp(crewRisk.riskScore, 0, 1.5),
+        ? clamp(Math.max(crewRisk.riskScore, posteriorRisk) - Math.max(0.2, forecastRemainingRisk * 0.75), 0, 1.5)
+        : clamp(Math.max(crewRisk.riskScore, posteriorRisk), 0, 1.5),
   };
 }
