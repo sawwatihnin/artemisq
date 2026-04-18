@@ -254,6 +254,31 @@ interface OptimizationResult {
     missionPlans: Array<{ name: string; funded: boolean; portfolioScore: number }>;
     tradeoffs: string[];
   };
+  digitalTwin?: {
+    summary: { meanResidual: number; maxResidual: number; driftDetected: boolean; health: 'TRACKING' | 'WATCH' | 'OFF_NOMINAL' };
+    recommendation: string;
+    residuals: Array<{
+      timeIndex: number;
+      nodeName: string;
+      predictedRadiation: number;
+      observedRadiation: number;
+      predictedCommunication: number;
+      observedCommunication: number;
+      predictedRisk: number;
+      observedRisk: number;
+      residualScore: number;
+      status: 'TRACKING' | 'WATCH' | 'OFF_NOMINAL';
+    }>;
+  };
+  missionCommand?: {
+    entries: Array<{
+      timeIndex: number;
+      title: string;
+      severity: 'INFO' | 'WATCH' | 'ALERT';
+      detail: string;
+      source: 'telemetry' | 'bayes' | 'digital_twin' | 'decision' | 'policy';
+    }>;
+  };
   adaptiveNarrative?: {
     bayesian: string;
     decisionTree: string;
@@ -2039,6 +2064,68 @@ export default function App() {
                         ))}
                       </div>
                     ) : null}
+                  </DashboardCard>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DashboardCard title="Digital Twin" icon={Gauge} provenance="formula">
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <MetricBadge
+                          label="Twin Health"
+                          value={optResult.digitalTwin?.summary.health ?? '--'}
+                          unit="residual state"
+                          tone={optResult.digitalTwin?.summary.health === 'TRACKING' ? 'good' : optResult.digitalTwin?.summary.health === 'WATCH' ? 'warn' : 'bad'}
+                        />
+                        <MetricBadge label="Residual Mean" value={optResult.digitalTwin?.summary.meanResidual.toFixed(2) ?? '--'} unit="normalized" tone="warn" />
+                        <MetricBadge label="Residual Max" value={optResult.digitalTwin?.summary.maxResidual.toFixed(2) ?? '--'} unit="normalized" tone={(optResult.digitalTwin?.summary.maxResidual ?? 0) > 0.45 ? 'bad' : 'warn'} />
+                        <MetricBadge label="Calibration Gain" value={optResult.calibration?.errorReduction.toFixed(2) ?? '--'} unit="RMSE reduction" tone="good" />
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                        <p>{optResult.digitalTwin?.recommendation ?? 'Digital twin assessment unavailable.'}</p>
+                        {optResult.calibration ? (
+                          <p className="mt-2">
+                            Applied calibration:
+                            {' '}rad {optResult.calibration.appliedParameters.radiationScale.toFixed(2)}
+                            {' '}| comm {optResult.calibration.appliedParameters.communicationScale.toFixed(2)}
+                            {' '}| cost {optResult.calibration.appliedParameters.costScale.toFixed(2)}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="space-y-2">
+                        {(optResult.digitalTwin?.residuals ?? []).slice(0, 4).map((residual, index) => (
+                          <div key={`${residual.nodeName}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                            <div className="flex items-center justify-between">
+                              <span>{residual.nodeName}</span>
+                              <StatusPill value={residual.status} tone={residual.status === 'TRACKING' ? 'good' : residual.status === 'WATCH' ? 'warn' : 'bad'} />
+                            </div>
+                            <p className="mt-1">
+                              Rad {residual.predictedRadiation.toFixed(2)} → {residual.observedRadiation.toFixed(2)}
+                              {' '}| Comm {(residual.predictedCommunication * 100).toFixed(0)}% → {(residual.observedCommunication * 100).toFixed(0)}%
+                              {' '}| Risk {residual.predictedRisk.toFixed(2)} → {residual.observedRisk.toFixed(2)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Mission Command" icon={AlertTriangle} provenance="formula">
+                    <div className="space-y-2">
+                      {(optResult.missionCommand?.entries ?? []).slice(0, 8).map((entry, index) => (
+                        <div key={`${entry.title}-${index}`} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-slate-200">{entry.title}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="uppercase tracking-[0.12em] text-slate-500">t+{entry.timeIndex}</span>
+                              <StatusPill value={entry.severity} tone={entry.severity === 'INFO' ? 'good' : entry.severity === 'WATCH' ? 'warn' : 'bad'} />
+                            </div>
+                          </div>
+                          <p className="mt-1">{entry.detail}</p>
+                          <p className="mt-1 uppercase tracking-[0.12em] text-slate-500">{entry.source.replace('_', ' ')}</p>
+                        </div>
+                      ))}
+                    </div>
                   </DashboardCard>
                 </div>
               </>

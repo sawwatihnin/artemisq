@@ -6,6 +6,8 @@ export interface VOIAction {
 export interface VOIDataBranch {
   probability: number;
   bestUtilityAfterObservation: number;
+  delayHours?: number;
+  acquisitionCost?: number;
 }
 
 export interface VOIResult {
@@ -17,7 +19,9 @@ export function computeVOI(
   currentDecision: VOIAction,
   potentialData: VOIDataBranch[],
 ): VOIResult {
-  const expectedUtilityWithData = potentialData.reduce((sum, branch) => sum + branch.probability * branch.bestUtilityAfterObservation, 0);
+  const expectedUtilityWithData = potentialData.reduce((sum, branch) => (
+    sum + branch.probability * (branch.bestUtilityAfterObservation - (branch.acquisitionCost ?? 0) - 0.35 * (branch.delayHours ?? 0))
+  ), 0);
   const valueOfWaiting = expectedUtilityWithData - currentDecision.expectedUtility;
   return {
     valueOfWaiting,

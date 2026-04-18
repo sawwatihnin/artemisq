@@ -89,6 +89,8 @@ import { evaluatePolicySwitch, type PolicySwitchResult } from './policySwitch';
 import { computeVOI, type VOIResult } from './voi';
 import { evaluateHierarchicalDecision, type HierarchicalDecision } from './hierarchy';
 import { generateMissionReport, type MissionReport } from './report';
+import { buildDigitalTwinAssessment, type DigitalTwinAssessment } from './digitalTwin';
+import { buildMissionCommandTimeline, type MissionCommandTimeline } from './missionCommand';
 
 export interface OptimizerNode {
   id: string;
@@ -332,6 +334,8 @@ export interface OptimizationResult {
   voi: VOIResult;
   hierarchy: HierarchicalDecision;
   reportPreview: MissionReport;
+  digitalTwin: DigitalTwinAssessment;
+  missionCommand: MissionCommandTimeline;
   adaptiveNarrative: {
     bayesian: string;
     decisionTree: string;
@@ -1650,14 +1654,28 @@ export class SimulatedAnnealer {
       baselineCost: financiallyPreferred?.riskAdjustedCost ?? stochastic.expectedCost,
       baselineRadiationRisk: crewRisk.riskScore,
     });
+    const digitalTwin = buildDigitalTwinAssessment(
+      bestCost.timeline.map((point) => ({
+        t: point.t,
+        nodeId: point.nodeId,
+        nodeName: point.nodeName,
+        radiation: point.radiation,
+        communicationOpen: point.communicationOpen,
+        communicationReliability: point.communicationReliability,
+        fuelMultiplier: point.fuelMultiplier,
+        riskScore: point.riskScore,
+      })),
+      stochastic,
+      bayesianUpdates,
+    );
     const calibration = calibrateModel({
       radiation: bestCost.timeline.map((point, index) => ({
         predicted: point.radiation,
-        observed: point.radiation * (1 + 0.02 * Math.sin(index + 1)),
+        observed: digitalTwin.residuals[index]?.observedRadiation ?? point.radiation,
       })),
       communication: bestCost.timeline.map((point) => ({
         predicted: point.communicationReliability,
-        observed: point.communicationReliability * (point.communicationOpen ? 1.02 : 0.9),
+        observed: digitalTwin.residuals[point.t]?.observedCommunication ?? point.communicationReliability,
       })),
       cost: stochastic.samples.slice(0, 20).map((sample) => ({
         predicted: bestCost.total,
@@ -1694,6 +1712,11 @@ export class SimulatedAnnealer {
       baselineRisk: crewRisk.riskScore,
       baselineCost: stochastic.expectedCost,
       baselineSuccessProbability: stochastic.successProbability,
+      baselineDeltaV_ms: totalDeltaV,
+      baselineCommunication: communicationStability,
+      spacecraftMassKg: this.spacecraft_mass_kg,
+      habitatAreaM2: missionProfile.habitatAreaM2,
+      isp_s: this.isp_s,
       delayedLaunchHours: recommendations.recommendedPolicy.launchDelayHours,
       increasedShieldingKg: recommendations.recommendedPolicy.shieldingMassKg,
       alternateRouteRisk: preferredReplan?.newTotalMissionRisk,
@@ -1734,12 +1757,26 @@ export class SimulatedAnnealer {
       },
       launchWindows.slice(0, 3).map((window) => ({
         probability: 1 / Math.max(launchWindows.slice(0, 3).length, 1),
-        bestUtilityAfterObservation: 100 * Math.max(0.4, 1 - window.score / 2) - 70 * (window.radiationExposure / Math.max(crewRisk.cumulativeDose, 1)) - 0.0000012 * window.deltaV_ms * 10000,
+        bestUtilityAfterObservation:
+          100 * Math.max(0.4, 1 - window.score / 2) +
+          12 * window.communicationAvailability -
+          70 * (window.radiationExposure / Math.max(crewRisk.cumulativeDose, 1)) -
+          0.0000012 * window.deltaV_ms * 10000,
+        delayHours: window.window.offsetHours,
+        acquisitionCost: window.window.offsetHours * 95_000,
       })),
     );
     const inversePlanning = optimizeForTargetOutcome({
       targetRisk: missionProfile.inverseTargetRisk ?? Math.min(0.55, crewRisk.riskScore * 0.82),
       targetCost: missionProfile.inverseTargetCost ?? stochastic.expectedCost,
+      baseRisk: crewRisk.riskScore,
+      baseCost: stochastic.expectedCost,
+      baseSuccessProbability: stochastic.successProbability,
+      baseDeltaV_ms: totalDeltaV,
+      spacecraftMassKg: this.spacecraft_mass_kg,
+      habitatAreaM2: missionProfile.habitatAreaM2,
+      isp_s: this.isp_s,
+      launchWindows,
       maxShieldingKg: 520,
       maxLaunchDelayHours: 36,
     });
@@ -1800,6 +1837,13 @@ export class SimulatedAnnealer {
       counterfactuals,
       regret,
       voi,
+    });
+    const missionCommand = buildMissionCommandTimeline({
+      telemetry,
+      bayesianUpdates,
+      digitalTwin,
+      missionDecision: missionDecisionWithHierarchy,
+      policySwitch,
     });
 
       return {
@@ -1950,6 +1994,8 @@ export class SimulatedAnnealer {
       voi,
       hierarchy,
       reportPreview,
+      digitalTwin,
+      missionCommand,
       adaptiveNarrative: {
         bayesian: bayesianUpdates.length
           ? explainBayesianRisk({

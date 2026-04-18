@@ -1,8 +1,49 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Grid, OrbitControls, Sparkles, Stars, Text } from '@react-three/drei';
+import { Grid, OrbitControls, Sparkles, Text } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStlVizGeometry } from '../lib/useStlVizGeometry';
+
+const ASCENT_BG = '#f4f5f7';
+const TRAJ_LINE_OPACITY = 0.55;
+
+/** Pitch is degrees from vertical; freestream (air motion) opposes rocket velocity in the 2D mission plane (X downrange, Y up). */
+function freestreamDirectionWorld(pitchDeg: number, out: THREE.Vector3): THREE.Vector3 {
+  const r = (pitchDeg * Math.PI) / 180;
+  return out.set(-Math.sin(r), -Math.cos(r), 0).normalize();
+}
+
+function updateAeroVertexColors(
+  geom: THREE.BufferGeometry,
+  stress: number[] | undefined,
+  flowWorldUnit: THREE.Vector3,
+  mach: number,
+  qNorm: number,
+  meshWorldMat: THREE.Matrix4,
+  scratchN: THREE.Vector3,
+): void {
+  const posAttr = geom.attributes.position as THREE.BufferAttribute | undefined;
+  const norAttr = geom.attributes.normal as THREE.BufferAttribute | undefined;
+  const colAttr = geom.attributes.color as THREE.BufferAttribute | undefined;
+  if (!posAttr || !norAttr || !colAttr) return;
+
+  const n3 = new THREE.Matrix3();
+  n3.getNormalMatrix(meshWorldMat);
+  const transonic = mach > 0.88 && mach < 1.22 ? 1 : 0;
+  const count = posAttr.count;
+  const stressLen = stress?.length ?? 0;
+  const stressOk = stressLen === count;
+
+  for (let i = 0; i < count; i++) {
+    scratchN.fromBufferAttribute(norAttr, i).applyNormalMatrix(n3).normalize();
+    const headOn = Math.max(0, -scratchN.dot(flowWorldUnit));
+    const st = stressOk ? (stress![i] ?? 0.12) : 0.12;
+    const risk = Math.min(1, st * 0.52 + headOn * 0.48 + transonic * 0.2 + qNorm * 0.28);
+    const c = new THREE.Color().setHSL(0.56 - risk * 0.52, 0.72, 0.52 - risk * 0.08);
+    colAttr.setXYZ(i, c.r, c.g, c.b);
+  }
+  colAttr.needsUpdate = true;
+}
 
 export interface AscentVizStep {
   time: number;
@@ -44,7 +85,7 @@ function ColoredTrajectoryLine({ points, colors }: { points: THREE.Vector3[]; co
     }
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    const mat = new THREE.LineBasicMaterial({ vertexColors: true });
+    const mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: TRAJ_LINE_OPACITY });
     return new THREE.Line(geom, mat);
   }, [points, colors]);
 
@@ -119,7 +160,7 @@ function DragArrowLive({
   const lineObj = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-    const m = new THREE.LineBasicMaterial({ color: '#f97316', transparent: true, opacity: 0.85 });
+    const m = new THREE.LineBasicMaterial({ color: '#c2410c', transparent: true, opacity: 0.9 });
     return new THREE.Line(g, m);
   }, []);
 
@@ -238,8 +279,13 @@ function TrajectoryScene({
 
   const matRef = useRef<THREE.MeshStandardMaterial>(null);
   const stlMatRef = useRef<THREE.MeshStandardMaterial>(null);
+  const stlMeshRef = useRef<THREE.Mesh>(null);
   const vehicleGroupRef = useRef<THREE.Group>(null);
+  const windSheetsRef = useRef<THREE.Group>(null);
   const plumeRef = useRef<THREE.Mesh>(null);
+  const scratchFlow = useRef(new THREE.Vector3());
+  const scratchN = useRef(new THREE.Vector3());
+  const colorFrame = useRef(0);
 
   const meshBasis = useMemo(() => {
     if (!stlGeometry) return { center: new THREE.Vector3(), scale: 1 };
@@ -250,7 +296,9 @@ function TrajectoryScene({
     const size = new THREE.Vector3();
     box.getSize(size);
     const maxD = Math.max(size.x, size.y, size.z, 1e-6);
-    return { center: c, scale: 24 / maxD };
+    const fit = 26 / maxD;
+    const scale = THREE.MathUtils.clamp(fit, 0.04, 220);
+    return { center: c, scale };
   }, [stlGeometry]);
 
   const axisEuler = useMemo(() => {
@@ -259,10 +307,21 @@ function TrajectoryScene({
     return [0, 0, 0] as [number, number, number];
   }, [principalAxis]);
 
+  const windStreakLayout = useMemo(
+    () =>
+      Array.from({ length: 40 }, (_, i) => ({
+        x: ((i % 8) - 3.5) * 14,
+        y: -130 + (i % 11) * 26,
+        z: (Math.floor(i / 8) - 2) * 16,
+        len: 10 + (i % 6) * 2.5,
+      })),
+    [],
+  );
+
   useFrame((_, delta) => {
-    if (playing && steps.length > 1) {
+    if (playing && steps.length > 0) {
       playheadRef.current += delta * 0.42;
-      if (playheadRef.current >= steps.length - 1) playheadRef.current = 0;
+      if (steps.length > 1 && playheadRef.current >= steps.length - 1) playheadRef.current = 0;
     }
 
     const s = interpolateAscentStep(steps, playheadRef.current);
@@ -288,8 +347,32 @@ function TrajectoryScene({
       matRef.current.emissiveIntensity = 0.4 + qn * 1.05 + s.stress * 0.55;
     }
     if (stlMatRef.current) {
-      stlMatRef.current.emissive.setHSL(0.55 - qn * 0.35, 0.75, 0.12 + qn * 0.45 + s.stress * 0.22);
-      stlMatRef.current.emissiveIntensity = 0.25 + qn * 1.15 + s.stress * 0.65;
+      stlMatRef.current.emissive.setHSL(0.52 - qn * 0.32, 0.65, 0.08 + qn * 0.35 + s.stress * 0.18);
+      stlMatRef.current.emissiveIntensity = 0.12 + qn * 0.65 + s.stress * 0.45;
+    }
+
+    const flow = freestreamDirectionWorld(s.pitch, scratchFlow.current);
+    if (windSheetsRef.current) {
+      windSheetsRef.current.position.set(x, y, z);
+      const up = new THREE.Vector3(0, 1, 0);
+      if (up.distanceToSquared(flow) < 1e-8) {
+        windSheetsRef.current.quaternion.identity();
+      } else {
+        windSheetsRef.current.quaternion.setFromUnitVectors(up, flow);
+      }
+      const streamSpeed = 38 + s.mach * 42;
+      for (const child of windSheetsRef.current.children) {
+        child.position.y += delta * streamSpeed;
+        if (child.position.y > 95) child.position.y = -140;
+      }
+    }
+
+    colorFrame.current += 1;
+    const vCount = vizGeom ? ((vizGeom.attributes.position as THREE.BufferAttribute)?.count ?? 0) : 0;
+    const colorStride = vCount > 65_000 ? 6 : 3;
+    if (vizGeom && stlMeshRef.current && colorFrame.current % colorStride === 0) {
+      stlMeshRef.current.updateMatrixWorld(true);
+      updateAeroVertexColors(vizGeom, stressPerVertex, flow, s.mach, qn, stlMeshRef.current.matrixWorld, scratchN.current);
     }
 
     if (plumeRef.current) {
@@ -309,61 +392,74 @@ function TrajectoryScene({
 
   const plumeY = -12 * (stlGeometry ? meshBasis.scale : 1.15);
 
-  if (points.length < 2) return null;
+  const showTrajectory = points.length >= 2;
 
   return (
     <>
-      <color attach="background" args={['#030712']} />
-      <fog attach="fog" args={['#030712', 280, 920]} />
-      <Stars radius={420} depth={52} count={1600} factor={3} saturation={0} fade speed={0.3} />
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[120, 180, 80]} intensity={1.05} color="#fff8f0" />
-      <directionalLight position={[-60, 40, 120]} intensity={0.35} color="#38bdf8" />
-      <pointLight position={[200, 100, 60]} intensity={0.45} color="#fbbf24" distance={800} decay={2} />
+      <color attach="background" args={[ASCENT_BG]} />
+      <fog attach="fog" args={['#e8e9ec', 320, 980]} />
+      <ambientLight intensity={0.82} />
+      <directionalLight position={[120, 180, 80]} intensity={0.95} color="#ffffff" />
+      <directionalLight position={[-80, 60, 140]} intensity={0.42} color="#dbeafe" />
+      <pointLight position={[200, 100, 60]} intensity={0.35} color="#fef3c7" distance={900} decay={2} />
 
       <Grid
         args={[240, 240]}
         cellSize={14}
-        cellThickness={0.6}
-        cellColor="#1e3a5f"
+        cellThickness={0.45}
+        cellColor="#c5cad4"
         sectionSize={42}
-        sectionThickness={1.1}
-        sectionColor="#2d4a6f"
+        sectionThickness={0.85}
+        sectionColor="#9ca3b0"
         fadeDistance={620}
         fadeStrength={1}
         position={[110, 40, -12]}
         rotation={[Math.PI / 2, 0, 0]}
       />
 
-      <ColoredTrajectoryLine points={points} colors={colors} />
+      {showTrajectory ? <ColoredTrajectoryLine points={points} colors={colors} /> : null}
 
       <mesh position={[mq.x, mq.y, 0.5]}>
         <sphereGeometry args={[2.6, 18, 18]} />
         <meshBasicMaterial color="#f59e0b" />
       </mesh>
-      <Text position={[mq.x + 10, mq.y + 12, 0]} fontSize={7} color="#fcd34d" anchorX="left" anchorY="middle">
+      <Text position={[mq.x + 10, mq.y + 12, 0]} fontSize={7} color="#b45309" anchorX="left" anchorY="middle">
         Max Q
       </Text>
       <mesh position={[meco.x, meco.y, 0.5]}>
         <sphereGeometry args={[2.6, 18, 18]} />
         <meshBasicMaterial color="#38bdf8" />
       </mesh>
-      <Text position={[meco.x + 10, meco.y - 12, 0]} fontSize={7} color="#7dd3fc" anchorX="left" anchorY="middle">
+      <Text position={[meco.x + 10, meco.y - 12, 0]} fontSize={7} color="#0369a1" anchorX="left" anchorY="middle">
         MECO
       </Text>
+
+      <group ref={windSheetsRef}>
+        {windStreakLayout.map((w, i) => (
+          <mesh key={i} position={[w.x, w.y, w.z]}>
+            <boxGeometry args={[w.len, 0.09, 0.09]} />
+            <meshBasicMaterial color="#7dd3fc" transparent opacity={0.35} depthWrite={false} />
+          </mesh>
+        ))}
+      </group>
 
       <group ref={vehicleGroupRef}>
         <group rotation={axisEuler}>
           {vizGeom ? (
             <group scale={[meshBasis.scale, meshBasis.scale, meshBasis.scale]}>
-              <mesh geometry={vizGeom} position={[-meshBasis.center.x, -meshBasis.center.y, -meshBasis.center.z]}>
+              <mesh
+                ref={stlMeshRef}
+                geometry={vizGeom}
+                position={[-meshBasis.center.x, -meshBasis.center.y, -meshBasis.center.z]}
+              >
                 <meshStandardMaterial
                   ref={stlMatRef}
                   vertexColors
-                  metalness={0.42}
-                  roughness={0.38}
-                  emissive="#0c1220"
-                  emissiveIntensity={0.2}
+                  metalness={0.28}
+                  roughness={0.48}
+                  side={THREE.DoubleSide}
+                  emissive="#e2e8f0"
+                  emissiveIntensity={0.08}
                 />
               </mesh>
             </group>
@@ -479,16 +575,16 @@ export function AscentDynamicsVisualizer({
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-2">
-      <div className="relative h-[560px] w-full min-h-[560px] overflow-hidden rounded-xl border border-slate-800 bg-[#030712]">
+      <div className="relative h-[560px] w-full min-h-[560px] overflow-hidden rounded-xl border border-slate-300 bg-[#f4f5f7]">
         <Canvas
           className="!h-full !w-full"
           gl={{ antialias: true, alpha: false }}
           camera={{ fov: 40, near: 0.35, far: 9000, position: [45, 118, 210] }}
           onCreated={({ gl }) => {
-            gl.setClearColor('#030712');
+            gl.setClearColor(ASCENT_BG);
           }}
         >
-          {steps.length > 1 ? (
+          {steps.length >= 1 ? (
             <TrajectoryScene
               steps={steps}
               maxQIndex={maxQIndex}
@@ -517,24 +613,26 @@ export function AscentDynamicsVisualizer({
             target={[110, 80, 0]}
             makeDefault
           />
-          <Text position={[-42, 218, 0]} fontSize={7.5} color="#94a3b8" anchorX="left" anchorY="top">
+          <Text position={[-42, 218, 0]} fontSize={7.5} color="#475569" anchorX="left" anchorY="top">
             Altitude (km)
           </Text>
-          <Text position={[238, -14, 0]} fontSize={7.5} color="#94a3b8" anchorX="left" anchorY="middle">
+          <Text position={[238, -14, 0]} fontSize={7.5} color="#475569" anchorX="left" anchorY="middle">
             Downrange (km)
           </Text>
         </Canvas>
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-between gap-2 bg-gradient-to-t from-black/55 to-transparent px-3 pb-3 pt-10">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-between gap-2 bg-gradient-to-t from-white/90 to-transparent px-3 pb-3 pt-10">
           <div className="pointer-events-auto flex flex-wrap items-center gap-2">
             <button
               type="button"
-              className="rounded border border-slate-600 bg-slate-900/95 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-sky-200"
+              className="rounded border border-slate-400 bg-white/95 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-sky-800 shadow-sm"
               onClick={() => setPlaying((p) => !p)}
             >
               {playing ? 'Pause' : 'Play'}
             </button>
-            <span className="text-[10px] text-slate-500">
-              {stlGeometry ? 'Your STL · vertex tint = mesh stress heuristic; glow = q + load' : 'Placeholder stack · upload STL for your mesh'}
+            <span className="text-[10px] text-slate-600">
+              {stlGeometry
+                ? 'Freestream follows flight pitch (deg from vertical). Hot colors ≈ stagnation + mesh load + transonic/q — not CFD.'
+                : 'Placeholder stack · upload STL for your mesh'}
             </span>
           </div>
         </div>
@@ -607,7 +705,7 @@ export function AscentDynamicsVisualizer({
       </div>
 
       <p className="text-[10px] leading-relaxed text-slate-500">
-        Animated vehicle follows the trajectory; camera eases toward the craft. Vertex colors on the STL encode static panel-stress heuristic; emissive pulsing tracks q and structural load proxy through ascent.
+        Simulated airflow aligns with the solver’s relative-wind direction from pitch (vertical at liftoff, tilting with gravity turn). The STL is tinted by a reduced-order risk field: panel-stress heuristic, local windward exposure, transonic band, and dynamic pressure — illustrative only.
       </p>
     </div>
   );

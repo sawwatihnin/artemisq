@@ -1,3 +1,6 @@
+import { computeCoupledEffects } from './coupling';
+import { computeMassPenalty, computeShieldingEffect } from './shielding';
+
 export interface CounterfactualScenario {
   name: string;
   deltaRisk: number;
@@ -15,6 +18,11 @@ export interface CounterfactualParams {
   baselineRisk: number;
   baselineCost: number;
   baselineSuccessProbability: number;
+  baselineDeltaV_ms?: number;
+  baselineCommunication?: number;
+  spacecraftMassKg?: number;
+  habitatAreaM2?: number;
+  isp_s?: number;
   delayedLaunchHours?: number;
   increasedShieldingKg?: number;
   alternateRouteRisk?: number;
@@ -27,27 +35,46 @@ export function generateCounterfactuals(
 ): CounterfactualResult {
   const delayedLaunchHours = params.delayedLaunchHours ?? 12;
   const increasedShieldingKg = params.increasedShieldingKg ?? 120;
+  const baselineDeltaV_ms = params.baselineDeltaV_ms ?? 3800;
+  const baselineCommunication = params.baselineCommunication ?? 0.82;
+  const spacecraftMassKg = params.spacecraftMassKg ?? 5000;
+  const habitatAreaM2 = params.habitatAreaM2 ?? 18;
+  const isp_s = params.isp_s ?? 450;
+  const shielding = computeShieldingEffect(increasedShieldingKg, { habitatAreaM2 });
+  const shieldingMassPenalty = computeMassPenalty(increasedShieldingKg, {
+    spacecraftMassKg,
+    baseDeltaV_ms: baselineDeltaV_ms,
+    isp_s,
+  });
+  const coupling = computeCoupledEffects({
+    shieldingMassKg: increasedShieldingKg,
+    launchDelayHours: delayedLaunchHours,
+    replanCount: params.alternateRouteRisk != null ? 1 : 0,
+    baselineDeltaV_ms,
+    baselineCost: params.baselineCost,
+    baselineRadiationRisk: params.baselineRisk,
+  });
   const scenarios: CounterfactualScenario[] = [
     {
       name: 'Delayed launch',
-      deltaRisk: -0.003 * delayedLaunchHours,
-      deltaCost: 1_800_000 * (delayedLaunchHours / 6),
-      deltaSuccessProbability: 0.012 * (delayedLaunchHours / 6),
-      explanation: `Waiting ${delayedLaunchHours} hours reduces projected environmental forcing at modest schedule cost.`,
+      deltaRisk: coupling.aggregate.radiationRiskShift * 0.35,
+      deltaCost: delayedLaunchHours * 95_000 + Math.max(0, coupling.aggregate.costShift * 0.08),
+      deltaSuccessProbability: 0.015 * (delayedLaunchHours / 6) * Math.max(0.4, baselineCommunication),
+      explanation: `Waiting ${delayedLaunchHours} hours shifts the launch geometry and communication alignment, changing risk through time-of-departure and forcing conditions.`,
     },
     {
       name: 'Increased shielding',
-      deltaRisk: -0.0009 * increasedShieldingKg,
-      deltaCost: 240_000 * increasedShieldingKg,
-      deltaSuccessProbability: 0.008,
-      explanation: `Additional shielding of ${increasedShieldingKg} kg lowers absorbed dose but raises mass-driven mission cost.`,
+      deltaRisk: -params.baselineRisk * shielding.shieldingFactor,
+      deltaCost: shieldingMassPenalty.equivalentPropellantKg * 7_500 + increasedShieldingKg * 18_000,
+      deltaSuccessProbability: 0.012 - 0.018 * shieldingMassPenalty.massRatio,
+      explanation: `Additional shielding of ${increasedShieldingKg} kg lowers absorbed dose through areal-density attenuation, but the added mass raises equivalent propellant demand.`,
     },
     {
       name: 'Alternate route',
       deltaRisk: (params.alternateRouteRisk ?? params.baselineRisk * 0.82) - params.baselineRisk,
       deltaCost: (params.alternateRouteCost ?? params.baselineCost * 1.07) - params.baselineCost,
-      deltaSuccessProbability: 0.03,
-      explanation: 'Route diversification changes both exposure geometry and operational complexity.',
+      deltaSuccessProbability: Math.max(-0.04, 0.03 - 0.02 * Math.max(0, ((params.alternateRouteCost ?? params.baselineCost) - params.baselineCost) / Math.max(params.baselineCost, 1))),
+      explanation: 'Route diversification changes both exposure geometry and operational complexity using the actual candidate replan economics and projected risk.',
     },
   ];
 
