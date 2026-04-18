@@ -270,13 +270,14 @@ export function buildEarthMoonTransferTrajectory(
   const tliTimeS = Math.min(Math.max(900, 0.08 * tofS), 0.45 * tofS, parkingOrbitPeriodS);
   const totalTimeS = 2 * tofS + stayS;
   const events: TrajectoryEvent[] = [
-    { timeS: 0, label: 'LEO / Departure', step: 1 },
-    { timeS: tliTimeS, label: 'TLI', step: 2 },
+    { timeS: 0, label: 'Parking Orbit', step: 1 },
+    { timeS: tliTimeS, label: 'Transfer Burn', step: 2 },
     { timeS: 0.5 * (tliTimeS + tofS), label: 'Translunar coast', step: 3 },
     { timeS: 0.92 * tofS, label: 'Lunar approach', step: 4 },
-    { timeS: tofS + 0.35 * stayS, label: 'NRHO / Gateway', step: 5 },
+    { timeS: tofS + 0.35 * stayS, label: 'Encounter', step: 5 },
     { timeS: tofS + stayS + 0.45 * tofS, label: 'Return coast', step: 6 },
-    { timeS: totalTimeS, label: 'Earth return', step: 7 },
+    { timeS: totalTimeS - 0.04 * tofS, label: 'Entry', step: 7 },
+    { timeS: totalTimeS, label: 'Landing', step: 8 },
   ];
 
   return annotateTrajectoryEvents(combined, events);
@@ -477,13 +478,14 @@ export function calculateArtemisTrajectory(
   const inboundDurationS = transferDays * 86400;
   const totalTimeS = outboundDurationS + inboundDurationS;
   const events: TrajectoryEvent[] = [
-    { timeS: 0, label: 'Launch / Takeoff', step: 1 },
+    { timeS: 0, label: 'Parking Orbit', step: 1 },
     { timeS: 0.08 * outboundDurationS, label: 'Transfer Burn', step: 2 },
-    { timeS: 0.55 * outboundDurationS, label: 'Outbound Cruise', step: 3 },
-    { timeS: outboundDurationS, label: `${destinationBody.name} Encounter`, step: 4 },
-    { timeS: outboundDurationS + 0.06 * inboundDurationS, label: 'Return Burn', step: 5 },
-    { timeS: totalTimeS - 0.08 * inboundDurationS, label: 'Entry Interface', step: 6 },
-    { timeS: totalTimeS, label: 'Landing / Splashdown', step: 7 },
+    { timeS: 0.55 * outboundDurationS, label: 'Transfer coast', step: 3 },
+    { timeS: 0.9 * outboundDurationS, label: 'Approach', step: 4 },
+    { timeS: outboundDurationS, label: 'Encounter', step: 5 },
+    { timeS: outboundDurationS + 0.45 * inboundDurationS, label: 'Return coast', step: 6 },
+    { timeS: totalTimeS - 0.08 * inboundDurationS, label: 'Entry', step: 7 },
+    { timeS: totalTimeS, label: 'Landing', step: 8 },
   ];
 
   return annotateTrajectoryEvents(combined, events);

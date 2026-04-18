@@ -1,4 +1,4 @@
-import type { ChangeEvent, ReactNode } from 'react';
+import type { ChangeEvent, ReactNode, RefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { motion, AnimatePresence } from 'motion/react';
@@ -27,7 +27,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -39,7 +39,6 @@ import {
   calculateArtemisTrajectory,
   computeHohmann,
   estimateConjunctionRisk,
-  generateOrbitPoints,
   getPlanetPosition,
   keplerian2ECI,
   RE,
@@ -73,6 +72,7 @@ type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum';
 type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
 type PolicyProfile = 'CREW_FIRST' | 'BALANCED' | 'COST_FIRST';
 type ScenarioType = 'NOMINAL' | 'SOLAR_STORM' | 'COMM_BLACKOUT' | 'PROPULSION_ANOMALY' | 'DELAYED_LAUNCH';
+type VisualizerViewMode = 'fit' | 'launch' | 'target' | 'reset';
 
 interface ExternalConjunctionThreat {
   objectA: string;
@@ -840,6 +840,13 @@ interface StageDisplay {
   driver?: string;
 }
 
+interface FlightSequenceTemplateEntry {
+  label: string;
+  phase: string;
+  progress: number;
+  driver: string;
+}
+
 const PROPELLANTS: Record<FuelType, PropellantType> = {
   'RP-1': { name: 'RP-1', isp_vac: 353, isp_sl: 311, density: 820, color: '#f59e0b' },
   LH2: { name: 'LH2', isp_vac: 453, isp_sl: 381, density: 71, color: '#60a5fa' },
@@ -944,7 +951,7 @@ HST
 1 20580U 90037B   26109.53125000  .00000822  00000-0  48511-4 0  9995
 2 20580  28.4697 168.1422 0002858  50.9986 309.1178 15.09186495801229`;
 
-const FLIGHT_SEQUENCE_TEMPLATE = [
+const LUNAR_FLIGHT_SEQUENCE_TEMPLATE: FlightSequenceTemplateEntry[] = [
   { label: 'Parking Orbit', phase: 'Launch and ascent', progress: 0.08, driver: 'Ascent energy is converted into a stable parking orbit before translunar commitment.' },
   { label: 'Transfer Burn', phase: 'Launch and ascent', progress: 0.16, driver: 'Primary outbound delta-v impulse commits the vehicle to the transfer trajectory.' },
   { label: 'Translunar coast', phase: 'Launch and ascent', progress: 0.36, driver: 'Ballistic coast is dominated by transfer geometry, distance growth, and low-propulsive trim.' },
@@ -953,7 +960,18 @@ const FLIGHT_SEQUENCE_TEMPLATE = [
   { label: 'Return coast', phase: 'Return phase', progress: 0.74, driver: 'Earth-return leg is largely ballistic with reserve burns protecting corridor accuracy.' },
   { label: 'Entry', phase: 'Recovery phase', progress: 0.9, driver: 'Aerothermal entry corridor and deceleration constraints dominate the physics.' },
   { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal descent uses residual reserves and recovery geometry to complete the mission.' },
-] as const;
+];
+
+const GENERIC_FLIGHT_SEQUENCE_TEMPLATE: FlightSequenceTemplateEntry[] = [
+  { label: 'Parking Orbit', phase: 'Launch and ascent', progress: 0.06, driver: 'Ascent energy is converted into a stable parking orbit before interplanetary commitment.' },
+  { label: 'Transfer Burn', phase: 'Launch and ascent', progress: 0.12, driver: 'Primary departure burn commits the vehicle to the transfer trajectory.' },
+  { label: 'Transfer coast', phase: 'Outbound phase', progress: 0.36, driver: 'Coast arc is dominated by heliocentric transfer geometry, distance growth, and trim maneuvers.' },
+  { label: 'Approach', phase: 'Outbound phase', progress: 0.5, driver: 'Relative range to the destination collapses and navigation starts shaping encounter conditions.' },
+  { label: 'Encounter', phase: 'Outbound phase', progress: 0.58, driver: 'Closest-body operations are driven by capture, flyby, or proximity-operations physics.' },
+  { label: 'Return coast', phase: 'Return phase', progress: 0.76, driver: 'Return leg is shaped by transfer geometry and reserve maneuvers.' },
+  { label: 'Entry', phase: 'Recovery phase', progress: 0.92, driver: 'Entry corridor and deceleration constraints dominate the return to the origin body.' },
+  { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal recovery uses residual reserves and site geometry to complete the mission.' },
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -1020,31 +1038,54 @@ function stagePhase(progress: number): string {
   return 'Recovery phase';
 }
 
-function stageDriver(label: string): string {
-  return FLIGHT_SEQUENCE_TEMPLATE.find((stage) => stage.label === label)?.driver ?? 'Mission phase derived from trajectory geometry and operational constraints.';
+function getFlightSequenceTemplate(targetPlanetId: string, launchBodyId: string): FlightSequenceTemplateEntry[] {
+  return targetPlanetId === 'moon' && launchBodyId === 'earth'
+    ? LUNAR_FLIGHT_SEQUENCE_TEMPLATE
+    : GENERIC_FLIGHT_SEQUENCE_TEMPLATE;
 }
 
-function normalizeStageLabel(label: string): string {
+function stageDriver(label: string, template: FlightSequenceTemplateEntry[]): string {
+  return template.find((stage) => stage.label === label)?.driver ?? 'Mission phase derived from trajectory geometry and operational constraints.';
+}
+
+function normalizeStageLabel(label: string, targetPlanetId: string, launchBodyId: string): string {
+  const isLunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
   switch (label) {
     case 'LEO / Departure':
       return 'Parking Orbit';
+    case 'Launch / Takeoff':
+      return 'Parking Orbit';
     case 'TLI':
+      return 'Transfer Burn';
+    case 'Outbound Departure':
       return 'Transfer Burn';
     case 'Translunar':
       return 'Translunar coast';
     case 'Outbound Cruise':
-      return 'Translunar coast';
+      return isLunar ? 'Translunar coast' : 'Transfer coast';
+    case 'Transfer coast':
+      return isLunar ? 'Translunar coast' : 'Transfer coast';
     case 'NRHO / Gateway':
       return 'Encounter';
     case 'Return Burn':
       return 'Return coast';
+    case 'Inbound Cruise':
+      return 'Return coast';
+    case 'Outbound Arrival':
+      return 'Encounter';
+    case 'Lunar approach':
+      return 'Approach';
+    case 'Approach':
+      return 'Approach';
+    case 'Encounter':
+      return 'Encounter';
     case 'Earth return':
       return 'Entry';
     case 'Entry Interface':
       return 'Entry';
-    case 'Lunar approach':
-      return 'Approach';
     case 'Landing / Splashdown':
+      return 'Landing';
+    case 'Surface Recovery':
       return 'Landing';
     default:
       return label;
@@ -1076,9 +1117,10 @@ function estimateFuelRemainingPct(label: string, progress: number, distanceShare
 
 function deriveTrajectoryStages(
   trajectory: Array<{ label?: string; time_s?: number; pos: [number, number, number] }>,
-  options: { kmPerUnit: number },
+  options: { kmPerUnit: number; targetPlanetId: string; launchBodyId: string },
 ): StageDisplay[] {
   if (trajectory.length < 2) return [];
+  const template = getFlightSequenceTemplate(options.targetPlanetId, options.launchBodyId);
 
   const totalTime = Math.max(1, trajectory[trajectory.length - 1]?.time_s ?? 1);
   const cumulativeDistanceKm: number[] = [0];
@@ -1089,27 +1131,27 @@ function deriveTrajectoryStages(
 
   const labelIndex = new Map<string, number>();
   for (let i = 0; i < trajectory.length; i++) {
-    const label = trajectory[i].label ? normalizeStageLabel(trajectory[i].label) : null;
+    const label = trajectory[i].label ? normalizeStageLabel(trajectory[i].label, options.targetPlanetId, options.launchBodyId) : null;
     if (label && !labelIndex.has(label)) labelIndex.set(label, i);
   }
 
-  return FLIGHT_SEQUENCE_TEMPLATE.map((template, index) => {
-    const fallbackIdx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(template.progress * (trajectory.length - 1))));
-    const idx = labelIndex.get(template.label) ?? fallbackIdx;
-    const timeS = trajectory[idx]?.time_s ?? template.progress * totalTime;
+  return template.map((stageTemplate, index) => {
+    const fallbackIdx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stageTemplate.progress * (trajectory.length - 1))));
+    const idx = labelIndex.get(stageTemplate.label) ?? fallbackIdx;
+    const timeS = trajectory[idx]?.time_s ?? stageTemplate.progress * totalTime;
     const progress = Math.max(0.015, Math.min(0.985, timeS / totalTime));
     const distanceKm = cumulativeDistanceKm[idx] ?? totalDistanceKm * progress;
     const distanceShare = distanceKm / totalDistanceKm;
     return {
       sequence: index + 1,
-      label: template.label,
+      label: stageTemplate.label,
       progress,
-      color: stageColor(template.label),
-      phase: template.phase,
+      color: stageColor(stageTemplate.label),
+      phase: stageTemplate.phase,
       timeS,
       distanceKm,
-      fuelRemainingPct: estimateFuelRemainingPct(template.label, progress, distanceShare),
-      driver: stageDriver(template.label),
+      fuelRemainingPct: estimateFuelRemainingPct(stageTemplate.label, progress, distanceShare),
+      driver: stageDriver(stageTemplate.label, template),
     };
   });
 }
@@ -1125,15 +1167,16 @@ function deriveAscentTimelineStages(
   simResult: LaunchOptimizationResponse | null,
   transferTimeDays?: number,
 ): StageDisplay[] {
+  const template = GENERIC_FLIGHT_SEQUENCE_TEMPLATE;
   if (!simResult) {
     return [
       { label: 'Launch', progress: 0.015, color: stageColor('Launch'), phase: 'Launch and ascent', driver: 'Initial ascent from the launch site.' },
       { label: 'Stage Sep', progress: 0.12, color: stageColor('Stage Sep'), phase: 'Launch and ascent', driver: 'Stage separation reshapes thrust-to-mass and drag conditions.' },
-      { label: 'Parking Orbit', progress: 0.26, color: stageColor('Parking Orbit'), phase: 'Launch and ascent', driver: stageDriver('Parking Orbit') },
-      { label: 'Transfer Burn', progress: 0.42, color: stageColor('Transfer Burn'), phase: 'Launch and ascent', driver: stageDriver('Transfer Burn') },
-      { label: 'Encounter', progress: 0.7, color: stageColor('Encounter'), phase: 'Outbound phase', driver: stageDriver('Encounter') },
-      { label: 'Entry', progress: 0.9, color: stageColor('Entry'), phase: 'Recovery phase', driver: stageDriver('Entry') },
-      { label: 'Landing', progress: 0.985, color: stageColor('Landing'), phase: 'Recovery phase', driver: stageDriver('Landing') },
+      { label: 'Parking Orbit', progress: 0.26, color: stageColor('Parking Orbit'), phase: 'Launch and ascent', driver: stageDriver('Parking Orbit', template) },
+      { label: 'Transfer Burn', progress: 0.42, color: stageColor('Transfer Burn'), phase: 'Launch and ascent', driver: stageDriver('Transfer Burn', template) },
+      { label: 'Encounter', progress: 0.7, color: stageColor('Encounter'), phase: 'Outbound phase', driver: stageDriver('Encounter', template) },
+      { label: 'Entry', progress: 0.9, color: stageColor('Entry'), phase: 'Recovery phase', driver: stageDriver('Entry', template) },
+      { label: 'Landing', progress: 0.985, color: stageColor('Landing'), phase: 'Recovery phase', driver: stageDriver('Landing', template) },
     ].map((stage, index) => ({
       sequence: index + 1,
       ...stage,
@@ -1167,7 +1210,7 @@ function deriveAscentTimelineStages(
     color: stageColor(event.label),
     phase: stagePhase(event.timeS / totalTime),
     timeS: event.timeS,
-    driver: stageDriver(event.label),
+    driver: stageDriver(event.label, template),
   }));
 }
 
@@ -1363,11 +1406,6 @@ function QuantumDistribution({ distribution }: { distribution?: Array<{ state: s
   );
 }
 
-function OrbitLine({ elements, kmPerUnit = VIS_SCENE_KM_PER_UNIT, lineWidth = 1.5 }: { elements: KeplerianElements; kmPerUnit?: number; lineWidth?: number }) {
-  const points = useMemo(() => generateOrbitPoints(elements, 200, 1 / kmPerUnit), [elements, kmPerUnit]);
-  return <DreiLine points={points} color={CB} lineWidth={lineWidth} transparent opacity={0.7} />;
-}
-
 function createPlanetTexture(bodyId: string, baseColor: string) {
   const canvas = document.createElement('canvas');
   canvas.width = 1024;
@@ -1472,6 +1510,113 @@ function bodyDisplayRadiusKm(radiusKm: number): number {
   return Math.max(earthScene * 0.12, scaled);
 }
 
+function trajectoryPointAtStage(trajectory: TrajectoryPoint[], stageList: StageDisplay[], labels: string[]): [number, number, number] | null {
+  if (!trajectory.length) return null;
+  const stage = labels
+    .map((label) => stageList.find((item) => item.label === label))
+    .find((item): item is StageDisplay => Boolean(item));
+  if (!stage) return trajectory[trajectory.length - 1]?.pos ?? null;
+
+  let bestIndex = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
+  if (stage.timeS != null) {
+    let bestDt = Infinity;
+    for (let i = 0; i < trajectory.length; i++) {
+      const dt = Math.abs((trajectory[i].time_s ?? 0) - stage.timeS);
+      if (dt < bestDt) {
+        bestDt = dt;
+        bestIndex = i;
+      }
+    }
+  }
+  return trajectory[bestIndex]?.pos ?? null;
+}
+
+function computeSceneCenter(points: Array<[number, number, number]>): THREE.Vector3 {
+  const center = new THREE.Vector3();
+  if (!points.length) return center;
+  for (const point of points) {
+    center.add(new THREE.Vector3(point[0], point[1], point[2]));
+  }
+  return center.multiplyScalar(1 / points.length);
+}
+
+function computeSceneRadius(points: Array<[number, number, number]>, center: THREE.Vector3): number {
+  if (!points.length) return 1;
+  let radius = 1;
+  for (const point of points) {
+    radius = Math.max(radius, center.distanceTo(new THREE.Vector3(point[0], point[1], point[2])));
+  }
+  return radius;
+}
+
+function MissionSceneNavigator({
+  controlsRef,
+  command,
+  trajectory,
+  stageList,
+  cislunar,
+}: {
+  controlsRef: RefObject<any>;
+  command: { mode: VisualizerViewMode; nonce: number };
+  trajectory: TrajectoryPoint[];
+  stageList: StageDisplay[];
+  cislunar: boolean;
+}) {
+  const { camera, size } = useThree();
+
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (!controls || !trajectory.length) return;
+
+    const launchPoint = trajectory[0]?.pos ?? [0, 0, 0];
+    const targetPoint =
+      trajectoryPointAtStage(trajectory, stageList, ['Encounter', 'Approach', 'Landing']) ??
+      trajectory[trajectory.length - 1]?.pos ??
+      launchPoint;
+    const samples = [launchPoint, targetPoint, ...trajectory.map((point) => point.pos)];
+    const fitCenter = computeSceneCenter(samples);
+    const fitRadius = computeSceneRadius(samples, fitCenter);
+
+    const view =
+      command.mode === 'launch'
+        ? {
+            center: new THREE.Vector3(launchPoint[0], launchPoint[1], launchPoint[2]),
+            radius: Math.max(cislunar ? 22 : 30, fitRadius * 0.22),
+            direction: new THREE.Vector3(0.9, 0.28, 1.25),
+          }
+        : command.mode === 'target'
+          ? {
+              center: new THREE.Vector3(targetPoint[0], targetPoint[1], targetPoint[2]),
+              radius: Math.max(cislunar ? 28 : 36, fitRadius * 0.26),
+              direction: new THREE.Vector3(-1.0, 0.34, 1.1),
+            }
+          : {
+              center: fitCenter,
+              radius: fitRadius,
+              direction: new THREE.Vector3(1.0, 0.42, 1.28),
+            };
+
+    const perspectiveCamera = camera as THREE.PerspectiveCamera;
+    const aspect = size.width / Math.max(size.height, 1);
+    const fov = THREE.MathUtils.degToRad(perspectiveCamera.fov || 50);
+    const fitDistance = view.radius / Math.max(Math.tan(fov / 2), 0.25);
+    const framedDistance = Math.max(
+      fitDistance / Math.max(Math.sqrt(Math.max(aspect, 1)), 0.9),
+      cislunar ? 85 : 135,
+      view.radius * (cislunar ? 2.3 : 2.6),
+    );
+
+    perspectiveCamera.position.copy(view.center.clone().add(view.direction.normalize().multiplyScalar(framedDistance)));
+    perspectiveCamera.near = Math.max(0.1, framedDistance / 5000);
+    perspectiveCamera.far = Math.max(6000, framedDistance * 18);
+    perspectiveCamera.updateProjectionMatrix();
+    controls.target.copy(view.center);
+    controls.update();
+  }, [camera, cislunar, command, controlsRef, size.height, size.width, stageList, trajectory]);
+
+  return null;
+}
+
 function RadiationOverlay({
   bodyRadius,
   atmosphereScaleHeightKm,
@@ -1539,8 +1684,15 @@ function MissionGlobe({
   radiationEnvironment: NearEarthRadiationFeed | null;
 }) {
   const isCislunar = targetPlanetId === 'moon' && launchBodyId === 'earth';
-  const outboundTrajectory = useMemo(() => trajectory.slice(0, Math.max(2, Math.floor(trajectory.length * 0.55))), [trajectory]);
-  const inboundTrajectory = useMemo(() => trajectory.slice(Math.max(1, Math.floor(trajectory.length * 0.5))), [trajectory]);
+  const { outboundTrajectory, inboundTrajectory } = useMemo(() => {
+    const n = trajectory.length;
+    if (n < 2) return { outboundTrajectory: trajectory, inboundTrajectory: trajectory };
+    const split = Math.floor(n * 0.55);
+    return {
+      outboundTrajectory: trajectory.slice(0, Math.max(2, split + 1)),
+      inboundTrajectory: trajectory.slice(split),
+    };
+  }, [trajectory]);
   const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
   const heliocentricEarthRadiusScene = RE / VIS_SCENE_KM_PER_UNIT;
   const earthRadiusScene = isCislunar ? RE / CISLUNAR_VIS_KM_PER_UNIT : heliocentricEarthRadiusScene;
@@ -1624,6 +1776,20 @@ function MissionGlobe({
 
   const launchBody = CELESTIAL_BODY_MAP[launchBodyId] ?? CELESTIAL_BODY_MAP.earth;
   const targetBody = CELESTIAL_BODY_MAP[targetPlanetId] ?? CELESTIAL_BODY_MAP.moon;
+  const encounterMarker = useMemo(() => {
+    const encounterStage = stageList.find((stage) => stage.label === 'Encounter') ?? stageList.find((stage) => stage.label === 'Approach');
+    if (!encounterStage) return null;
+    let bestIdx = 0;
+    let bestDt = Infinity;
+    for (let i = 0; i < trajectory.length; i++) {
+      const dt = Math.abs((trajectory[i].time_s ?? 0) - (encounterStage.timeS ?? 0));
+      if (dt < bestDt) {
+        bestDt = dt;
+        bestIdx = i;
+      }
+    }
+    return trajectory[bestIdx]?.pos ?? null;
+  }, [stageList, trajectory]);
   const stageMarkers = stageList.map((stage) => {
     let idx = Math.min(trajectory.length - 1, Math.max(0, Math.floor(stage.progress * (trajectory.length - 1))));
     if (stage.timeS != null) {
@@ -1655,7 +1821,6 @@ function MissionGlobe({
         })) : undefined}
         kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
       />
-      <OrbitLine elements={keplerEl} kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT} lineWidth={isCislunar ? 2.4 : 1.5} />
       {isCislunar ? (
         <group position={moonScene.pos}>
           <mesh>
@@ -1670,34 +1835,22 @@ function MissionGlobe({
       {systemBodies.map((body) => {
         const isTarget = body.id === targetBody.id;
         const radius = bodyDisplayRadiusKm(body.radiusKm);
+        const bodyPos = (!isCislunar && isTarget && encounterMarker) ? encounterMarker : body.pos as [number, number, number];
         return (
-          <group key={body.id} position={body.pos as [number, number, number]}>
+          <group key={body.id} position={bodyPos}>
             <mesh>
               <sphereGeometry args={[radius, 32, 32]} />
               <meshStandardMaterial color={body.color} roughness={0.82} metalness={0.06} />
             </mesh>
             <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={body.atmosphereScaleHeightKm} isPrimary={isTarget} />
             <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
-              {body.name}
+              {isTarget && encounterMarker ? `${body.name} (encounter)` : body.name}
             </Text>
           </group>
         );
       })}
       <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
       <DreiLine points={inboundTrajectory.map((point) => point.pos)} color="#f59e0b" lineWidth={isCislunar ? 3.6 : 2.3} transparent opacity={0.95} />
-      {trajectory.length > 0 && (
-        <DreiLine
-          points={trajectory.filter((_, index) => index % 8 === 0).map((point) => point.pos)}
-          color="#ef4444"
-          lineWidth={1}
-          transparent
-          opacity={0.22}
-          dashed
-          dashScale={10}
-          dashSize={0.8}
-          gapSize={0.55}
-        />
-      )}
       {projectedNodes.map((node) => {
         const selected = pathNodeIds.includes(node.id);
         const nr = isCislunar ? (selected ? 2.4 : 1.55) : (selected ? 2.2 : 1.4);
@@ -2056,6 +2209,11 @@ export default function App() {
   const [simulating, setSimulating] = useState(false);
   const [horizonsTrajectory, setHorizonsTrajectory] = useState<TrajectoryPoint[] | null>(null);
   const [horizonsTrajectorySource, setHorizonsTrajectorySource] = useState<string | null>(null);
+  const visualizerControlsRef = useRef<any>(null);
+  const [visualizerViewCommand, setVisualizerViewCommand] = useState<{ mode: VisualizerViewMode; nonce: number }>({
+    mode: 'fit',
+    nonce: 0,
+  });
   const [qaoaDepth, setQaoaDepth] = useState(3);
   const [qaoaRefreshing, setQaoaRefreshing] = useState(false);
   const [shieldingMassKg, setShieldingMassKg] = useState(180);
@@ -2718,19 +2876,27 @@ export default function App() {
       }
       try {
         const missionDurationHours = Math.max(24, (missionTrajectory[missionTrajectory.length - 1]?.time_s ?? 0) / 3600 || (trajectoryDesign?.abortBranches?.[0]?.timeToRecoveryDays ?? 1) * 24);
+        const crewCount = 4;
+        const oxygenRequiredKg = crewCount * 0.84 * (missionDurationHours / 24);
+        const waterRequiredKg = crewCount * 3.2 * (missionDurationHours / 24);
+        const propellantRequiredKg = Math.max(optResult?.fuelMass_kg ?? 0, Math.max(spacecraftMass * 0.18, missionDurationHours * 0.7));
+        const commBudgetMinutes = Math.max(
+          (dsnVisibility?.windows?.reduce((sum, item) => sum + item.durationMinutes, 0) ?? 0),
+          missionDurationHours * 8 * 1.25,
+        );
         const consumablesResponse = await fetch('/api/consumables/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             durationHours: missionDurationHours,
             initial: {
-              powerKWh: 320,
+              powerKWh: Math.max(320, missionDurationHours * 1.8),
               thermalMarginC: 22,
-              commMinutes: dsnVisibility?.windows?.reduce((sum, item) => sum + item.durationMinutes, 0) ?? 360,
-              propellantKg: optResult?.fuelMass_kg ?? spacecraftMass * 0.62,
+              commMinutes: commBudgetMinutes,
+              propellantKg: propellantRequiredKg * 1.2,
               crewHours: 0,
-              oxygenKg: 180,
-              waterKg: 260,
+              oxygenKg: oxygenRequiredKg * 1.35,
+              waterKg: waterRequiredKg * 1.35,
             },
             powerDrawKw: 4.8,
             powerGenerationKw: 6.2,
@@ -2738,7 +2904,7 @@ export default function App() {
             thermalRejectionCPerHour: 1.1,
             commMinutesPerHour: 8,
             propellantFlowKgPerHour: Math.max(0.2, (trajectoryDesign?.reservePolicy?.reserveDeltaVKmS ?? 0.4) * 8),
-            crewCount: 4,
+            crewCount,
           }),
         });
         const consumablesData = await consumablesResponse.json();
@@ -3062,10 +3228,11 @@ export default function App() {
     }
   }, [importedMissionConfig]);
   const missionStages = useMemo(() => {
-    const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit });
+    const derived = deriveTrajectoryStages(missionTrajectory, { kmPerUnit: missionKmPerUnit, targetPlanetId: targetPlanet, launchBodyId });
+    const template = getFlightSequenceTemplate(targetPlanet, launchBodyId);
     return derived.length
       ? derived
-      : FLIGHT_SEQUENCE_TEMPLATE.map((stage, index) => ({
+      : template.map((stage, index) => ({
           sequence: index + 1,
           label: stage.label,
           progress: stage.progress,
@@ -3073,7 +3240,7 @@ export default function App() {
           phase: stage.phase,
           driver: stage.driver,
         }));
-  }, [missionTrajectory, missionKmPerUnit]);
+  }, [missionTrajectory, missionKmPerUnit, targetPlanet, launchBodyId]);
   const vehicleTimelineStages = useMemo(
     () => deriveAscentTimelineStages(simResult, optResult?.physics.transferTime_days),
     [simResult, optResult?.physics.transferTime_days],
@@ -3102,6 +3269,9 @@ export default function App() {
     pair: `Z${index}Z${index + 1}`,
     correlation: zz,
   })) ?? [];
+  const visualizerTitle = activeTab === 'vehicle'
+    ? 'STL Aerodynamics Visualizer'
+    : `${launchBody.name} to ${targetBody.name} Mission Visualizer`;
 
   return (
     <div className="min-h-screen bg-[#050810] text-slate-100">
@@ -3139,7 +3309,7 @@ export default function App() {
         <main className="grid flex-1 gap-4 lg:grid-cols-[1.2fr_420px]">
           <section className="flex min-h-0 flex-col gap-4">
             <DashboardCard
-              title={activeTab === 'vehicle' ? 'STL Aerodynamics Visualizer' : `${importedGraph ? 'Imported Mission Graph' : preset.title} Visualizer`}
+              title={visualizerTitle}
               icon={activeTab === 'vehicle' ? Wind : Globe}
               provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
               className="flex-1"
@@ -3163,10 +3333,29 @@ export default function App() {
                 )
               ) : (
                 <>
-                  <div className="h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-black/40">
+                  <div className="relative h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-black/40">
                     <Canvas>
                       <PerspectiveCamera makeDefault position={cislunarVisualizer ? [0, 72, 520] : [0, 80, 500]} />
-                      <OrbitControls minDistance={cislunarVisualizer ? 55 : 80} maxDistance={cislunarVisualizer ? 2200 : 1200} />
+                      <OrbitControls
+                        ref={visualizerControlsRef}
+                        enableDamping
+                        dampingFactor={0.08}
+                        rotateSpeed={0.72}
+                        zoomSpeed={0.9}
+                        panSpeed={0.82}
+                        screenSpacePanning={false}
+                        minDistance={cislunarVisualizer ? 55 : 80}
+                        maxDistance={cislunarVisualizer ? 2200 : 1400}
+                        minPolarAngle={0.18}
+                        maxPolarAngle={Math.PI * 0.92}
+                      />
+                      <MissionSceneNavigator
+                        controlsRef={visualizerControlsRef}
+                        command={visualizerViewCommand}
+                        trajectory={missionTrajectory}
+                        stageList={missionStages}
+                        cislunar={cislunarVisualizer}
+                      />
                       <ambientLight intensity={0.45} />
                       <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff9db" />
                       <MissionGlobe
@@ -3188,6 +3377,34 @@ export default function App() {
                         radiationEnvironment={nearEarthRadiation}
                       />
                     </Canvas>
+                    <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-3">
+                      <div className="rounded-lg border border-slate-800/90 bg-slate-950/80 px-3 py-2 text-[11px] text-slate-300 shadow-xl backdrop-blur">
+                        <p className="font-semibold text-slate-100">Visualizer Nav</p>
+                        <p className="mt-1 text-slate-400">Drag to orbit, scroll to zoom, right-drag to pan.</p>
+                      </div>
+                      <div className="pointer-events-auto flex flex-wrap justify-end gap-2">
+                        {([
+                          { mode: 'fit', label: 'Fit Path' },
+                          { mode: 'launch', label: `Focus ${launchBody.name}` },
+                          { mode: 'target', label: `Focus ${targetBody.name}` },
+                          { mode: 'reset', label: 'Reset View' },
+                        ] as Array<{ mode: VisualizerViewMode; label: string }>).map((action) => (
+                          <button
+                            key={action.mode}
+                            type="button"
+                            className={cn(
+                              'rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur transition',
+                              visualizerViewCommand.mode === action.mode
+                                ? 'border-sky-300/60 bg-sky-400/20 text-sky-100'
+                                : 'border-slate-700/90 bg-slate-950/75 text-slate-300 hover:border-slate-500 hover:text-slate-100',
+                            )}
+                            onClick={() => setVisualizerViewCommand((previous) => ({ mode: action.mode, nonce: previous.nonce + 1 }))}
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                   <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
                     {cislunarVisualizer ? (

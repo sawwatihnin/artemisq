@@ -427,13 +427,14 @@ export async function buildHorizonsTrajectory(params: {
     }
 
     return annotate([...outbound, ...inbound], [
-      { timeS: 0, label: 'LEO / Departure', step: 1 },
-      { timeS: Math.min(Math.max(900, 0.08 * hoh.tof_s), 0.45 * hoh.tof_s), label: 'TLI', step: 2 },
+      { timeS: 0, label: 'Parking Orbit', step: 1 },
+      { timeS: Math.min(Math.max(900, 0.08 * hoh.tof_s), 0.45 * hoh.tof_s), label: 'Transfer Burn', step: 2 },
       { timeS: 0.5 * hoh.tof_s, label: 'Translunar coast', step: 3 },
       { timeS: 0.92 * hoh.tof_s, label: 'Lunar approach', step: 4 },
-      { timeS: hoh.tof_s + 0.35 * stayS, label: 'NRHO / Gateway', step: 5 },
+      { timeS: hoh.tof_s + 0.35 * stayS, label: 'Encounter', step: 5 },
       { timeS: hoh.tof_s + stayS + 0.45 * hoh.tof_s, label: 'Return coast', step: 6 },
-      { timeS: 2 * hoh.tof_s + stayS, label: 'Earth return', step: 7 },
+      { timeS: 2 * hoh.tof_s + stayS - 0.04 * hoh.tof_s, label: 'Entry', step: 7 },
+      { timeS: 2 * hoh.tof_s + stayS, label: 'Landing', step: 8 },
     ]);
   }
 
@@ -472,13 +473,13 @@ export async function buildHorizonsTrajectory(params: {
   const inbound = cubicTransferBetween(destinationOutbound, returnTarget, destinationArrivalVelocity, returnVelocity, 64, outboundDurationS, inboundDurationS, 'Inbound');
 
   return annotate([...outbound, ...inbound.slice(1)], [
-    { timeS: 0, label: 'Launch / Takeoff', step: 1 },
+    { timeS: 0, label: 'Parking Orbit', step: 1 },
     { timeS: 0.08 * outboundDurationS, label: 'Transfer Burn', step: 2 },
-    { timeS: 0.55 * outboundDurationS, label: 'Outbound Cruise', step: 3 },
+    { timeS: 0.55 * outboundDurationS, label: 'Transfer coast', step: 3 },
     { timeS: outboundDurationS * 0.9, label: 'Approach', step: 4 },
-    { timeS: outboundDurationS, label: `${destinationId[0].toUpperCase()}${destinationId.slice(1)} Encounter`, step: 5 },
+    { timeS: outboundDurationS, label: 'Encounter', step: 5 },
     { timeS: outboundDurationS + 0.45 * inboundDurationS, label: 'Return coast', step: 6 },
-    { timeS: outboundDurationS + 0.92 * inboundDurationS, label: 'Entry Interface', step: 7 },
-    { timeS: outboundDurationS + inboundDurationS, label: 'Landing / Splashdown', step: 8 },
+    { timeS: outboundDurationS + 0.92 * inboundDurationS, label: 'Entry', step: 7 },
+    { timeS: outboundDurationS + inboundDurationS, label: 'Landing', step: 8 },
   ]);
 }
