@@ -177,7 +177,9 @@ function computeDose(
   let beltDoseMsv = 0;
   let deepSpaceDoseMsv = 0;
   const safeHavenWindows: MissionDoseAnalysis['safeHavenWindows'] = [];
-  const baseSolarDoseRate = 0.045 * Math.max(spaceWeather.radiationIndex, environment.aggregateIndex);
+  const forcingIndex = clamp(0.6 * spaceWeather.radiationIndex + 0.4 * environment.aggregateIndex, 0.85, 4.25);
+  const radiationMultiplier = clamp(1 - 0.65 * shieldingFactor, 0.32, 0.72);
+  const baseSolarDoseRate = 0.02 + 0.012 * Math.max(forcingIndex - 1, 0);
 
   for (let i = 1; i < trajectory.length; i++) {
     const dtHours = hoursBetween(trajectory[i].time_s, trajectory[i - 1].time_s);
@@ -190,22 +192,22 @@ function computeDose(
 
     for (const zone of environment.zones) {
       if (rKm >= zone.innerRadiusKm && rKm <= zone.outerRadiusKm) {
-        const zoneRate = 0.18 * zone.severity;
+        const zoneRate = 0.038 * zone.severity;
         doseRate += zoneRate;
-        beltDoseMsv += zoneRate * dtHours * shieldingFactor;
+        beltDoseMsv += zoneRate * dtHours * radiationMultiplier;
         inBelt = true;
       }
     }
 
     if (!inBelt) {
-      deepSpaceDoseMsv += baseSolarDoseRate * dtHours * shieldingFactor;
+      deepSpaceDoseMsv += baseSolarDoseRate * dtHours * radiationMultiplier;
     }
 
-    const effectiveRate = doseRate * shieldingFactor;
+    const effectiveRate = doseRate * radiationMultiplier;
     cumulativeDoseMsv += effectiveRate * dtHours;
     peakDoseRateMsvHr = Math.max(peakDoseRateMsvHr, effectiveRate);
 
-    if (effectiveRate > 0.32) {
+    if (effectiveRate > 0.14) {
       const startHour = (trajectory[i - 1].time_s ?? (i - 1) * 21600) / 3600;
       const endHour = (trajectory[i].time_s ?? i * 21600) / 3600;
       safeHavenWindows.push({
@@ -221,7 +223,7 @@ function computeDose(
     peakDoseRateMsvHr,
     beltDoseMsv,
     deepSpaceDoseMsv,
-    safeHavenRequired: peakDoseRateMsvHr > 0.32 || cumulativeDoseMsv > 35,
+    safeHavenRequired: peakDoseRateMsvHr > 0.14 || cumulativeDoseMsv > 50,
     safeHavenWindows,
   };
 }

@@ -209,7 +209,7 @@ export function buildEarthMoonTransferTrajectory(
   launchDate: Date,
   keplerEl: KeplerianElements,
   segments = 96,
-  stayDays = 3,
+  stayDays = 0.3,
 ): TrajectoryPoint[] {
   const inv = 1 / CISLUNAR_VIS_KM_PER_UNIT;
   const toScene = (km: [number, number, number]): [number, number, number] =>

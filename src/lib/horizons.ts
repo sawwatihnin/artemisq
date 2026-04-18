@@ -374,7 +374,7 @@ export async function buildHorizonsTrajectory(params: {
       ? Math.hypot(initialMoon[0].x, initialMoon[0].y, initialMoon[0].z) - RE
       : 384400 - RE;
     const hoh = computeHohmann(leoAlt, Math.max(250_000, firstMoonRange));
-    const stayDays = 3;
+    const stayDays = 0.3;
     const arrivalDate = new Date(launchDate.getTime() + hoh.tof_s * 1000);
     const returnDate = new Date(arrivalDate.getTime() + stayDays * 86400 * 1000);
     const endDate = new Date(returnDate.getTime() + hoh.tof_s * 1000);

@@ -63,6 +63,7 @@ import {
 } from './lib/celestial';
 import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
 import { generateMissionReport } from './lib/report';
+import { analyzeCrewedCislunarMissionOps } from './lib/cislunarOps';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -982,6 +983,16 @@ const GENERIC_FLIGHT_SEQUENCE_TEMPLATE: FlightSequenceTemplateEntry[] = [
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+async function safeFetchJson<T>(url: string, fallback: T, init?: RequestInit): Promise<T> {
+  try {
+    const response = await fetch(url, init);
+    if (!response.ok) return fallback;
+    return await response.json() as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function classifyDisplayedCrewRisk(score: number): 'SAFE' | 'MONITOR' | 'HIGH_RISK' | 'DO_NOT_EMBARK' {
@@ -2511,31 +2522,23 @@ export default function App() {
       const isEarth = launchBodyId === 'earth';
       const weatherUrl = `/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
       const openMeteoUrl = `/api/openmeteo/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
-      const [wxResult, openMeteoResult, spaceResult, solarBodiesResult, ephemerisResult, radiationResult, eonetResult, trafficResult, telemetryResult, wgcResult, launchSitesResult] = await Promise.allSettled([
-        isEarth ? fetch(weatherUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
-        isEarth ? fetch(openMeteoUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
-        fetch('/api/space-weather').then((res) => res.json()),
-        fetch('/api/bodies').then((res) => res.json()),
-        fetch(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`).then((res) => res.json()),
-        fetch('/api/radiation/live?days=7').then((res) => res.json()),
-        fetch('/api/eonet/events?status=open&limit=4&days=14').then((res) => res.json()),
-        fetch('/api/celestrak/conjunctions?group=STATIONS&limit=10').then((res) => res.json()),
-        fetch('/api/telemetry/latest').then((res) => res.json()),
-        fetch('/api/webgeocalc/metadata').then((res) => res.json()),
-        fetch('/api/ground/launch-sites').then((res) => res.json()),
+      const [wx, openMeteo, nasa, bodies, ephemeris, radiation, eonet, traffic, telemetry, wgc, sites] = await Promise.all([
+        isEarth
+          ? safeFetchJson(weatherUrl, { source: 'UNAVAILABLE' })
+          : Promise.resolve({ source: 'NOT APPLICABLE' }),
+        isEarth
+          ? safeFetchJson(openMeteoUrl, { source: 'UNAVAILABLE' })
+          : Promise.resolve({ source: 'NOT APPLICABLE' }),
+        safeFetchJson('/api/space-weather', { source: 'UNAVAILABLE' }),
+        safeFetchJson('/api/bodies', null),
+        safeFetchJson(`/api/ephemeris/system?centerBody=${launchBodyId}&date=${launchDate}`, null),
+        safeFetchJson('/api/radiation/live?days=7', null),
+        safeFetchJson('/api/eonet/events?status=open&limit=4&days=14', null),
+        safeFetchJson('/api/celestrak/conjunctions?group=STATIONS&limit=10', null),
+        safeFetchJson('/api/telemetry/latest', null),
+        safeFetchJson('/api/webgeocalc/metadata', null),
+        safeFetchJson('/api/ground/launch-sites', null),
       ]);
-
-      const wx = wxResult.status === 'fulfilled' ? wxResult.value : { source: 'UNAVAILABLE' };
-      const openMeteo = openMeteoResult.status === 'fulfilled' ? openMeteoResult.value : { source: 'UNAVAILABLE' };
-      const nasa = spaceResult.status === 'fulfilled' ? spaceResult.value : { source: 'UNAVAILABLE' };
-      const bodies = solarBodiesResult.status === 'fulfilled' ? solarBodiesResult.value : null;
-      const ephemeris = ephemerisResult.status === 'fulfilled' ? ephemerisResult.value : null;
-      const radiation = radiationResult.status === 'fulfilled' ? radiationResult.value : null;
-      const eonet = eonetResult.status === 'fulfilled' ? eonetResult.value : null;
-      const traffic = trafficResult.status === 'fulfilled' ? trafficResult.value : null;
-      const telemetry = telemetryResult.status === 'fulfilled' ? telemetryResult.value : null;
-      const wgc = wgcResult.status === 'fulfilled' ? wgcResult.value : null;
-      const sites = launchSitesResult.status === 'fulfilled' ? launchSitesResult.value : null;
 
       if (cancelled) return;
 
@@ -2550,7 +2553,14 @@ export default function App() {
       setTelemetryFeed(telemetry);
       setWebGeoCalcMeta(wgc);
       setLaunchSites(sites);
-      if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
+      const windSpeedKmh =
+        typeof wx === 'object' &&
+        wx !== null &&
+        'wind_speed' in wx &&
+        typeof (wx as { wind_speed?: unknown }).wind_speed === 'number'
+          ? (wx as { wind_speed?: number }).wind_speed ?? null
+          : null;
+      if (windSpeedKmh != null) setWindSpeed(Math.round(windSpeedKmh / 3.6));
 
       if (firstFetch) {
         addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
@@ -2582,8 +2592,7 @@ export default function App() {
       try {
         const start = launchDate;
         const stop = new Date(new Date(launchDate).getTime() + 3 * 86400000).toISOString().slice(0, 10);
-        const response = await fetch(`/api/dsn/visibility?targetId=${targetPlanet}&startTime=${start}&stopTime=${stop}&stepSize=2 h&minElevationDeg=10`);
-        const data = await response.json();
+        const data = await safeFetchJson(`/api/dsn/visibility?targetId=${targetPlanet}&startTime=${start}&stopTime=${stop}&stepSize=2 h&minElevationDeg=10`, null);
         setDsnVisibility(data);
       } catch {
         setDsnVisibility(null);
@@ -2866,7 +2875,7 @@ export default function App() {
     }
   };
 
-  const cislunarVisualizer = missionType === 'lunar' && targetPlanet === 'moon' && launchBodyId === 'earth';
+  const cislunarVisualizer = targetPlanet === 'moon' && launchBodyId === 'earth';
   const missionKmPerUnit = cislunarVisualizer ? CISLUNAR_VIS_KM_PER_UNIT : VIS_SCENE_KM_PER_UNIT;
   useEffect(() => {
     let cancelled = false;
@@ -2920,6 +2929,69 @@ export default function App() {
     }
     return total;
   }, [missionTrajectory, missionKmPerUnit]);
+  const cislunarMissionAnalysis = useMemo(() => {
+    if (
+      launchBodyId !== 'earth' ||
+      targetPlanet !== 'moon' ||
+      !missionTrajectory.length ||
+      !nearEarthRadiation?.environment
+    ) {
+      return cislunarOps?.analysis ?? null;
+    }
+
+    try {
+      return analyzeCrewedCislunarMissionOps({
+        trajectory: missionTrajectory.map((point) => ({
+          time_s: point.time_s,
+          pos: [
+            point.pos[0] * missionKmPerUnit,
+            point.pos[1] * missionKmPerUnit,
+            point.pos[2] * missionKmPerUnit,
+          ],
+        })),
+        launchDate,
+        radiationEnvironment: nearEarthRadiation.environment as any,
+        spaceWeather: (nasaWeather ?? {
+          radiationIndex: Math.max(nearEarthRadiation.environment.aggregateIndex ?? 1, 1),
+          kpIndex: 2,
+          flareProbabilityM: 0,
+          flareProbabilityX: 0,
+          protonEventProbability: 0,
+          polarCapAbsorption: false,
+          source: nearEarthRadiation.source ?? 'MODELED · fallback space weather',
+        }) as any,
+        weather: weatherData ?? null,
+        dsnVisibility: dsnVisibility ? {
+          windows: dsnVisibility.windows.map((window) => ({
+            start: window.startTime,
+            end: window.endTime,
+            durationMinutes: window.durationMinutes,
+            maxElevationDeg: window.maxElevationDeg,
+          })),
+          stations: [],
+          source: dsnVisibility.source,
+        } : null,
+        shieldingFactor: clamp(0.58 + shieldingMassKg / 1000, 0.58, 0.86),
+        crewCount: 4,
+        powerGenerationKw: 6.2,
+        hotelLoadKw: 4.8,
+      });
+    } catch {
+      return cislunarOps?.analysis ?? null;
+    }
+  }, [
+    launchBodyId,
+    targetPlanet,
+    missionTrajectory,
+    missionKmPerUnit,
+    launchDate,
+    nearEarthRadiation,
+    nasaWeather,
+    weatherData,
+    dsnVisibility,
+    shieldingMassKg,
+    cislunarOps,
+  ]);
   const missionGraph: { nodes: Array<Record<string, any>>; edges: Array<Record<string, any>> } = useMemo(() => {
     if (importedGraph) return importedGraph;
 
@@ -2927,7 +2999,7 @@ export default function App() {
       nasaWeather?.radiationIndex ?? 1,
       nearEarthRadiation?.environment?.aggregateIndex ?? 1,
       radiationIntersection?.assessment?.normalizedRiskIndex ?? 1,
-      ((cislunarOps?.analysis?.dose?.cumulativeDoseMsv ?? 0) / 40),
+      ((cislunarMissionAnalysis?.dose?.cumulativeDoseMsv ?? 0) / 40),
       1,
     );
     const dsnCoverage = clamp((dsnVisibility?.windows?.reduce((sum, window) => sum + window.durationMinutes, 0) ?? 0) / (72 * 60), 0.15, 1);
@@ -2991,7 +3063,7 @@ export default function App() {
     nasaWeather?.radiationIndex,
     nearEarthRadiation,
     radiationIntersection,
-    cislunarOps,
+    cislunarMissionAnalysis,
     dsnVisibility,
     telemetryFeed,
     launchConstraintAnalysis,
@@ -3592,15 +3664,15 @@ export default function App() {
     [simResult, optResult?.physics.transferTime_days],
   );
   const displayedCrewHealth = useMemo(() => {
-    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarOps?.analysis) {
-      const dose = cislunarOps.analysis.dose;
-      const consumables = cislunarOps.analysis.consumables;
+    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarMissionAnalysis) {
+      const dose = cislunarMissionAnalysis.dose;
+      const consumables = cislunarMissionAnalysis.consumables;
       const unsafeDuration = dose.safeHavenWindows.reduce((sum, window) => sum + Math.max(0, window.endHour - window.startHour), 0);
       const missionDuration = Math.max(consumables.missionDurationHours, 1);
       const riskScore = clamp(
-        0.42 * (dose.cumulativeDoseMsv / 35) +
-        0.38 * (dose.peakDoseRateMsvHr / 0.32) +
-        0.2 * (unsafeDuration / missionDuration),
+        0.4 * (dose.cumulativeDoseMsv / 65) +
+        0.35 * (dose.peakDoseRateMsvHr / 0.18) +
+        0.25 * (unsafeDuration / Math.max(6, missionDuration * 0.08)),
         0,
         1.5,
       );
@@ -3632,10 +3704,10 @@ export default function App() {
       unitLabel: 'arb. dose',
       peakUnitLabel: 'dose-rate proxy',
     };
-  }, [launchBodyId, targetPlanet, cislunarOps, optResult?.crewRisk]);
+  }, [launchBodyId, targetPlanet, cislunarMissionAnalysis, optResult?.crewRisk]);
   const displayedMissionDecision = useMemo(() => {
-    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarOps?.analysis && displayedCrewHealth) {
-      const go = cislunarOps.analysis.goNoGo;
+    if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarMissionAnalysis && displayedCrewHealth) {
+      const go = cislunarMissionAnalysis.goNoGo;
       const decision = go.overall === 'GO' ? 'CONTINUE' : go.overall === 'CONDITIONAL' ? 'REPLAN' : 'ABORT';
       const urgencyLevel = go.overall === 'GO' ? 'LOW' : go.overall === 'CONDITIONAL' ? 'MODERATE' : 'HIGH';
       return {
@@ -3649,7 +3721,7 @@ export default function App() {
       };
     }
     return optResult?.missionDecision ?? null;
-  }, [launchBodyId, targetPlanet, cislunarOps, displayedCrewHealth, optResult?.missionDecision]);
+  }, [launchBodyId, targetPlanet, cislunarMissionAnalysis, displayedCrewHealth, optResult?.missionDecision]);
 
   const ascentChartData = simResult?.best.steps.map((step) => ({
     time: step.time,
@@ -3926,13 +3998,13 @@ export default function App() {
               </div>
             </DashboardCard>
 
-            {displayedCrewHealth ? (
+            {displayedCrewHealth && optResult ? (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <DashboardCard title="Crew Health Panel" icon={ShieldAlert} provenance="formula">
                     <div className="grid grid-cols-2 gap-2">
-                      <MetricBadge label="Cumulative Dose" value={displayedCrewHealth.cumulativeDose.toFixed(2)} unit={displayedCrewHealth.unitLabel} tone={displayedCrewHealth.cumulativeDose > (displayedCrewHealth.unitLabel === 'mSv' ? 35 : 18) ? 'bad' : 'warn'} />
-                      <MetricBadge label="Peak Exposure" value={displayedCrewHealth.peakExposure.toFixed(2)} unit={displayedCrewHealth.peakUnitLabel} tone={displayedCrewHealth.peakExposure > (displayedCrewHealth.peakUnitLabel === 'mSv/h' ? 0.32 : 1) ? 'bad' : 'warn'} />
+                      <MetricBadge label="Cumulative Dose" value={displayedCrewHealth.cumulativeDose.toFixed(2)} unit={displayedCrewHealth.unitLabel} tone={displayedCrewHealth.cumulativeDose > (displayedCrewHealth.unitLabel === 'mSv' ? 50 : 18) ? 'bad' : displayedCrewHealth.cumulativeDose > (displayedCrewHealth.unitLabel === 'mSv' ? 25 : 12) ? 'warn' : 'good'} />
+                      <MetricBadge label="Peak Exposure" value={displayedCrewHealth.peakExposure.toFixed(2)} unit={displayedCrewHealth.peakUnitLabel} tone={displayedCrewHealth.peakExposure > (displayedCrewHealth.peakUnitLabel === 'mSv/h' ? 0.18 : 1) ? 'bad' : displayedCrewHealth.peakExposure > (displayedCrewHealth.peakUnitLabel === 'mSv/h' ? 0.1 : 0.6) ? 'warn' : 'good'} />
                       <MetricBadge label="Unsafe Duration" value={displayedCrewHealth.unsafeDuration.toFixed(1)} unit="hours" tone={displayedCrewHealth.unsafeDuration > 6 ? 'bad' : 'warn'} />
                       <MetricBadge label="Risk Score" value={displayedCrewHealth.riskScore.toFixed(2)} unit={displayedCrewHealth.classification} tone={displayedCrewHealth.riskScore > 1 ? 'bad' : displayedCrewHealth.riskScore > 0.6 ? 'warn' : 'good'} />
                     </div>
@@ -4501,25 +4573,25 @@ export default function App() {
                   </DashboardCard>
 
                   <DashboardCard title="Crewed Cislunar Ops" icon={ShieldAlert} provenance={cislunarOps?.source?.includes('LIVE') ? 'live-api' : 'formula'}>
-                    {cislunarOps?.analysis ? (
+                    {cislunarMissionAnalysis ? (
                       <div className="space-y-3">
                         <div className="grid grid-cols-2 gap-2">
-                          <MetricBadge label="Go / No-Go" value={cislunarOps.analysis.goNoGo.overall} unit="ops rule" tone={cislunarOps.analysis.goNoGo.overall === 'GO' ? 'good' : cislunarOps.analysis.goNoGo.overall === 'CONDITIONAL' ? 'warn' : 'bad'} />
-                          <MetricBadge label="Dose" value={cislunarOps.analysis.dose.cumulativeDoseMsv.toFixed(1)} unit="mSv" tone={cislunarOps.analysis.dose.cumulativeDoseMsv < 25 ? 'good' : 'warn'} />
-                          <MetricBadge label="Peak Dose Rate" value={cislunarOps.analysis.dose.peakDoseRateMsvHr.toFixed(2)} unit="mSv/h" tone={cislunarOps.analysis.dose.peakDoseRateMsvHr < 0.25 ? 'good' : 'warn'} />
-                          <MetricBadge label="Beta Angle" value={cislunarOps.analysis.lighting.betaAngleDeg.toFixed(1)} unit="deg" />
-                          <MetricBadge label="Longest Eclipse" value={cislunarOps.analysis.lighting.longestEclipseHours.toFixed(2)} unit="h" tone={cislunarOps.analysis.lighting.longestEclipseHours < 3.5 ? 'good' : 'warn'} />
-                          <MetricBadge label="Comm Coverage" value={(cislunarOps.analysis.consumables.commCoverageFraction * 100).toFixed(0)} unit="%" tone={cislunarOps.analysis.consumables.commCoverageFraction > 0.6 ? 'good' : 'warn'} />
-                          <MetricBadge label="Life Support" value={cislunarOps.analysis.consumables.lifeSupportMarginHours.toFixed(0)} unit="h margin" tone={cislunarOps.analysis.consumables.lifeSupportMarginHours > 168 ? 'good' : 'warn'} />
-                          <MetricBadge label="Reserve Policy" value={cislunarOps.analysis.consumables.propellantReservePolicyPct.toFixed(1)} unit="% prop reserve" />
+                          <MetricBadge label="Go / No-Go" value={cislunarMissionAnalysis.goNoGo.overall} unit="ops rule" tone={cislunarMissionAnalysis.goNoGo.overall === 'GO' ? 'good' : cislunarMissionAnalysis.goNoGo.overall === 'CONDITIONAL' ? 'warn' : 'bad'} />
+                          <MetricBadge label="Dose" value={cislunarMissionAnalysis.dose.cumulativeDoseMsv.toFixed(1)} unit="mSv" tone={cislunarMissionAnalysis.dose.cumulativeDoseMsv < 25 ? 'good' : cislunarMissionAnalysis.dose.cumulativeDoseMsv < 50 ? 'warn' : 'bad'} />
+                          <MetricBadge label="Peak Dose Rate" value={cislunarMissionAnalysis.dose.peakDoseRateMsvHr.toFixed(2)} unit="mSv/h" tone={cislunarMissionAnalysis.dose.peakDoseRateMsvHr < 0.1 ? 'good' : cislunarMissionAnalysis.dose.peakDoseRateMsvHr < 0.18 ? 'warn' : 'bad'} />
+                          <MetricBadge label="Beta Angle" value={cislunarMissionAnalysis.lighting.betaAngleDeg.toFixed(1)} unit="deg" />
+                          <MetricBadge label="Longest Eclipse" value={cislunarMissionAnalysis.lighting.longestEclipseHours.toFixed(2)} unit="h" tone={cislunarMissionAnalysis.lighting.longestEclipseHours < 3.5 ? 'good' : 'warn'} />
+                          <MetricBadge label="Comm Coverage" value={(cislunarMissionAnalysis.consumables.commCoverageFraction * 100).toFixed(0)} unit="%" tone={cislunarMissionAnalysis.consumables.commCoverageFraction > 0.6 ? 'good' : 'warn'} />
+                          <MetricBadge label="Life Support" value={cislunarMissionAnalysis.consumables.lifeSupportMarginHours.toFixed(0)} unit="h margin" tone={cislunarMissionAnalysis.consumables.lifeSupportMarginHours > 168 ? 'good' : 'warn'} />
+                          <MetricBadge label="Reserve Policy" value={cislunarMissionAnalysis.consumables.propellantReservePolicyPct.toFixed(1)} unit="% prop reserve" />
                         </div>
                         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
-                          <p>{cislunarOps.analysis.goNoGo.rationale}</p>
-                          {cislunarOps.analysis.dose.safeHavenRequired ? (
+                          <p>{cislunarMissionAnalysis.goNoGo.rationale}</p>
+                          {cislunarMissionAnalysis.dose.safeHavenRequired ? (
                             <p className="mt-1 text-amber-200">Safe-haven posture required during at least one elevated-dose segment.</p>
                           ) : null}
                           <div className="mt-2 space-y-1">
-                            {cislunarOps.analysis.goNoGo.rules.slice(0, 4).map((rule) => (
+                            {cislunarMissionAnalysis.goNoGo.rules.slice(0, 4).map((rule) => (
                               <p key={rule.rule}>
                                 {rule.rule}: <span className={rule.status === 'GO' ? 'text-emerald-300' : rule.status === 'WATCH' ? 'text-amber-300' : 'text-rose-300'}>{rule.status}</span> ({String(rule.value)}; {rule.threshold})
                               </p>
