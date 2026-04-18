@@ -74,6 +74,50 @@ type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
 type PolicyProfile = 'CREW_FIRST' | 'BALANCED' | 'COST_FIRST';
 type ScenarioType = 'NOMINAL' | 'SOLAR_STORM' | 'COMM_BLACKOUT' | 'PROPULSION_ANOMALY' | 'DELAYED_LAUNCH';
 
+interface ExternalConjunctionThreat {
+  objectA: string;
+  objectB: string;
+  tcaSeconds: number;
+  closestApproachKm: number;
+  relativeVelocityKms: number;
+  collisionProbability: number;
+}
+
+interface ExternalConjunctionFeed {
+  conjunctions: ExternalConjunctionThreat[];
+  source: string;
+}
+
+interface ExternalEventFeed {
+  total: number;
+  events: Array<{ id: string; title: string }>;
+  categoryCounts: Record<string, number>;
+  source: string;
+}
+
+interface ExternalTelemetryFeed {
+  frame: {
+    timestamp: string;
+    source: string;
+    commMarginDb?: number;
+    radiationDoseRate?: number;
+    subsystemFlags?: string[];
+  } | null;
+  source: string;
+}
+
+interface DsnVisibilityFeed {
+  windows: Array<{
+    stationId: string;
+    stationName: string;
+    startTime: string;
+    endTime: string;
+    durationMinutes: number;
+    maxElevationDeg: number;
+  }>;
+  source: string;
+}
+
 interface PropellantType {
   name: FuelType;
   isp_vac: number;
@@ -1149,22 +1193,39 @@ function MissionGlobe({
 
 function SourceStatus({
   weatherData,
+  openMeteoWeather,
   nasaWeather,
+  eonetEvents,
+  celestrakTraffic,
+  telemetryFeed,
+  dsnVisibility,
+  webGeoCalcMeta,
   stlAnalysis,
   simResult,
 }: {
   weatherData: any;
+  openMeteoWeather: any;
   nasaWeather: any;
+  eonetEvents: ExternalEventFeed | null;
+  celestrakTraffic: ExternalConjunctionFeed | null;
+  telemetryFeed: ExternalTelemetryFeed | null;
+  dsnVisibility: DsnVisibilityFeed | null;
+  webGeoCalcMeta: { source?: string; version?: string } | null;
   stlAnalysis: STLAnalysis | null;
   simResult: LaunchOptimizationResponse | null;
 }) {
   const rows = [
     { label: 'Surface weather', source: weatherData?.source ?? 'Unavailable', kind: weatherData?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Backup meteorology', source: openMeteoWeather?.source ?? 'Unavailable', kind: openMeteoWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Space weather', source: nasaWeather?.source ?? 'Unavailable', kind: nasaWeather?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
+    { label: 'Earth events', source: eonetEvents?.source ?? 'Unavailable', kind: eonetEvents?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
     { label: 'Ascent dynamics', source: simResult ? 'In-browser 2D ascent solver' : 'Not run', kind: simResult ? 'formula' : 'preset' },
     { label: 'Vehicle geometry', source: stlAnalysis ? 'User STL-derived geometry' : 'No uploaded vehicle', kind: stlAnalysis ? 'formula' : 'preset' },
     { label: 'Mission graph', source: 'Scenario graph still uses preset nodes and edges', kind: 'preset' },
-    { label: 'Conjunction panel', source: 'Shell-spacing heuristic only', kind: 'heuristic' },
+    { label: 'Conjunction panel', source: celestrakTraffic?.source ?? 'Imported-state propagation only', kind: celestrakTraffic?.source?.startsWith('LIVE') ? 'live-api' : 'heuristic' },
+    { label: 'Ground stations', source: dsnVisibility?.source ?? 'Unavailable', kind: dsnVisibility?.source?.includes('DSN') ? 'formula' : 'preset' },
+    { label: 'Telemetry ingest', source: telemetryFeed?.frame ? telemetryFeed.source : 'Awaiting external frames', kind: telemetryFeed?.frame ? 'live-api' : 'preset' },
+    { label: 'SPICE verification', source: webGeoCalcMeta?.source ?? 'Unavailable', kind: webGeoCalcMeta?.source?.startsWith('LIVE') ? 'live-api' : 'preset' },
   ] as const;
 
   return (
@@ -1240,8 +1301,15 @@ function PhysicsPanel({ keplerEl, fuelType }: { keplerEl: KeplerianElements; fue
   );
 }
 
-function ConjunctionPanel({ importedNodes }: { importedNodes: GeneratedMissionNode[] }) {
+function ConjunctionPanel({
+  importedNodes,
+  externalThreats,
+}: {
+  importedNodes: GeneratedMissionNode[];
+  externalThreats: ExternalConjunctionThreat[];
+}) {
   const assessments = useMemo(() => {
+    if (importedNodes.length < 2) return externalThreats.slice(0, 6);
     const results = [];
     for (let i = 0; i < importedNodes.length; i++) {
       for (let j = i + 1; j < importedNodes.length; j++) {
@@ -1253,7 +1321,7 @@ function ConjunctionPanel({ importedNodes }: { importedNodes: GeneratedMissionNo
 
   return (
     <div className="space-y-2">
-      {assessments.length === 0 ? <p className="text-sm text-slate-400">Import at least two orbital states or TLEs to compute propagated closest approach.</p> : null}
+      {assessments.length === 0 ? <p className="text-sm text-slate-400">Import at least two orbital states or TLEs, or allow the live CelesTrak feed to populate screening results.</p> : null}
       {assessments.map((threat) => {
         const tone = threat.collisionProbability > 0.1 ? 'bad' : threat.collisionProbability > 0.01 ? 'warn' : 'good';
         return (
@@ -1285,7 +1353,13 @@ export default function App() {
   const [launchAltitudeKm, setLaunchAltitudeKm] = useState(0);
   const [bodySearch, setBodySearch] = useState('');
   const [weatherData, setWeatherData] = useState<any>(null);
+  const [openMeteoWeather, setOpenMeteoWeather] = useState<any>(null);
   const [nasaWeather, setNasaWeather] = useState<any>(null);
+  const [eonetEvents, setEonetEvents] = useState<ExternalEventFeed | null>(null);
+  const [celestrakTraffic, setCelestrakTraffic] = useState<ExternalConjunctionFeed | null>(null);
+  const [telemetryFeed, setTelemetryFeed] = useState<ExternalTelemetryFeed | null>(null);
+  const [dsnVisibility, setDsnVisibility] = useState<DsnVisibilityFeed | null>(null);
+  const [webGeoCalcMeta, setWebGeoCalcMeta] = useState<{ source?: string; version?: string } | null>(null);
   const [optResult, setOptResult] = useState<OptimizationResult | null>(null);
   const [importedMissionConfig, setImportedMissionConfig] = useState<ImportedMissionConfig | null>(null);
   const [importedGraph, setImportedGraph] = useState<{ nodes: GeneratedMissionNode[]; edges: any[] } | null>(null);
@@ -1347,25 +1421,62 @@ export default function App() {
 
   useEffect(() => {
     const fetchAll = async () => {
-      try {
-        let wx: any = { source: 'NOT APPLICABLE' };
-        if (launchBodyId === 'earth') {
-          const wxRes = await fetch(`/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`);
-          wx = await wxRes.json();
-        }
-        const nasaRes = await fetch('/api/space-weather');
-        const nasa = await nasaRes.json();
-        setWeatherData(wx);
-        setNasaWeather(nasa);
-        if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
-        addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
-        addLog(`Space weather: ${nasa.source}`);
-      } catch (error) {
-        addLog('Data fetch failed; source status remains explicit');
+      const isEarth = launchBodyId === 'earth';
+      const weatherUrl = `/api/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
+      const openMeteoUrl = `/api/openmeteo/weather?lat=${launchLatitude}&lon=${launchLongitude}`;
+      const [wxResult, openMeteoResult, spaceResult, eonetResult, trafficResult, telemetryResult, wgcResult] = await Promise.allSettled([
+        isEarth ? fetch(weatherUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
+        isEarth ? fetch(openMeteoUrl).then((res) => res.json()) : Promise.resolve({ source: 'NOT APPLICABLE' }),
+        fetch('/api/space-weather').then((res) => res.json()),
+        fetch('/api/eonet/events?status=open&limit=4&days=14').then((res) => res.json()),
+        fetch('/api/celestrak/conjunctions?group=STATIONS&limit=10').then((res) => res.json()),
+        fetch('/api/telemetry/latest').then((res) => res.json()),
+        fetch('/api/webgeocalc/metadata').then((res) => res.json()),
+      ]);
+
+      const wx = wxResult.status === 'fulfilled' ? wxResult.value : { source: 'UNAVAILABLE' };
+      const openMeteo = openMeteoResult.status === 'fulfilled' ? openMeteoResult.value : { source: 'UNAVAILABLE' };
+      const nasa = spaceResult.status === 'fulfilled' ? spaceResult.value : { source: 'UNAVAILABLE' };
+      const eonet = eonetResult.status === 'fulfilled' ? eonetResult.value : null;
+      const traffic = trafficResult.status === 'fulfilled' ? trafficResult.value : null;
+      const telemetry = telemetryResult.status === 'fulfilled' ? telemetryResult.value : null;
+      const wgc = wgcResult.status === 'fulfilled' ? wgcResult.value : null;
+
+      setWeatherData(wx);
+      setOpenMeteoWeather(openMeteo);
+      setNasaWeather(nasa);
+      setEonetEvents(eonet);
+      setCelestrakTraffic(traffic);
+      setTelemetryFeed(telemetry);
+      setWebGeoCalcMeta(wgc);
+      if (wx.wind_speed) setWindSpeed(Math.round(wx.wind_speed / 3.6));
+
+      addLog(`Surface weather: ${wx.source ?? 'NOT APPLICABLE'}`);
+      addLog(`Space weather: ${nasa.source ?? 'UNAVAILABLE'}`);
+      if (traffic?.source) addLog(`Traffic screening: ${traffic.source}`);
+      if (telemetry?.frame) addLog(`Telemetry ingest active: ${telemetry.frame.source}`);
+      if (!isEarth) {
+        setWeatherData({ source: 'NOT APPLICABLE' });
+        setOpenMeteoWeather({ source: 'NOT APPLICABLE' });
       }
     };
     fetchAll();
   }, [addLog, launchBodyId, launchLatitude, launchLongitude]);
+
+  useEffect(() => {
+    const fetchDsnVisibility = async () => {
+      try {
+        const start = launchDate;
+        const stop = new Date(new Date(launchDate).getTime() + 3 * 86400000).toISOString().slice(0, 10);
+        const response = await fetch(`/api/dsn/visibility?targetId=${targetPlanet}&startTime=${start}&stopTime=${stop}&stepSize=2 h&minElevationDeg=10`);
+        const data = await response.json();
+        setDsnVisibility(data);
+      } catch {
+        setDsnVisibility(null);
+      }
+    };
+    fetchDsnVisibility();
+  }, [launchDate, targetPlanet]);
 
   useEffect(() => {
     if (optResult?.totalDeltaV_ms && Number.isFinite(optResult.totalDeltaV_ms) && optResult.totalDeltaV_ms > 0) {
@@ -1834,6 +1945,14 @@ export default function App() {
                   <div className="flex items-center justify-between text-sm text-slate-300">
                     <span>Space Radiation Index</span>
                     <span>{nasaWeather?.radiationIndex?.toFixed?.(2) ?? '--'}x</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span>Traffic Alerts</span>
+                    <span>{celestrakTraffic?.conjunctions?.length ?? 0}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-300">
+                    <span>DSN Windows</span>
+                    <span>{dsnVisibility?.windows?.length ?? 0}</span>
                   </div>
                   <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">{weatherData?.source ?? 'Weather unavailable'}</div>
                 </div>
@@ -2338,7 +2457,18 @@ export default function App() {
                   </DashboardCard>
 
                   <DashboardCard title="Provenance Audit" icon={ShieldAlert}>
-                    <SourceStatus weatherData={weatherData} nasaWeather={nasaWeather} stlAnalysis={stlAnalysis} simResult={simResult} />
+                    <SourceStatus
+                      weatherData={weatherData}
+                      openMeteoWeather={openMeteoWeather}
+                      nasaWeather={nasaWeather}
+                      eonetEvents={eonetEvents}
+                      celestrakTraffic={celestrakTraffic}
+                      telemetryFeed={telemetryFeed}
+                      dsnVisibility={dsnVisibility}
+                      webGeoCalcMeta={webGeoCalcMeta}
+                      stlAnalysis={stlAnalysis}
+                      simResult={simResult}
+                    />
                   </DashboardCard>
                 </motion.div>
               ) : null}
@@ -2370,8 +2500,8 @@ export default function App() {
                     <PhysicsPanel keplerEl={keplerEl} fuelType={fuelType} />
                   </DashboardCard>
 
-                  <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : 'preset'}>
-                    <ConjunctionPanel importedNodes={importedGraph?.nodes ?? []} />
+                  <DashboardCard title="Conjunction Panel" icon={ShieldAlert} provenance={importedGraph ? 'formula' : celestrakTraffic?.source?.startsWith('LIVE') ? 'live-api' : 'preset'}>
+                    <ConjunctionPanel importedNodes={importedGraph?.nodes ?? []} externalThreats={celestrakTraffic?.conjunctions ?? []} />
                   </DashboardCard>
 
                   <DashboardCard title="Fuel Calculator" icon={Rocket} provenance="formula">
