@@ -9,12 +9,13 @@ import {
   Rocket, Map as MapIcon, Activity, Settings, ShieldAlert, Zap,
   ChevronRight, Database, Cpu, Target, FlaskConical, Tractor,
   Save, Download, CheckCircle2, Atom, Satellite, Globe, AlertTriangle,
-  TrendingDown, Gauge, Wind, Thermometer, Radio
+  TrendingDown, Gauge, Wind, Thermometer, Radio, BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  AreaChart, Area, LineChart, Line, ScatterChart, Scatter, ReferenceLine, Legend
+  AreaChart, Area, LineChart, Line, ScatterChart, Scatter, ReferenceLine,
+  Legend, BarChart, Bar, Cell
 } from 'recharts';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera, Stars, Float, Text, Line as DreiLine } from '@react-three/drei';
@@ -25,33 +26,18 @@ import {
   KeplerianElements, keplerian2ECI, propagateOrbit, generateOrbitPoints,
   computeHohmann, atmosphericDensity, estimateConjunctionRisk,
 } from './lib/orbital';
+import type { OptimizationResult, QUBOWeights, DistributionEntry } from './lib/optimizer';
 import { SimulatedAnnealer, hohmannDeltaV, vanAllenDose, tsiolkovskyFuelMass, j2NodalPrecession } from './lib/optimizer';
+
 
 function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
+// OptimizationResult is imported from ./lib/optimizer (single source of truth).
 type MissionType = 'lunar' | 'orbital' | 'rover';
 type FuelType = 'RP-1' | 'LH2' | 'Methane';
 type PropellantType = { name: FuelType; isp_vac: number; isp_sl: number; density: number; color: string };
 
-interface OptimizationResult {
-  path: string[];
-  totalCost: number;
-  fuel: number;
-  radiationExposure: number;
-  commLoss: number;
-  naivePath: string[];
-  naiveCost: number;
-  quboGraph: { nodes: number; binaryVars: number; temperature: number; annealingSteps: number };
-  circuitMap: { gate: string; qubit: number; target?: number; angle?: string; layer?: number }[];
-  totalDeltaV_ms: number;
-  fuelMass_kg: number;
-  propellantFraction: number;
-  annealingHistory: { step: number; temperature: number; energy: number }[];
-  qaoa: { layers: any[]; finalEnergy: number; approximationRatio: number; quantumAdvantage_pct: number };
-  physics: { hohmannDeltaV: number; j2Correction: number; vanAllenDose: number; transferTime_days: number };
-}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -135,7 +121,7 @@ const MISSION_SCENARIOS = [
 const CB = '#4B9CD3';
 const CB_DIM = '#3a7aa8';
 
-const DashboardCard = ({ children, title, icon: Icon, className, accent = false }: any) => (
+const DashboardCard = ({ children, title, icon: Icon, className, accent = false, headerRight }: any) => (
   <div className={cn(
     "bg-bg-card border rounded-lg overflow-hidden flex flex-col",
     accent ? "border-[#4B9CD3]/40 shadow-[0_0_16px_rgba(75,156,211,0.07)]" : "border-slate-800 shadow-[0_0_20px_rgba(0,0,0,0.5)]",
@@ -149,11 +135,12 @@ const DashboardCard = ({ children, title, icon: Icon, className, accent = false 
         <Icon className="w-3.5 h-3.5" style={{ color: accent ? CB : CB_DIM }} />
         <span className="text-[11px] font-semibold tracking-[1.2px] text-slate-300 uppercase">{title}</span>
       </div>
-      <div className="w-1.5 h-1.5 rounded-full" style={{ background: accent ? CB : CB_DIM, opacity: accent ? 1 : 0.4 }} />
+      {headerRight ?? <div className="w-1.5 h-1.5 rounded-full" style={{ background: accent ? CB : CB_DIM, opacity: accent ? 1 : 0.4 }} />}
     </div>
     <div className="p-4 flex-1">{children}</div>
   </div>
 );
+
 
 const MetricBadge = ({ label, value, unit, color = CB, warning = false }: any) => (
   <div className={cn(
@@ -231,6 +218,126 @@ const AnnealingChart = ({ history }: { history: { step: number; temperature: num
     </LineChart>
   </ResponsiveContainer>
 );
+
+// ─── Quantum Distribution Chart ───────────────────────────────────────────────
+
+const QuantumDistribution = ({ distribution, nQubits }: { distribution: DistributionEntry[]; nQubits: number }) => {
+  if (!distribution || distribution.length === 0) return null;
+  const maxProb = Math.max(...distribution.map(d => d.probability));
+  return (
+    <div className="space-y-1">
+      <ResponsiveContainer width="100%" height={160}>
+        <BarChart data={distribution} margin={{ top: 4, right: 4, bottom: 24, left: 0 }} layout="vertical">
+          <CartesianGrid strokeDasharray="2 2" stroke="#ffffff0a" horizontal={false} />
+          <XAxis type="number" domain={[0, maxProb * 1.1]} tick={{ fontSize: 8, fill: '#94a3b8' }}
+            tickFormatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
+          <YAxis type="category" dataKey="state" tick={{ fontSize: 7, fill: '#94a3b8' }} width={48} />
+          <Tooltip
+            contentStyle={{ background: '#0d1224', border: '1px solid #334155', fontSize: 9, color: '#e2e8f0' }}
+            formatter={(val: any, _: any, entry: any) => [
+              `${(val * 100).toFixed(2)}% (E=${entry.payload.energy?.toFixed(2)})`,
+              entry.payload.isOptimal ? '★ Optimal state' : 'State'
+            ]}
+          />
+          <Bar dataKey="probability" radius={[0, 2, 2, 0]}>
+            {distribution.map((entry, i) => (
+              <Cell key={i} fill={entry.isOptimal ? '#fbbf24' : '#4B9CD3'} opacity={entry.isOptimal ? 1 : 0.75} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+      <p className="text-[8px] text-slate-500 text-center leading-tight px-2">
+        Higher <span className="text-[#4B9CD3]">p</span> concentrates amplitude on low-energy feasible
+        paths — this is quantum interference. <span className="text-[#fbbf24]">Gold</span> = brute-force optimal.
+      </p>
+    </div>
+  );
+};
+
+// ─── 2D Graph Overlay ─────────────────────────────────────────────────────────
+
+const Graph2DOverlay = ({ preset, optResult }: { preset: any; optResult: OptimizationResult | null }) => {
+  const W = 340, H = 240, PAD = 24;
+  const innerW = W - PAD * 2, innerH = H - PAD * 2;
+  const toSVG = (x: number, y: number) => ({
+    cx: PAD + (x / 100) * innerW,
+    cy: PAD + (y / 100) * innerH,
+  });
+
+  const optPath = optResult?.path ?? [];
+
+  // Radiation heatmap: 0 (green) → 1 (red)
+  const radColor = (rad: number) => {
+    const r = Math.round(255 * rad);
+    const g = Math.round(255 * (1 - rad));
+    return `rgb(${r},${g},60)`;
+  };
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="rounded bg-slate-900/80">
+      {/* Edges */}
+      {preset.edges.map((edge: any, i: number) => {
+        const from = preset.nodes.find((n: any) => n.id === edge.from);
+        const to   = preset.nodes.find((n: any) => n.id === edge.to);
+        if (!from || !to) return null;
+        const s = toSVG(from.x, from.y), t = toSVG(to.x, to.y);
+        const isOptEdge = optPath.some((_, idx) =>
+          idx < optPath.length - 1 && optPath[idx] === edge.from && optPath[idx + 1] === edge.to
+        );
+        const sw = Math.max(0.5, Math.min(3, (edge.fuelCost / 200)));
+        return (
+          <g key={i}>
+            <line x1={s.cx} y1={s.cy} x2={t.cx} y2={t.cy}
+              stroke={isOptEdge ? '#4B9CD3' : '#334155'}
+              strokeWidth={isOptEdge ? sw + 1.5 : sw}
+              className={isOptEdge ? 'path-animated' : ''}
+              markerEnd="url(#arrow)"
+            />
+            {edge.deltaV_ms && (
+              <text x={(s.cx + t.cx) / 2} y={(s.cy + t.cy) / 2 - 3}
+                fontSize="6" fill="#64748b" textAnchor="middle">
+                {(edge.deltaV_ms / 1000).toFixed(2)} km/s
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Nodes */}
+      {preset.nodes.map((node: any) => {
+        const { cx, cy } = toSVG(node.x, node.y);
+        const r = 5 + node.radiation * 6;
+        const inPath = optPath.includes(node.id);
+        return (
+          <g key={node.id}>
+            <circle cx={cx} cy={cy} r={r} fill={radColor(node.radiation)}
+              stroke={inPath ? '#fbbf24' : '#1e293b'} strokeWidth={inPath ? 2 : 1} opacity={0.9} />
+            <text x={cx} y={cy - r - 2} fontSize="7" fill="#e2e8f0" textAnchor="middle"
+              style={{ fontFamily: 'monospace' }}>
+              {node.name ?? node.id}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* Arrow marker */}
+      <defs>
+        <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L6,3 z" fill="#4B9CD3" opacity="0.6" />
+        </marker>
+      </defs>
+
+      {/* Legend */}
+      <g transform={`translate(${PAD},${H - 14})`}>
+        <rect x={0} y={0} width={8} height={8} fill="#4B9CD3" rx={1} />
+        <text x={11} y={7} fontSize="6" fill="#94a3b8">Optimal path</text>
+        <rect x={80} y={0} width={8} height={8} fill="#fbbf24" rx={1} />
+        <text x={91} y={7} fontSize="6" fill="#94a3b8">Path nodes</text>
+        <text x={160} y={7} fontSize="6" fill="#94a3b8">Node size ∝ radiation</text>
+      </g>
+    </svg>
+  );
+};
 
 // ─── Orbital Visualizer Components ────────────────────────────────────────────
 
@@ -530,6 +637,11 @@ export default function App() {
   const [tleData, setTleData] = useState<any>(null);
 
   const [optimizing, setOptimizing] = useState(false);
+  const [qaoa_p, setQaoa_p] = useState(3);
+  const [qaoaRerunning, setQaoaRerunning] = useState(false);
+  const [showGraph2D, setShowGraph2D] = useState(false);
+  const [weightsChanged, setWeightsChanged] = useState(false);
+  const [weights, setWeights] = useState<QUBOWeights>({ fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 });
   const [optResult, setOptResult] = useState<OptimizationResult | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [logLines, setLogLines] = useState<string[]>([
@@ -537,6 +649,11 @@ export default function App() {
     '> Quantum optimizer ready',
     '> Awaiting mission parameters...',
   ]);
+
+  const updateWeight = (key: keyof QUBOWeights, val: number) => {
+    setWeights(prev => ({ ...prev, [key]: val }));
+    if (optResult) setWeightsChanged(true);
+  };
 
   const addLog = useCallback((msg: string) => {
     setLogLines(prev => [...prev.slice(-20), `> ${msg}`]);
@@ -584,6 +701,7 @@ export default function App() {
   const handleOptimize = async () => {
     setOptimizing(true);
     setOptResult(null);
+    setWeightsChanged(false);
     addLog(`Initialising QUBO formulation (${preset.nodes.length} nodes × ${preset.edges.length} edges)...`);
     addLog(`Encoding Hamiltonian: H = Σ wf·Δv² + wr·rad² + wc·(1-comm)² + ws·safety`);
 
@@ -594,7 +712,7 @@ export default function App() {
         body: JSON.stringify({
           nodes: preset.nodes,
           edges: preset.edges,
-          weights: { fuel: 3.0, rad: 5.0, comm: 2.0, safety: 4.0 },
+          weights,
           start: preset.start,
           end: preset.end,
           steps: 8,
@@ -602,13 +720,15 @@ export default function App() {
           radiationIndex: nasaWeather?.radiationIndex || 1.0,
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
+          qaoa_p,
         })
       });
-      const data = await res.json();
+      const data: OptimizationResult = await res.json();
       setOptResult(data);
       addLog(`Annealing complete: ${data.quboGraph?.annealingSteps?.toLocaleString()} iterations`);
-      addLog(`QAOA p=${data.qaoa?.layers?.length ?? 3}: ⟨E⟩ = ${data.qaoa?.finalEnergy?.toFixed(4)}`);
-      addLog(`Quantum advantage: ${data.qaoa?.quantumAdvantage_pct?.toFixed(1)}% cost reduction`);
+      addLog(`QAOA p=${data.qaoa?.layers?.length ?? qaoa_p}: ⟨E⟩ = ${data.qaoa?.finalEnergy?.toFixed(4)}`);
+      addLog(`QAOA Match: ${data.qaoa?.qaoaMatchPct?.toFixed(1)}% of brute-force optimal`);
+      addLog(`SA improvement: ${data.qaoa?.classicalSAImprovement_pct?.toFixed(1)}% over greedy baseline`);
       addLog(`Total Δv = ${data.totalDeltaV_ms?.toFixed(0)} m/s | Fuel = ${data.fuelMass_kg?.toFixed(0)} kg`);
     } catch (e) {
       addLog('ERROR: Optimization failed — check server');
@@ -618,10 +738,43 @@ export default function App() {
     }
   };
 
+  // ── QAOA Re-run (p-depth change, no SA) ───────────────────────────────────
+  const handleQAOARerun = async (newP: number) => {
+    if (!optResult) return;
+    setQaoaRerunning(true);
+    addLog(`Re-running QAOA with p=${newP} (keeping SA path)...`);
+    try {
+      const res = await fetch('/api/qaoa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bestPath: optResult.path,
+          nodes: preset.nodes,
+          edges: preset.edges,
+          weights,
+          qaoa_p: newP,
+        }),
+      });
+      const data = await res.json();
+      setOptResult(prev => prev ? {
+        ...prev,
+        qaoa: { ...prev.qaoa, ...data.qaoa },
+        circuitMap: data.circuitMap,
+      } : null);
+      addLog(`QAOA p=${newP}: ⟨E⟩ = ${data.qaoa?.finalEnergy?.toFixed(4)}, Match = ${data.qaoa?.qaoaMatchPct?.toFixed(1)}%`);
+    } catch (e) {
+      addLog('ERROR: QAOA re-run failed');
+    } finally {
+      setQaoaRerunning(false);
+    }
+  };
+
   // ── Save/Load ───────────────────────────────────────────────────────────────
   const saveConfig = () => {
     setSaveStatus('saving');
-    localStorage.setItem('artemisq_config', JSON.stringify({ targetPlanet, missionType, fuelType, launchDate, windSpeed, keplerEl, spacecraftMass }));
+    localStorage.setItem('artemisq_config', JSON.stringify({
+      targetPlanet, missionType, fuelType, launchDate, windSpeed, keplerEl, spacecraftMass, weights, qaoa_p
+    }));
     setTimeout(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }, 600);
   };
   const loadConfig = () => {
@@ -632,6 +785,8 @@ export default function App() {
       setFuelType(c.fuelType); setLaunchDate(c.launchDate);
       setWindSpeed(c.windSpeed); if (c.keplerEl) setKeplerEl(c.keplerEl);
       if (c.spacecraftMass) setSpacecraftMass(c.spacecraftMass);
+      if (c.weights) setWeights(c.weights);
+      if (c.qaoa_p) setQaoa_p(c.qaoa_p);
       setOptResult(null);
       addLog('Configuration loaded from local storage');
     }
@@ -718,22 +873,42 @@ export default function App() {
           <section className="flex flex-col gap-3 overflow-hidden min-w-0">
 
             {/* Globe / 3D view */}
-            <DashboardCard title={`${preset.title} — ${PLANETS[targetPlanet]?.name}`} icon={Globe} className="flex-1 min-h-0" accent>
+            <DashboardCard
+              title={`${preset.title} — ${PLANETS[targetPlanet]?.name}`}
+              icon={Globe} className="flex-1 min-h-0" accent
+              headerRight={
+                <button
+                  onClick={() => setShowGraph2D(v => !v)}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded border text-[8px] font-bold uppercase transition-all"
+                  style={showGraph2D
+                    ? { background: `${CB}30`, borderColor: CB, color: CB }
+                    : { background: '#0f172a', borderColor: '#334155', color: '#94a3b8' }}
+                >
+                  {showGraph2D ? '🌍 3D' : '📊 2D'}
+                </button>
+              }
+            >
               <div className="w-full h-full rounded-sm bg-black/50 border border-slate-800 overflow-hidden" style={{ minHeight: 320 }}>
-                <Canvas>
-                  <PerspectiveCamera makeDefault position={[0, 80, 500]} />
-                  <OrbitControls minDistance={80} maxDistance={1200} />
-                  <ambientLight intensity={0.3} />
-                  <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff8e1" />
-                  <pointLight position={[-200, -100, -200]} intensity={0.3} color="#0022ff" />
-                  <MissionGlobe
-                    launchDate={launchDate}
-                    targetPlanetId={targetPlanet}
-                    optResult={optResult}
-                    preset={preset}
-                    keplerEl={keplerEl}
-                  />
-                </Canvas>
+                {showGraph2D ? (
+                  <div className="w-full h-full flex items-center justify-center p-2">
+                    <Graph2DOverlay preset={preset} optResult={optResult} />
+                  </div>
+                ) : (
+                  <Canvas>
+                    <PerspectiveCamera makeDefault position={[0, 80, 500]} />
+                    <OrbitControls minDistance={80} maxDistance={1200} />
+                    <ambientLight intensity={0.3} />
+                    <pointLight position={[500, 200, 200]} intensity={1.2} color="#fff8e1" />
+                    <pointLight position={[-200, -100, -200]} intensity={0.3} color="#0022ff" />
+                    <MissionGlobe
+                      launchDate={launchDate}
+                      targetPlanetId={targetPlanet}
+                      optResult={optResult}
+                      preset={preset}
+                      keplerEl={keplerEl}
+                    />
+                  </Canvas>
+                )}
               </div>
             </DashboardCard>
 
@@ -863,15 +1038,40 @@ export default function App() {
                           onChange={e => setWindSpeed(+e.target.value)} className="w-full mt-1" style={{ accentColor: CB }} />
                       </div>
 
+                      {/* QUBO Weight Sliders */}
+                      <div className="space-y-2 border border-slate-800 rounded p-2.5">
+                        <p className="text-[9px] text-slate-400 uppercase font-bold">QUBO Weights</p>
+                        {([
+                          { key: 'fuel',   label: 'w_fuel (ΔV)',    color: '#f59e0b' },
+                          { key: 'rad',    label: 'w_rad (Radiation)', color: '#f87171' },
+                          { key: 'comm',   label: 'w_comm (Signal)', color: CB },
+                          { key: 'safety', label: 'w_safety',        color: '#4ade80' },
+                        ] as const).map(({ key, label, color }) => (
+                          <div key={key}>
+                            <div className="flex justify-between text-[9px] mb-0.5">
+                              <span className="text-slate-400">{label}</span>
+                              <span className="font-bold" style={{ color }}>{weights[key].toFixed(1)}</span>
+                            </div>
+                            <input type="range" min={0} max={10} step={0.5} value={weights[key]}
+                              onChange={e => updateWeight(key, +e.target.value)}
+                              className="w-full" style={{ accentColor: color }} />
+                          </div>
+                        ))}
+                      </div>
+
                       <button onClick={handleOptimize} disabled={optimizing}
-                        className="w-full py-3 font-black uppercase text-[10px] tracking-widest rounded transition-all disabled:opacity-50"
+                        id="run-optimizer-btn"
+                        className={cn(
+                          'w-full py-3 font-black uppercase text-[10px] tracking-widest rounded transition-all disabled:opacity-50 border-2',
+                          weightsChanged && !optimizing ? 'stale-pulse' : 'border-transparent'
+                        )}
                         style={{ background: CB, color: '#000' }}>
                         {optimizing ? (
                           <span className="flex items-center justify-center gap-2">
                             <span className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
                             Quantum Optimizing...
                           </span>
-                        ) : 'Run Quantum Optimizer →'}
+                        ) : weightsChanged ? 'Weights Changed — Re-run →' : 'Run Quantum Optimizer →'}
                       </button>
 
                       <div className="grid grid-cols-2 gap-2">
@@ -1060,36 +1260,77 @@ export default function App() {
                         <div className="text-slate-500">xᵢₖ ∈ &#123;0,1&#125;: node i at step k</div>
                         <div className="text-slate-300">HC = Σ wf·fuelCost² + Σ wr·rad² + Σ wc·(1-comm)²</div>
                         <div className="text-slate-300">HB = Σᵢ Xᵢ  (mixer — uniform superposition)</div>
+                        <div className="text-[9px] text-slate-500 mt-1">U(γ,β) = e&#123;-iβH_B&#125; · e&#123;-iγH_C&#125; per layer</div>
                       </div>
                       <div className="grid grid-cols-3 gap-1.5">
-                        <MetricBadge label="QUBO Size" value={optResult ? `${optResult.quboGraph.binaryVars}` : '-'} unit="binary vars" color="#a78bfa" />
-                        <MetricBadge label="w_fuel" value="3.0" color="#f59e0b" />
-                        <MetricBadge label="w_rad" value="5.0" color="#f87171" />
-                        <MetricBadge label="w_comm" value="2.0" color={CB} />
-                        <MetricBadge label="w_safety" value="4.0" color="#4ade80" />
+                        <MetricBadge label="QUBO Vars" value={optResult ? `${optResult.quboGraph.binaryVars}` : '-'} unit="binary vars" color="#a78bfa" />
+                        <MetricBadge label="w_fuel" value={weights.fuel.toFixed(1)} color="#f59e0b" />
+                        <MetricBadge label="w_rad" value={weights.rad.toFixed(1)} color="#f87171" />
+                        <MetricBadge label="w_comm" value={weights.comm.toFixed(1)} color={CB} />
+                        <MetricBadge label="w_safety" value={weights.safety.toFixed(1)} color="#4ade80" />
                         <MetricBadge label="Penalty λ" value="1000" color="#a78bfa" />
                       </div>
                     </div>
                   </DashboardCard>
 
+                  {/* QAOA Circuit Depth Slider + circuit display */}
                   <DashboardCard title="QAOA Circuit" icon={Cpu}>
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-slate-400 uppercase">Algorithm depth p</span>
-                        <span className="font-bold" style={{ color: CB }}>{optResult?.qaoa.layers.length ?? 3} layers</span>
+                      {/* p-depth slider */}
+                      <div className="space-y-1.5 border border-slate-800 rounded p-2.5">
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-slate-400 uppercase font-bold">Circuit Depth p</span>
+                          <span className="font-bold" style={{ color: CB }}>p = {qaoa_p}</span>
+                        </div>
+                        <input type="range" min={1} max={5} step={1} value={qaoa_p}
+                          onChange={e => setQaoa_p(+e.target.value)}
+                          className="w-full" style={{ accentColor: CB }} />
+                        <div className="flex justify-between text-[7px] text-slate-600">
+                          {[1,2,3,4,5].map(v => <span key={v}>{v}</span>)}
+                        </div>
+                        <button
+                          onClick={() => handleQAOARerun(qaoa_p)}
+                          disabled={!optResult || qaoaRerunning}
+                          className="w-full py-1.5 text-[9px] font-bold uppercase tracking-widest rounded border transition-all disabled:opacity-40"
+                          style={{ borderColor: CB, color: CB, background: `${CB}18` }}>
+                          {qaoaRerunning ? (
+                            <span className="flex items-center justify-center gap-1.5">
+                              <span className="w-2.5 h-2.5 border border-[#4B9CD3]/40 border-t-[#4B9CD3] rounded-full animate-spin" />
+                              Re-running QAOA...
+                            </span>
+                          ) : !optResult ? 'Run optimizer first' : `Re-run QAOA (p=${qaoa_p}) →`}
+                        </button>
                       </div>
+
                       <div className="bg-slate-900/80 border border-slate-700 p-2.5 rounded font-mono text-[10px] space-y-1">
-                        <div className="text-amber-400">U(γ,β) = e^&#123;-iβH_B&#125; · e^&#123;-iγH_C&#125;</div>
+                        <div className="text-amber-400">U(γ,β) = e&#123;-iβH_B&#125; · e&#123;-iγH_C&#125;</div>
                         <div className="text-slate-300">|ψ₀⟩ = H^⊗n|0⟩  (uniform superposition)</div>
                         <div className="text-slate-300">|ψ_p⟩ = U(γ_p,β_p)···U(γ₁,β₁)|ψ₀⟩</div>
+                        <div className="text-[9px] text-slate-500">Full complex amplitudes: re+im ✓ | Grid 20×20/layer ✓</div>
                       </div>
                       {optResult?.circuitMap?.length ? (
-                        <QuantumCircuit gates={optResult.circuitMap.slice(0, 60)} />
+                        <QuantumCircuit gates={optResult.circuitMap.slice(0, Math.max(60, (optResult.qaoa.layers.length) * 20 + 20))} />
                       ) : (
                         <div className="text-[10px] text-slate-500 text-center py-4">Run optimizer to generate circuit</div>
                       )}
                     </div>
                   </DashboardCard>
+
+                  {/* QAOA Probability Distribution */}
+                  {optResult?.qaoa?.distribution && optResult.qaoa.distribution.length > 0 && (
+                    <DashboardCard title="Probability Distribution" icon={BarChart3}>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-slate-400">Feasible basis states, sorted by amplitude</span>
+                          <span className="font-bold" style={{ color: CB }}>n={optResult.path.length} qubits</span>
+                        </div>
+                        <QuantumDistribution
+                          distribution={optResult.qaoa.distribution}
+                          nQubits={optResult.path.length}
+                        />
+                      </div>
+                    </DashboardCard>
+                  )}
 
                   {optResult?.qaoa && (
                     <DashboardCard title="QAOA Metrics" icon={Zap}>
@@ -1103,9 +1344,15 @@ export default function App() {
                           </div>
                         ))}
                         <div className="grid grid-cols-2 gap-1.5 pt-1">
+                          <MetricBadge label="QAOA Match %" value={`${optResult.qaoa.qaoaMatchPct?.toFixed(1) ?? '-'}%`} color="#4ade80" />
                           <MetricBadge label="Approx. Ratio" value={optResult.qaoa.approximationRatio.toFixed(4)} color="#a78bfa" />
                           <MetricBadge label="Final ⟨E⟩" value={optResult.qaoa.finalEnergy.toFixed(4)} color={CB} />
+                          <MetricBadge label="SA Improvement" value={`${optResult.qaoa.classicalSAImprovement_pct?.toFixed(1) ?? '-'}%`} color="#f59e0b" />
                         </div>
+                        <p className="text-[8px] text-slate-500 pt-1 border-t border-slate-800">
+                          QAOA Match = E_optimal / ⟨E⟩ × 100% — how close QAOA gets to the brute-force QUBO optimum.
+                          SA Improvement = classical cost reduction vs. greedy baseline (not quantum).
+                        </p>
                       </div>
                     </DashboardCard>
                   )}
@@ -1117,6 +1364,7 @@ export default function App() {
                         <div className="text-slate-300">T(k) = T₀ · α^k,  α = (T_f/T₀)^(1/N)</div>
                         <div className="text-slate-300">N = 20,000 iterations</div>
                         <div className="text-slate-300">T₀ = 8000 K → T_f = 0.01 K</div>
+                        <div className="text-[9px] text-slate-500">Metropolis-Hastings criterion · swap + replace moves</div>
                       </div>
                       {optResult && (
                         <div className="grid grid-cols-2 gap-1.5">
