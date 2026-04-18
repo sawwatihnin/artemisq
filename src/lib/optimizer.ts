@@ -91,6 +91,7 @@ import { evaluateHierarchicalDecision, type HierarchicalDecision } from './hiera
 import { generateMissionReport, type MissionReport } from './report';
 import { buildDigitalTwinAssessment, type DigitalTwinAssessment } from './digitalTwin';
 import { buildMissionCommandTimeline, type MissionCommandTimeline } from './missionCommand';
+import { computeNodeGravityInfluence, summarizePathGravityExposure } from './gravityRisk';
 
 export interface OptimizerNode {
   id: string;
@@ -153,6 +154,10 @@ export interface TimeDependentNodeState {
   radiationField: number[];
   fuelMultiplier: number[];
   communicationReliability: number[];
+  gravityPenalty?: number[];
+  gravityAssistPotential?: number[];
+  gravityBodyId?: string;
+  gravityBodyName?: string;
 }
 
 export interface IllegalTransitionRule {
@@ -192,6 +197,9 @@ export interface MissionTimelinePoint {
   communicationOpen: boolean;
   communicationReliability: number;
   fuelMultiplier: number;
+  gravityBodyName?: string;
+  gravityPenalty?: number;
+  gravityAssistPotential?: number;
   stepCost: number;
   riskScore: number;
 }
@@ -338,6 +346,7 @@ export interface OptimizationResult {
   reportPreview: MissionReport;
   digitalTwin: DigitalTwinAssessment;
   missionCommand: MissionCommandTimeline;
+  gravityExposure: ReturnType<typeof summarizePathGravityExposure>;
   adaptiveNarrative: {
     bayesian: string;
     decisionTree: string;
@@ -484,6 +493,8 @@ export function buildFormalMissionQUBO(
       const radiation = state?.radiationField[t] ?? node.radiation;
       const commOpen = state?.communicationWindow[t] ?? 1;
       const commReliability = state?.communicationReliability[t] ?? node.commScore;
+      const gravityPenalty = state?.gravityPenalty[t] ?? 0;
+      const gravityAssistPotential = state?.gravityAssistPotential[t] ?? 0;
       const timeCost = 1 + 0.001 * (node.altitude_km ?? 0);
       const radiationPenalty = radiation > missionProfile.radiationThreshold
         ? 40 * ((radiation - missionProfile.radiationThreshold) / missionProfile.radiationThreshold) ** 2
@@ -494,7 +505,8 @@ export function buildFormalMissionQUBO(
         weights.rad * radiation ** 2 +
         weights.comm * commPenalty +
         weights.time * timeCost +
-        weights.safety * radiationPenalty;
+        weights.safety * (radiationPenalty + 18 * gravityPenalty ** 2) -
+        weights.fuel * 12 * gravityAssistPotential;
     }
   }
 
@@ -515,7 +527,10 @@ export function buildFormalMissionQUBO(
         if (edge) {
           const state = missionProfile.nodeStates[fromNode.id];
           const fuelMultiplier = state?.fuelMultiplier[t] ?? 1;
+          const gravityPenalty = state?.gravityPenalty[t] ?? 0;
+          const gravityAssistPotential = state?.gravityAssistPotential[t] ?? 0;
           Q[idx(i, t)][idx(j, t + 1)] += weights.fuel * edge.fuelCost * fuelMultiplier;
+          Q[idx(i, t)][idx(j, t + 1)] += weights.fuel * edge.fuelCost * (gravityPenalty - 0.45 * gravityAssistPotential);
           if (rule) {
             Q[idx(i, t)][idx(j, t + 1)] += rule.penalty ?? lambdaIllegal;
           }
@@ -664,6 +679,13 @@ export class SimulatedAnnealer {
         const fuelMultiplier = Array.from({ length: horizon }, (_, t) =>
           1 + 0.08 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phase + phaseOffset),
         );
+        const gravity = computeNodeGravityInfluence(node);
+        const gravityPenalty = Array.from({ length: horizon }, (_, t) =>
+          clamp(gravity.riskPenalty * (0.92 + 0.16 * Math.sin((2 * Math.PI * t) / Math.max(horizon, 2) + phaseOffset + phase / 3)), 0, 0.6),
+        );
+        const gravityAssistPotential = Array.from({ length: horizon }, (_, t) =>
+          clamp(gravity.assistBonusFraction * (0.9 + 0.2 * Math.cos((2 * Math.PI * t) / Math.max(horizon, 2) + phaseOffset + phase)), 0, 0.16),
+        );
 
         return [
           node.id,
@@ -672,6 +694,10 @@ export class SimulatedAnnealer {
             communicationReliability,
             radiationField,
             fuelMultiplier,
+            gravityPenalty,
+            gravityAssistPotential,
+            gravityBodyId: gravity.bodyId,
+            gravityBodyName: gravity.bodyName,
           } satisfies TimeDependentNodeState,
         ];
       }),
@@ -780,7 +806,13 @@ export class SimulatedAnnealer {
           const commPenalty = state?.communicationWindow[t]
             ? (1 - (state?.communicationReliability[t] ?? node?.commScore ?? 0.2)) ** 2
             : 8;
-          const score = edge.fuelCost * this.weights.fuel + radiation ** 2 * this.weights.rad + commPenalty * this.weights.comm;
+          const gravityPenalty = state?.gravityPenalty[t] ?? 0;
+          const gravityAssistPotential = state?.gravityAssistPotential[t] ?? 0;
+          const score =
+            edge.fuelCost * (1 + gravityPenalty - 0.4 * gravityAssistPotential) * this.weights.fuel +
+            radiation ** 2 * this.weights.rad +
+            commPenalty * this.weights.comm +
+            gravityPenalty * 14 * this.weights.safety;
           return { score, to: edge.to };
         })
         .sort((a, b) => a.score - b.score)[0];
@@ -849,7 +881,10 @@ export class SimulatedAnnealer {
         1,
       );
       const radiation = (state?.radiationField[t] ?? node.radiation) * uncertainty.radiationScale * shielding.radiationMultiplier;
-      const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale * massPenalty.deltaVMultiplier;
+      const gravityPenalty = state?.gravityPenalty[t] ?? 0;
+      const gravityAssistPotential = state?.gravityAssistPotential[t] ?? 0;
+      const gravityFuelFactor = 1 + gravityPenalty - 0.55 * gravityAssistPotential;
+      const fuelMultiplier = (state?.fuelMultiplier[t] ?? 1) * uncertainty.fuelScale * massPenalty.deltaVMultiplier * gravityFuelFactor;
       const radiationPenalty = radiation ** 2;
       const communicationPenalty = communicationOpen ? (1 - communicationReliability) ** 2 : 8 + (1 - communicationReliability);
       const timePenalty = 1 + 0.0015 * (node.altitude_km ?? 0);
@@ -870,6 +905,11 @@ export class SimulatedAnnealer {
         nodeSafetyPenalty += 40 * excess ** 2;
         violations.push(`Radiation threshold exceeded at ${node.id} (t=${t})`);
         reasons.push('high radiation');
+      }
+
+      if (gravityPenalty > 0.08) {
+        nodeSafetyPenalty += 18 * gravityPenalty ** 2;
+        reasons.push(`${state?.gravityBodyName ?? 'gravity'} pull`);
       }
 
       if (visited.has(node.id)) {
@@ -926,6 +966,11 @@ export class SimulatedAnnealer {
               nodeSafetyPenalty += 45 * radShock ** 2;
               reasons.push('radiation gradient');
             }
+            const gravityShock = Math.abs((nextState?.gravityPenalty[t + 1] ?? 0) - gravityPenalty);
+            if (gravityShock > 0.06) {
+              nodeSafetyPenalty += 30 * gravityShock ** 2;
+              reasons.push('gravity gradient');
+            }
 
             const incDelta = Math.abs((nextNode.inclination ?? 0) - (node.inclination ?? 0));
             nodeSafetyPenalty += incDelta * 10;
@@ -959,8 +1004,11 @@ export class SimulatedAnnealer {
         communicationOpen,
         communicationReliability,
         fuelMultiplier,
+        gravityBodyName: state?.gravityBodyName,
+        gravityPenalty,
+        gravityAssistPotential,
         stepCost: weightedStepCost,
-        riskScore: clamp(100 * (0.45 * radiation + 0.35 * (communicationOpen ? 0.15 : 1) + 0.2 * nodeSafetyPenalty / 50), 0, 100),
+        riskScore: clamp(100 * (0.38 * radiation + 0.3 * (communicationOpen ? 0.15 : 1) + 0.18 * nodeSafetyPenalty / 50 + 0.14 * gravityPenalty), 0, 100),
       });
     }
 
@@ -1365,6 +1413,7 @@ export class SimulatedAnnealer {
     const deltaVPhases = computeDeltaVPhases(bestPath, this.edges);
     const gravityAssist = applyGravityAssist(bestPath, [...this.nodes.values()], totalDeltaV);
     totalDeltaV = gravityAssist.adjustedDeltaV_ms;
+    const gravityExposure = summarizePathGravityExposure(bestPath, this.nodes);
     const reentry = evaluateReentry(bestPath, {
       approachVelocityMs: 10850 + 0.22 * deltaVPhases.phases.return,
       flightPathAngleDeg: inferReturnFlightPathAngleDeg(bestCost.timeline, this.nodes),
@@ -1399,6 +1448,8 @@ export class SimulatedAnnealer {
         baselineDeltaV: totalDeltaV,
         baselineDurationHours: bestCost.timeline.length * (crewRiskParams.timestepHours ?? 6),
         baselineCommunication: communicationStability,
+        baselineGravityExposure: gravityExposure.averageRiskPenalty,
+        dominantGravityBody: gravityExposure.dominantBodyName,
         missionProgress,
         currentSuccessProbability: stochastic.successProbability,
         anomalyType: dominantAnomaly?.anomalyType ?? null,
@@ -1998,6 +2049,7 @@ export class SimulatedAnnealer {
       reportPreview,
       digitalTwin,
       missionCommand,
+      gravityExposure,
       adaptiveNarrative: {
         bayesian: bayesianUpdates.length
           ? explainBayesianRisk({

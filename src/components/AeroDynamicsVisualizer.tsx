@@ -68,6 +68,8 @@ function AeroVehicleScene({
 }) {
   const align = windTunnelBodyEuler(principalAxis);
   const qn = Math.min(1, mach / 3);
+  const shockLength = 28;
+  const shockRadius = 14;
 
   useFrame(() => {
     if (stlMatRef.current) {
@@ -77,6 +79,48 @@ function AeroVehicleScene({
   });
 
   const cdEff = cdBase * cdMachMultiplier(mach);
+  const shockPlacement = useMemo(() => {
+    if (!vizGeom) {
+      return {
+        position: [0, 12.5 - shockLength / 2, 0] as [number, number, number],
+        rotation: [0, 0, 0] as [number, number, number],
+      };
+    }
+
+    vizGeom.computeBoundingBox();
+    const box = vizGeom.boundingBox;
+    if (!box) {
+      return {
+        position: [0, 12.5 - shockLength / 2, 0] as [number, number, number],
+        rotation: [0, 0, 0] as [number, number, number],
+      };
+    }
+
+    const center = meshBasis.center;
+    const scale = meshBasis.scale;
+
+    if (principalAxis === 'x') {
+      const nose = (box.max.x - center.x) * scale;
+      return {
+        position: [nose - shockLength / 2, 0, 0] as [number, number, number],
+        rotation: [0, 0, -Math.PI / 2] as [number, number, number],
+      };
+    }
+
+    if (principalAxis === 'z') {
+      const nose = (box.max.z - center.z) * scale;
+      return {
+        position: [0, 0, nose - shockLength / 2] as [number, number, number],
+        rotation: [Math.PI / 2, 0, 0] as [number, number, number],
+      };
+    }
+
+    const nose = (box.max.y - center.y) * scale;
+    return {
+      position: [0, nose - shockLength / 2, 0] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+    };
+  }, [meshBasis.center, meshBasis.scale, principalAxis, shockLength, vizGeom]);
 
   return (
     <>
@@ -115,10 +159,12 @@ function AeroVehicleScene({
       </group>
 
       {mach >= 0.98 ? (
-        <mesh position={[-18, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-          <coneGeometry args={[14, 28, 20, 1, true]} />
-          <meshBasicMaterial color="#60a5fa" transparent opacity={0.06} side={THREE.DoubleSide} depthWrite={false} />
-        </mesh>
+        <group rotation={align}>
+          <mesh position={shockPlacement.position} rotation={shockPlacement.rotation}>
+            <coneGeometry args={[shockRadius, shockLength, 20, 1, true]} />
+            <meshBasicMaterial color="#60a5fa" transparent opacity={0.06} side={THREE.DoubleSide} depthWrite={false} />
+          </mesh>
+        </group>
       ) : null}
 
       <Text position={[-45, 38, 0]} fontSize={5.5} color="#94a3b8" anchorX="left" anchorY="top">

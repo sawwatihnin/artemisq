@@ -5,6 +5,10 @@ export interface ScenarioNodeState {
   radiationField: number[];
   fuelMultiplier: number[];
   communicationReliability: number[];
+  gravityPenalty?: number[];
+  gravityAssistPotential?: number[];
+  gravityBodyId?: string;
+  gravityBodyName?: string;
 }
 
 export interface ScenarioMissionProfile {
@@ -31,6 +35,10 @@ export function applyScenario(
         radiationField: [...state.radiationField],
         fuelMultiplier: [...state.fuelMultiplier],
         communicationReliability: [...state.communicationReliability],
+        gravityPenalty: state.gravityPenalty ? [...state.gravityPenalty] : undefined,
+        gravityAssistPotential: state.gravityAssistPotential ? [...state.gravityAssistPotential] : undefined,
+        gravityBodyId: state.gravityBodyId,
+        gravityBodyName: state.gravityBodyName,
       }]),
     ),
   };
