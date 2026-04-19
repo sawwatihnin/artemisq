@@ -28,7 +28,20 @@ import {
   YAxis,
 } from 'recharts';
 import { Canvas, useThree } from '@react-three/fiber';
-import { Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
+import { Html, Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
+import {
+  eciToGeodetic,
+  eciToRaDec,
+  formatDecDMS,
+  formatLat,
+  formatLon,
+  formatRaHMS,
+  gmstRad,
+  localMeanSolarTimeHours,
+  obliquityOfEclipticDeg,
+  sceneToEciKm,
+  sunDirectionEci,
+} from './lib/celestialCoords';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -1604,23 +1617,66 @@ function createPlanetTexture(bodyId: string, baseColor: string) {
   return texture;
 }
 
-function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: string; radius: number }) {
+/**
+ * Axial tilt (rotation about scene-X) for inertial-frame planets, matched to
+ * the J2000 obliquity of the body. Earth uses the date-dependent obliquity of
+ * the ecliptic; other bodies use static IAU-recommended pole tilts.
+ */
+function bodyAxialTiltRad(bodyId: string, date: Date): number {
+  switch (bodyId) {
+    case 'earth':
+      return (obliquityOfEclipticDeg(date) * Math.PI) / 180;
+    case 'mars':
+      return (25.19 * Math.PI) / 180;
+    case 'jupiter':
+      return (3.13 * Math.PI) / 180;
+    case 'saturn':
+      return (26.73 * Math.PI) / 180;
+    case 'uranus':
+      return (97.77 * Math.PI) / 180;
+    case 'neptune':
+      return (28.32 * Math.PI) / 180;
+    case 'mercury':
+      return (0.034 * Math.PI) / 180;
+    case 'venus':
+      return (177.36 * Math.PI) / 180;
+    default:
+      return 0;
+  }
+}
+
+function PrimaryBody3D({
+  bodyId,
+  color,
+  radius,
+  date,
+  spinRad = 0,
+}: {
+  bodyId: string;
+  color: string;
+  radius: number;
+  date?: Date;
+  spinRad?: number;
+}) {
   const texture = useMemo(() => createPlanetTexture(bodyId, color), [bodyId, color]);
+  const tilt = useMemo(() => (date ? bodyAxialTiltRad(bodyId, date) : 0), [bodyId, date]);
   return (
-    <group>
-      <mesh>
-        <sphereGeometry args={[radius, 80, 80]} />
-        <meshPhysicalMaterial
-          map={texture ?? undefined}
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.12}
-          metalness={0.04}
-          roughness={0.84}
-          clearcoat={0.22}
-          clearcoatRoughness={0.78}
-        />
-      </mesh>
+    <group rotation={[tilt, 0, 0]}>
+      <group rotation={[0, spinRad, 0]}>
+        <mesh>
+          <sphereGeometry args={[radius, 80, 80]} />
+          <meshPhysicalMaterial
+            map={texture ?? undefined}
+            color={color}
+            emissive={color}
+            emissiveIntensity={0.12}
+            metalness={0.04}
+            roughness={0.84}
+            clearcoat={0.22}
+            clearcoatRoughness={0.78}
+          />
+        </mesh>
+      </group>
       <mesh scale={1.035}>
         <sphereGeometry args={[radius, 80, 80]} />
         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.16} transparent opacity={0.12} side={THREE.BackSide} />
@@ -1630,6 +1686,166 @@ function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: strin
         <meshBasicMaterial color={color} transparent opacity={0.05} side={THREE.BackSide} />
       </mesh>
     </group>
+  );
+}
+
+/**
+ * Textured planet/moon mesh for the heliocentric scene. Applies axial tilt
+ * (about scene-X) so the rotation axis matches the body's IAU pole, and
+ * renders a halo for visual recognition. Lighting is provided by the scene's
+ * directional Sun light, so the day-side faces the actual ephemeris Sun
+ * direction.
+ */
+function SystemBodyMesh({
+  bodyId,
+  name: _name,
+  color,
+  radius,
+  position,
+  isTarget,
+  atmosphereScaleHeightKm,
+  date,
+  label,
+}: {
+  bodyId: string;
+  name: string;
+  color: string;
+  radius: number;
+  position: [number, number, number];
+  isTarget: boolean;
+  atmosphereScaleHeightKm?: number;
+  date: Date;
+  label: string;
+}) {
+  const texture = useMemo(() => createPlanetTexture(bodyId, color), [bodyId, color]);
+  const tilt = useMemo(() => bodyAxialTiltRad(bodyId, date), [bodyId, date]);
+  return (
+    <group position={position}>
+      <group rotation={[tilt, 0, 0]}>
+        <mesh>
+          <sphereGeometry args={[radius, 56, 56]} />
+          <meshPhysicalMaterial
+            map={texture ?? undefined}
+            color={color}
+            roughness={0.8}
+            metalness={0.04}
+            emissive={color}
+            emissiveIntensity={isTarget ? 0.18 : 0.1}
+            clearcoat={0.18}
+            clearcoatRoughness={0.8}
+          />
+        </mesh>
+      </group>
+      <mesh scale={1.05}>
+        <sphereGeometry args={[radius, 40, 40]} />
+        <meshBasicMaterial color={color} transparent opacity={isTarget ? 0.08 : 0.045} side={THREE.BackSide} />
+      </mesh>
+      <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={atmosphereScaleHeightKm} isPrimary={isTarget} />
+      <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
+        {label}
+      </Text>
+    </group>
+  );
+}
+
+/**
+ * Floating coordinate panel for a clicked Flight-Sequence stage. Renders
+ * inertial RA/Dec (J2000 equatorial), range, and — for surface stages on
+ * Earth — geodetic latitude/longitude plus local mean solar time. Inputs are
+ * the visualizer's scene point (units = km / `kmPerUnit`) and the launch
+ * epoch; the marker's UTC time is derived as `sceneEpoch + stage.timeS`.
+ */
+function StageCoordinatePopover({
+  stage,
+  scenePoint,
+  sceneEpoch,
+  isCislunar,
+  kmPerUnit,
+  primaryRadiusKm,
+  onClose,
+}: {
+  stage: StageDisplay;
+  scenePoint: [number, number, number];
+  sceneEpoch: Date;
+  isCislunar: boolean;
+  kmPerUnit: number;
+  primaryRadiusKm: number;
+  onClose: () => void;
+}) {
+  const stageDate = useMemo(
+    () => new Date(sceneEpoch.getTime() + (stage.timeS ?? 0) * 1000),
+    [sceneEpoch, stage.timeS],
+  );
+  const [ex, ey, ez] = sceneToEciKm(scenePoint, isCislunar, kmPerUnit);
+  const { raHours, decDeg, rangeKm } = eciToRaDec(ex, ey, ez);
+  const altKmCenter = rangeKm - primaryRadiusKm;
+  const isSurface = isCislunar && /launch|landing|pre-flight|entry/i.test(stage.label);
+  const geo = isSurface ? eciToGeodetic(ex, ey, ez, stageDate) : null;
+  const lst = geo ? localMeanSolarTimeHours(stageDate, geo.lonDeg) : null;
+  const lstStr = lst != null
+    ? `${Math.floor(lst).toString().padStart(2, '0')}:${Math.floor((lst % 1) * 60).toString().padStart(2, '0')} LST`
+    : null;
+  return (
+    <Html
+      position={[0, 3.4, 0]}
+      center
+      distanceFactor={isCislunar ? 18 : 60}
+      style={{ pointerEvents: 'auto' }}
+    >
+      <div
+        className="rounded-lg border border-slate-700 bg-slate-950/95 px-3 py-2 shadow-2xl backdrop-blur-sm"
+        style={{ minWidth: 230, fontFamily: 'ui-monospace, monospace' }}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[9px] uppercase tracking-[0.18em] text-slate-400">Stage {stage.sequence}</div>
+            <div className="text-sm font-semibold" style={{ color: stage.color }}>{stage.label}</div>
+          </div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onClose(); }}
+            className="text-slate-500 hover:text-slate-200"
+            aria-label="Close"
+            style={{ fontSize: 14, lineHeight: 1 }}
+          >×</button>
+        </div>
+        <div className="mt-1.5 space-y-0.5 text-[11px] leading-snug text-slate-200">
+          <div>
+            <span className="text-slate-400">UTC </span>
+            {stageDate.toISOString().replace('T', ' ').slice(0, 19)}Z
+          </div>
+          <div>
+            <span className="text-slate-400">T+ </span>
+            {((stage.timeS ?? 0) >= 3600
+              ? `${((stage.timeS ?? 0) / 3600).toFixed(2)} h`
+              : `${(stage.timeS ?? 0).toFixed(0)} s`)}
+          </div>
+          <div>
+            <span className="text-slate-400">Range </span>
+            {rangeKm > 1000 ? `${(rangeKm / 1000).toFixed(2)} × 10³ km` : `${rangeKm.toFixed(1)} km`}
+          </div>
+          <div>
+            <span className="text-slate-400">Alt </span>
+            {altKmCenter >= 0 ? `${altKmCenter.toFixed(1)} km` : 'on surface'}
+          </div>
+          <div className="pt-1 border-t border-slate-800/80">
+            <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">
+              {isCislunar ? 'Geocentric Equatorial (J2000)' : 'Heliocentric Equatorial (J2000)'}
+            </div>
+            <div><span className="text-slate-400">RA </span>{formatRaHMS(raHours)}</div>
+            <div><span className="text-slate-400">Dec </span>{formatDecDMS(decDeg)}</div>
+          </div>
+          {geo ? (
+            <div className="pt-1 border-t border-slate-800/80">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Geodetic (WGS-84)</div>
+              <div><span className="text-slate-400">Lat </span>{formatLat(geo.latDeg)}</div>
+              <div><span className="text-slate-400">Lon </span>{formatLon(geo.lonDeg)}</div>
+              {lstStr ? <div><span className="text-slate-400">Sun </span>{lstStr}</div> : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Html>
   );
 }
 
@@ -1976,9 +2192,53 @@ function MissionGlobe({
   });
   const hasReturnPhase = stageList.some((stage) => stage.label === 'Return coast' || stage.label === 'Entry' || stage.label === 'Landing');
 
+  // Earth axial spin = GMST (rad). Other bodies spin at a constant
+  // approximation so they don't appear frozen — non-Earth angles are not
+  // physically calibrated and exist only to break visual symmetry.
+  const primarySpinRad = useMemo(() => {
+    if (launchBody.id !== 'earth') return 0;
+    return gmstRad(sceneDate);
+  }, [launchBody.id, sceneDate]);
+
+  // Apparent Sun direction in J2000 ECI — drives the day/night terminator.
+  // Scene axes match ECI for cislunar; for the heliocentric scene we apply
+  // the same [x, z, y] swap used by `heliocentricHorizonsKmToScene`.
+  const sunDirScene = useMemo<[number, number, number]>(() => {
+    const [sx, sy, sz] = sunDirectionEci(sceneDate);
+    return isCislunar ? [sx, sy, sz] : [sx, sz, sy];
+  }, [sceneDate, isCislunar]);
+  const sunLightPos: [number, number, number] = [
+    sunDirScene[0] * 600,
+    sunDirScene[1] * 600,
+    sunDirScene[2] * 600,
+  ];
+
+  // Live "Moon now" ghost — shows where the Moon actually is at the launch
+  // epoch, distinct from the arrival-anchored Moon sphere that the trajectory
+  // line terminates on. Hidden when the two positions overlap (TOF ≈ 0).
+  const moonNowScene = useMemo(() => {
+    if (!isCislunar) return null;
+    const km = moonGeocentricPositionKm(sceneDate);
+    const inv = 1 / cislunarKmPerUnit;
+    const pos: [number, number, number] = [km[0] * inv, km[1] * inv, km[2] * inv];
+    const dx = pos[0] - moonScene.pos[0];
+    const dy = pos[1] - moonScene.pos[1];
+    const dz = pos[2] - moonScene.pos[2];
+    const sep = Math.hypot(dx, dy, dz);
+    if (sep < moonScene.radius * 1.1) return null;
+    return { pos, radius: moonScene.radius * 0.78 };
+  }, [isCislunar, sceneDate, cislunarKmPerUnit, moonScene]);
+
   return (
     <group>
-      <PrimaryBody3D bodyId={launchBody.id} color={launchBody.color} radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} />
+      <directionalLight position={sunLightPos} intensity={0.9} color="#fff4d6" />
+      <PrimaryBody3D
+        bodyId={launchBody.id}
+        color={launchBody.color}
+        radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)}
+        date={sceneDate}
+        spinRad={primarySpinRad}
+      />
       <RadiationOverlay
         bodyRadius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)}
         atmosphereScaleHeightKm={launchBody.atmosphereScaleHeightKm}
@@ -1991,39 +2251,54 @@ function MissionGlobe({
         kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
       />
       {isCislunar ? (
-        <group position={moonScene.pos}>
-          <mesh>
-            <sphereGeometry args={[moonScene.radius, 72, 72]} />
-            <meshPhysicalMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.88} metalness={0.03} emissive="#9ca3af" emissiveIntensity={0.08} clearcoat={0.12} clearcoatRoughness={0.82} />
-          </mesh>
-          <mesh scale={1.04}>
-            <sphereGeometry args={[moonScene.radius, 56, 56]} />
-            <meshBasicMaterial color="#e2e8f0" transparent opacity={0.05} side={THREE.BackSide} />
-          </mesh>
-          <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
-            Moon
-          </Text>
-        </group>
+        <>
+          <group position={moonScene.pos}>
+            <mesh>
+              <sphereGeometry args={[moonScene.radius, 72, 72]} />
+              <meshPhysicalMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.88} metalness={0.03} emissive="#9ca3af" emissiveIntensity={0.08} clearcoat={0.12} clearcoatRoughness={0.82} />
+            </mesh>
+            <mesh scale={1.04}>
+              <sphereGeometry args={[moonScene.radius, 56, 56]} />
+              <meshBasicMaterial color="#e2e8f0" transparent opacity={0.05} side={THREE.BackSide} />
+            </mesh>
+            <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
+              {moonNowScene ? 'Moon at arrival' : 'Moon'}
+            </Text>
+          </group>
+          {moonNowScene ? (
+            <group position={moonNowScene.pos}>
+              <mesh>
+                <sphereGeometry args={[moonNowScene.radius, 48, 48]} />
+                <meshBasicMaterial color="#94a3b8" transparent opacity={0.32} />
+              </mesh>
+              <mesh scale={1.18}>
+                <sphereGeometry args={[moonNowScene.radius, 36, 36]} />
+                <meshBasicMaterial color="#cbd5e1" transparent opacity={0.08} side={THREE.BackSide} />
+              </mesh>
+              <Text position={[0, moonNowScene.radius + 1.8, 0]} fontSize={1.7} color="#cbd5e1" anchorX="center">
+                Moon now
+              </Text>
+            </group>
+          ) : null}
+        </>
       ) : null}
       {systemBodies.map((body) => {
         const isTarget = body.id === targetBody.id;
         const radius = bodyDisplayRadiusKm(body.radiusKm);
         const bodyPos = (!isCislunar && isTarget && encounterMarker) ? encounterMarker : body.pos as [number, number, number];
         return (
-          <group key={body.id} position={bodyPos}>
-            <mesh>
-              <sphereGeometry args={[radius, 48, 48]} />
-              <meshPhysicalMaterial color={body.color} roughness={0.8} metalness={0.04} emissive={body.color} emissiveIntensity={isTarget ? 0.18 : 0.1} clearcoat={0.18} clearcoatRoughness={0.8} />
-            </mesh>
-            <mesh scale={1.05}>
-              <sphereGeometry args={[radius, 40, 40]} />
-              <meshBasicMaterial color={body.color} transparent opacity={isTarget ? 0.08 : 0.045} side={THREE.BackSide} />
-            </mesh>
-            <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={body.atmosphereScaleHeightKm} isPrimary={isTarget} />
-            <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
-              {isTarget && encounterMarker ? `${body.name} (encounter)` : body.name}
-            </Text>
-          </group>
+          <SystemBodyMesh
+            key={body.id}
+            bodyId={body.id}
+            name={body.name}
+            color={body.color}
+            radius={radius}
+            position={bodyPos}
+            isTarget={isTarget}
+            atmosphereScaleHeightKm={body.atmosphereScaleHeightKm}
+            date={sceneDate}
+            label={isTarget && encounterMarker ? `${body.name} (encounter)` : body.name}
+          />
         );
       })}
       <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.8 : 2.5} transparent opacity={0.96} />
@@ -2080,6 +2355,15 @@ function MissionGlobe({
                 <Text position={[0, sr + 0.45, 0]} fontSize={tf} color={stage.color} anchorX="center">
                   {stage.label}
                 </Text>
+                <StageCoordinatePopover
+                  stage={stage}
+                  scenePoint={stage.point as [number, number, number]}
+                  sceneEpoch={sceneDate}
+                  isCislunar={isCislunar}
+                  kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
+                  primaryRadiusKm={launchBody.radiusKm}
+                  onClose={() => setSelectedStageId(null)}
+                />
               </>
             ) : null}
           </group>
