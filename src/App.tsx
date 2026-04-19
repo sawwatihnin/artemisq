@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Gauge,
   Globe,
+  Languages,
   Palette,
   Rocket,
   ShieldAlert,
@@ -989,18 +990,22 @@ const LanguageSelector = () => {
   };
 
   return (
-    <select
-      className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] skiptranslate"
-      onChange={(e) => handleLanguageChange(e.target.value)}
-      defaultValue="en"
-    >
-      <option value="en">Language</option>
-      {LANGUAGES.map((lang) => (
-        <option key={lang.code} value={lang.code}>
-          {lang.label}
-        </option>
-      ))}
-    </select>
+    <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300 skiptranslate">
+      <Languages className="h-3.5 w-3.5" />
+      <span className="sr-only">Language</span>
+      <select
+        className="bg-transparent text-[11px] uppercase tracking-[0.14em] outline-none"
+        onChange={(e) => handleLanguageChange(e.target.value)}
+        defaultValue="en"
+      >
+        <option value="en" className="text-slate-950">Language</option>
+        {LANGUAGES.map((lang) => (
+          <option key={lang.code} value={lang.code} className="text-slate-950">
+            {lang.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 };
 
