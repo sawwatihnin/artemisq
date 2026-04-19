@@ -2,8 +2,27 @@ export interface ManeuverTargetingResult {
   deltaVVectorKmS: [number, number, number];
   deltaVMagnitudeKmS: number;
   burnDurationS: number;
+  propellantConsumedKg: number;
+  propellantFractionPct: number;
+  ignitionAccelerationMs2: number;
+  burnoutAccelerationMs2: number;
   closingVelocityKmS: number;
   estimatedArrivalErrorKm: number;
+  estimatedArrivalTimeErrorS: number;
+  finiteBurnSamples: Array<{
+    timeS: number;
+    cumulativeDeltaVKmS: number;
+    massKg: number;
+    accelerationMs2: number;
+  }>;
+  dispersionCases: Array<{
+    label: 'LOW_SIGMA' | 'NOMINAL' | 'HIGH_SIGMA';
+    thrustScale: number;
+    pointingErrorDeg: number;
+    timingOffsetS: number;
+    deltaVDeliveredKmS: number;
+    estimatedMissDistanceKm: number;
+  }>;
   targetingQuality: 'GOOD' | 'WATCH' | 'POOR';
   source: string;
 }
@@ -24,6 +43,24 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function normalize(v: [number, number, number]): [number, number, number] {
+  const magnitude = mag(v);
+  if (magnitude < 1e-9) return [1, 0, 0];
+  return [v[0] / magnitude, v[1] / magnitude, v[2] / magnitude];
+}
+
+function rotateAboutZ(v: [number, number, number], angleRad: number): [number, number, number] {
+  const c = Math.cos(angleRad);
+  const s = Math.sin(angleRad);
+  return [
+    v[0] * c - v[1] * s,
+    v[0] * s + v[1] * c,
+    v[2],
+  ];
+}
+
+const G0_MS2 = 9.80665;
+
 export function designTargetingManeuver(params: {
   currentPositionKm: [number, number, number];
   currentVelocityKmS: [number, number, number];
@@ -32,6 +69,10 @@ export function designTargetingManeuver(params: {
   timeToGoHours: number;
   thrustN: number;
   massKg: number;
+  ispS?: number;
+  thrustDispersionPct?: number;
+  pointingSigmaDeg?: number;
+  timingSigmaS?: number;
 }): ManeuverTargetingResult {
   const timeToGoS = Math.max(60, params.timeToGoHours * 3600);
   const dr = sub(params.targetPositionKm, params.currentPositionKm);
@@ -43,10 +84,57 @@ export function designTargetingManeuver(params: {
     proportionalCorrection[2] + dvDesired[2],
   ];
   const deltaVMagnitudeKmS = mag(deltaVVectorKmS);
-  const accelerationKmS2 = Math.max(params.thrustN / Math.max(params.massKg, 1) / 1000, 1e-6);
-  const burnDurationS = deltaVMagnitudeKmS / accelerationKmS2;
+  const ispS = Math.max(150, Number(params.ispS ?? 452));
+  const initialMassKg = Math.max(params.massKg, 1);
+  const exhaustVelocityMs = ispS * G0_MS2;
+  const deltaVMs = deltaVMagnitudeKmS * 1000;
+  const massRatio = Math.exp(deltaVMs / exhaustVelocityMs);
+  const finalMassKg = initialMassKg / massRatio;
+  const propellantConsumedKg = clamp(initialMassKg - finalMassKg, 0, initialMassKg * 0.92);
+  const massFlowKgS = Math.max(params.thrustN / exhaustVelocityMs, 1e-6);
+  const burnDurationS = Math.max(propellantConsumedKg / massFlowKgS, 0.5);
+  const ignitionAccelerationMs2 = params.thrustN / initialMassKg;
+  const burnoutAccelerationMs2 = params.thrustN / Math.max(finalMassKg, initialMassKg * 0.08);
   const closingVelocityKmS = mag(proportionalCorrection);
-  const estimatedArrivalErrorKm = mag(dr) * clamp(burnDurationS / timeToGoS, 0.01, 0.4);
+  const thrustDispersionPct = clamp(Number(params.thrustDispersionPct ?? 3), 0, 25);
+  const pointingSigmaDeg = clamp(Number(params.pointingSigmaDeg ?? 0.35), 0, 15);
+  const timingSigmaS = clamp(Number(params.timingSigmaS ?? 2.5), 0, 900);
+  const finiteBurnPenalty = clamp(burnDurationS / timeToGoS, 0.005, 0.28);
+  const dispersionPenalty =
+    0.45 * mag(dr) * (thrustDispersionPct / 100) +
+    0.22 * closingVelocityKmS * timingSigmaS +
+    0.12 * deltaVMagnitudeKmS * 1000 * (pointingSigmaDeg / 57.3);
+  const estimatedArrivalErrorKm = Math.max(0.5, mag(dr) * finiteBurnPenalty + dispersionPenalty);
+  const estimatedArrivalTimeErrorS = timingSigmaS + burnDurationS * (thrustDispersionPct / 100) * 0.4;
+  const burnDirection = normalize(deltaVVectorKmS);
+  const finiteBurnSamples = Array.from({ length: 6 }, (_, index) => {
+    const progress = index / 5;
+    const sampleTimeS = burnDurationS * progress;
+    const sampleMassKg = initialMassKg - propellantConsumedKg * progress;
+    const sampleAccelerationMs2 = params.thrustN / Math.max(sampleMassKg, 1);
+    return {
+      timeS: sampleTimeS,
+      cumulativeDeltaVKmS: deltaVMagnitudeKmS * progress,
+      massKg: sampleMassKg,
+      accelerationMs2: sampleAccelerationMs2,
+    };
+  });
+  const dispersionCases = [
+    { label: 'LOW_SIGMA' as const, thrustScale: 1 - thrustDispersionPct / 200, pointingErrorDeg: pointingSigmaDeg * 0.5, timingOffsetS: -timingSigmaS * 0.5 },
+    { label: 'NOMINAL' as const, thrustScale: 1, pointingErrorDeg: 0, timingOffsetS: 0 },
+    { label: 'HIGH_SIGMA' as const, thrustScale: 1 + thrustDispersionPct / 100, pointingErrorDeg: pointingSigmaDeg, timingOffsetS: timingSigmaS },
+  ].map((scenario) => {
+    const steeredDirection = rotateAboutZ(burnDirection, (scenario.pointingErrorDeg * Math.PI) / 180);
+    const deliveredVector = scale(steeredDirection, deltaVMagnitudeKmS * scenario.thrustScale);
+    const deliveryLossKmS = mag(sub(deliveredVector, deltaVVectorKmS));
+    const timingMissKm = Math.max(0, Math.abs(scenario.timingOffsetS) * closingVelocityKmS);
+    const burnMissKm = deliveryLossKmS * timeToGoS * 0.12;
+    return {
+      ...scenario,
+      deltaVDeliveredKmS: mag(deliveredVector),
+      estimatedMissDistanceKm: Math.max(0.25, timingMissKm + burnMissKm),
+    };
+  });
   const targetingQuality =
     estimatedArrivalErrorKm < 5 ? 'GOOD' : estimatedArrivalErrorKm < 25 ? 'WATCH' : 'POOR';
 
@@ -54,9 +142,16 @@ export function designTargetingManeuver(params: {
     deltaVVectorKmS,
     deltaVMagnitudeKmS,
     burnDurationS,
+    propellantConsumedKg,
+    propellantFractionPct: (propellantConsumedKg / initialMassKg) * 100,
+    ignitionAccelerationMs2,
+    burnoutAccelerationMs2,
     closingVelocityKmS,
     estimatedArrivalErrorKm,
+    estimatedArrivalTimeErrorS,
+    finiteBurnSamples,
+    dispersionCases,
     targetingQuality,
-    source: 'FORMULA-DRIVEN · Impulsive maneuver targeting estimate',
+    source: 'FORMULA-DRIVEN · Finite-burn maneuver targeting with dispersion envelope',
   };
 }

@@ -1,7 +1,7 @@
 import type { ChangeEvent, ReactNode, RefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import {
   AlertTriangle,
   Atom,
@@ -461,8 +461,27 @@ interface ManeuverTargetingFeed {
     deltaVVectorKmS: [number, number, number];
     deltaVMagnitudeKmS: number;
     burnDurationS: number;
+    propellantConsumedKg: number;
+    propellantFractionPct: number;
+    ignitionAccelerationMs2: number;
+    burnoutAccelerationMs2: number;
     closingVelocityKmS: number;
     estimatedArrivalErrorKm: number;
+    estimatedArrivalTimeErrorS: number;
+    finiteBurnSamples: Array<{
+      timeS: number;
+      cumulativeDeltaVKmS: number;
+      massKg: number;
+      accelerationMs2: number;
+    }>;
+    dispersionCases: Array<{
+      label: 'LOW_SIGMA' | 'NOMINAL' | 'HIGH_SIGMA';
+      thrustScale: number;
+      pointingErrorDeg: number;
+      timingOffsetS: number;
+      deltaVDeliveredKmS: number;
+      estimatedMissDistanceKm: number;
+    }>;
     targetingQuality: 'GOOD' | 'WATCH' | 'POOR';
     source: string;
   };
@@ -490,6 +509,28 @@ interface FlightReviewFeed {
     findings: string[];
     actions: string[];
     provenance: string[];
+  };
+  source: string;
+}
+
+interface ValidationFeed {
+  validation: {
+    benchmarkId: string;
+    benchmarkName: string;
+    missionClass: string;
+    overallStatus: 'PASS' | 'WARN' | 'FAIL';
+    score: number;
+    checks: Array<{
+      metric: string;
+      actual: number;
+      expectedMin: number;
+      expectedMax: number;
+      unit: string;
+      status: 'PASS' | 'WARN' | 'FAIL';
+      rationale: string;
+    }>;
+    notes: string[];
+    source: string;
   };
   source: string;
 }
@@ -2361,6 +2402,7 @@ export default function App() {
   const [evaDurationHours, setEvaDurationHours] = useState(6);
   const [evaPlan, setEvaPlan] = useState<EvaPlanFeed | null>(null);
   const [flightReview, setFlightReview] = useState<FlightReviewFeed | null>(null);
+  const [benchmarkValidation, setBenchmarkValidation] = useState<ValidationFeed | null>(null);
   const [stageConfigs, setStageConfigs] = useState<StageConfig[]>(DEFAULT_STAGE_CONFIGS);
   const [multistageAssessment, setMultistageAssessment] = useState<MultiStageAssessment | null>(null);
   const [ccsdsImportText, setCcsdsImportText] = useState('');
@@ -2380,6 +2422,7 @@ export default function App() {
   const [stlVizGeometry, setStlVizGeometry] = useState<THREE.BufferGeometry | null>(null);
   const stlVizGeometryRef = useRef<THREE.BufferGeometry | null>(null);
   const [stlFilename, setStlFilename] = useState<string>('');
+  const [playbackPointIndex, setPlaybackPointIndex] = useState(0);
   useEffect(() => {
     stlVizGeometryRef.current = stlVizGeometry;
   }, [stlVizGeometry]);
@@ -3424,6 +3467,10 @@ export default function App() {
               timeToGoHours: Math.max(2, ((targetPoint.time_s ?? 0) / 3600) - 1),
               thrustN: spacecraftThrust,
               massKg: spacecraftMass,
+              ispS: PROPELLANTS[fuelType].isp_vac,
+              thrustDispersionPct: 3.5,
+              pointingSigmaDeg: 0.4,
+              timingSigmaS: 3,
             }),
           });
           const targetingData = await targetingResponse.json();
@@ -3457,7 +3504,7 @@ export default function App() {
       setManeuverTargeting(null);
       addLog('SGP4 analysis failed');
     }
-  }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass]);
+  }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass, fuelType]);
 
   const sgp4AutoRunRef = useRef(false);
   useEffect(() => {
@@ -3611,6 +3658,48 @@ export default function App() {
     synthesizeFlightReview();
   }, [launchBodyId, targetPlanet, cislunarOps, launchConstraintAnalysis, trajectoryDesign, optResult, sgp4Conjunctions, celestrakTraffic, groundConstraints, opsConsole, weatherData, nasaWeather, dsnVisibility]);
   useEffect(() => {
+    const runBenchmarkValidation = async () => {
+      try {
+        const transferDays = Math.max(0, (missionTrajectory[missionTrajectory.length - 1]?.time_s ?? 0) / 86400);
+        const totalDeltaVKmS =
+          trajectoryDesign?.patchedConic?.totalDeltaVKmS ??
+          trajectoryDesign?.launchWindows?.[0]?.deltaVKmS ??
+          (optResult?.physics?.transferTime_days != null
+            ? Math.max(0, (optResult.physics.transferTime_days / Math.max(transferDays || 1, 1)) * 0.06)
+            : 0);
+        const totalDoseMsv = cislunarMissionAnalysis?.dose.cumulativeDoseMsv ?? 0;
+        const peakDoseRateMsvHr = cislunarMissionAnalysis?.dose.peakDoseRateMsvHr ?? 0;
+        const commCoverageFraction =
+          cislunarMissionAnalysis?.consumables.commCoverageFraction ??
+          clamp((dsnVisibility?.windows?.reduce((sum, window) => sum + window.durationMinutes, 0) ?? 0) / Math.max(transferDays * 24 * 60, 1), 0, 1);
+        const conjunctionCount = sgp4Conjunctions?.conjunctions?.length ?? celestrakTraffic?.conjunctions?.length ?? 0;
+        const response = await fetch('/api/validation/benchmarks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            launchBodyId,
+            targetBodyId: targetPlanet,
+            transferDays,
+            totalDeltaVKmS,
+            totalDoseMsv,
+            peakDoseRateMsvHr,
+            commCoverageFraction,
+            conjunctionCount,
+          }),
+        });
+        const data = await response.json();
+        setBenchmarkValidation(response.ok ? data : null);
+      } catch {
+        setBenchmarkValidation(null);
+      }
+    };
+    if (!missionTrajectory.length) {
+      setBenchmarkValidation(null);
+      return;
+    }
+    runBenchmarkValidation();
+  }, [launchBodyId, targetPlanet, missionTrajectory, trajectoryDesign, optResult, cislunarMissionAnalysis, dsnVisibility, sgp4Conjunctions, celestrakTraffic]);
+  useEffect(() => {
     if (importedMissionConfig?.tleObjects?.length) {
       const lines = importedMissionConfig.tleObjects.flatMap((item) => [item.name, item.tle1, item.tle2]).join('\n');
       setTleInputText(lines);
@@ -3630,6 +3719,54 @@ export default function App() {
           driver: stage.driver,
         }));
   }, [missionTrajectory, missionKmPerUnit, targetPlanet, launchBodyId]);
+  useEffect(() => {
+    setPlaybackPointIndex((current) => Math.min(current, Math.max(0, missionTrajectory.length - 1)));
+  }, [missionTrajectory.length]);
+  const missionPlayback = useMemo(() => {
+    if (!missionTrajectory.length) return [];
+    let cumulativeDistanceKm = 0;
+    return missionTrajectory.map((point, index) => {
+      if (index > 0) {
+        const previous = missionTrajectory[index - 1];
+        cumulativeDistanceKm += Math.hypot(
+          point.pos[0] - previous.pos[0],
+          point.pos[1] - previous.pos[1],
+          point.pos[2] - previous.pos[2],
+        ) * missionKmPerUnit;
+      }
+      const timeHour = (point.time_s ?? 0) / 3600;
+      const dt = index > 0 ? Math.max((point.time_s ?? 0) - (missionTrajectory[index - 1]?.time_s ?? 0), 1) : 1;
+      const inferredVelocityKmS = index > 0
+        ? cumulativeDistanceKm > 0
+          ? Math.hypot(
+              point.pos[0] - missionTrajectory[index - 1].pos[0],
+              point.pos[1] - missionTrajectory[index - 1].pos[1],
+              point.pos[2] - missionTrajectory[index - 1].pos[2],
+            ) * missionKmPerUnit / dt
+          : 0
+        : 0;
+      const speedKmS = point.vel ? Math.hypot(point.vel[0], point.vel[1], point.vel[2]) : inferredVelocityKmS;
+      const stage = [...missionStages].reverse().find((item) =>
+        item.timeS != null ? timeHour >= (item.timeS ?? 0) / 3600 : (index / Math.max(missionTrajectory.length - 1, 1)) >= item.progress,
+      ) ?? missionStages[0];
+      const activeTask = timelineSolution?.timeline.tasks.find((task) => timeHour >= task.scheduledStartHour && timeHour <= task.scheduledFinishHour) ?? null;
+      const radiusKm = Math.hypot(point.pos[0], point.pos[1], point.pos[2]) * missionKmPerUnit;
+      const zone = launchBodyId === 'earth'
+        ? nearEarthRadiation?.environment?.zones?.find((item) => radiusKm >= item.innerRadiusKm && radiusKm <= item.outerRadiusKm) ?? null
+        : null;
+      return {
+        index,
+        timeHour,
+        cumulativeDistanceKm,
+        speedKmS,
+        stage,
+        activeTask,
+        radiusKm,
+        zone,
+      };
+    });
+  }, [missionTrajectory, missionKmPerUnit, missionStages, timelineSolution, launchBodyId, nearEarthRadiation]);
+  const currentPlayback = missionPlayback[Math.min(playbackPointIndex, Math.max(0, missionPlayback.length - 1))] ?? null;
   const displayedCrewHealth = useMemo(() => {
     if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarMissionAnalysis) {
       const dose = cislunarMissionAnalysis.dose;
@@ -4330,7 +4467,7 @@ export default function App() {
           </section>
 
           <aside className="flex max-h-[calc(100vh-130px)] flex-col gap-4 overflow-y-auto pb-8">
-            <AnimatePresence mode="wait">
+            <>
               {activeTab === 'mission' ? (
                 <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
                   <DashboardCard title="Mission Controls" icon={Globe} provenance={importedGraph ? 'formula' : 'preset'}>
@@ -4667,8 +4804,47 @@ export default function App() {
 
                   <DashboardCard title="Timeline Editor" icon={Gauge} provenance={timelineSolution ? 'formula' : 'preset'}>
                     <div className="space-y-3">
+                      {currentPlayback ? (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-sm text-slate-100">Mission Playback</p>
+                            <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                              sample {currentPlayback.index + 1}/{missionPlayback.length}
+                            </span>
+                          </div>
+                          <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Playback Cursor
+                            <input
+                              className="mt-2 w-full"
+                              type="range"
+                              min={0}
+                              max={Math.max(0, missionPlayback.length - 1)}
+                              step={1}
+                              value={playbackPointIndex}
+                              onChange={(event) => setPlaybackPointIndex(Number(event.target.value))}
+                            />
+                          </label>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <MetricBadge label="Mission Time" value={currentPlayback.timeHour.toFixed(1)} unit="h" />
+                            <MetricBadge label="Stage" value={currentPlayback.stage?.label ?? '--'} unit={currentPlayback.stage?.phase ?? 'mission phase'} tone="good" />
+                            <MetricBadge label="Distance" value={currentPlayback.cumulativeDistanceKm.toFixed(0)} unit="km cumulative" />
+                            <MetricBadge label="Speed" value={currentPlayback.speedKmS.toFixed(3)} unit="km/s" />
+                            <MetricBadge label="Radius" value={currentPlayback.radiusKm.toFixed(0)} unit="km from origin" />
+                            <MetricBadge
+                              label="Active Task"
+                              value={currentPlayback.activeTask?.name ?? 'coast'}
+                              unit={currentPlayback.activeTask ? `${formatHour(currentPlayback.activeTask.scheduledStartHour)} → ${formatHour(currentPlayback.activeTask.scheduledFinishHour)}` : 'no scheduled task'}
+                              tone={currentPlayback.activeTask?.critical ? 'warn' : 'default'}
+                            />
+                          </div>
+                          <p className="mt-2 text-xs text-slate-400">
+                            {currentPlayback.stage?.driver ?? 'Playback follows the current trajectory state.'}
+                            {currentPlayback.zone ? ` Current environment: ${currentPlayback.zone.label} belt shell.` : ''}
+                          </p>
+                        </div>
+                      ) : null}
                       {timelineTasks.map((task, index) => (
-                        <div key={task.id} className="grid grid-cols-[1.3fr_0.6fr_0.7fr] gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                        <div key={task.id} className="grid grid-cols-1 gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3 md:grid-cols-[1.1fr_0.5fr_0.7fr_0.8fr_0.6fr_0.6fr]">
                           <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
                             Task
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.name} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} />
@@ -4678,8 +4854,28 @@ export default function App() {
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.durationHours} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, durationHours: +event.target.value } : item))} />
                           </label>
                           <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Dependencies
+                            <input
+                              className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                              value={(task.dependencies ?? []).join(', ')}
+                              onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? {
+                                ...item,
+                                dependencies: event.target.value.split(',').map((value) => value.trim()).filter(Boolean),
+                              } : item))}
+                              placeholder="launch, loiter"
+                            />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
                             Resource
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.resource ?? ''} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, resource: event.target.value } : item))} />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Earliest
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.earliestStartHour ?? 0} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, earliestStartHour: +event.target.value } : item))} />
+                          </label>
+                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                            Latest
+                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.latestFinishHour ?? 0} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, latestFinishHour: +event.target.value || undefined } : item))} />
                           </label>
                         </div>
                       ))}
@@ -4770,6 +4966,43 @@ export default function App() {
                         </div>
                       ) : null}
                     </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Benchmark Validation" icon={Gauge} provenance={benchmarkValidation ? 'formula' : 'preset'}>
+                    {benchmarkValidation?.validation ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <MetricBadge
+                            label="Benchmark"
+                            value={benchmarkValidation.validation.overallStatus}
+                            unit={benchmarkValidation.validation.benchmarkName}
+                            tone={benchmarkValidation.validation.overallStatus === 'PASS' ? 'good' : benchmarkValidation.validation.overallStatus === 'WARN' ? 'warn' : 'bad'}
+                          />
+                          <MetricBadge label="Calibration Score" value={(benchmarkValidation.validation.score * 100).toFixed(0)} unit="%" tone={benchmarkValidation.validation.score > 0.8 ? 'good' : benchmarkValidation.validation.score > 0.55 ? 'warn' : 'bad'} />
+                        </div>
+                        <div className="space-y-2 text-xs text-slate-300">
+                          {benchmarkValidation.validation.checks.map((check) => (
+                            <div key={check.metric} className="rounded border border-slate-800 bg-black/20 px-3 py-2">
+                              <div className="flex items-center justify-between">
+                                <span>{check.metric}</span>
+                                <StatusPill value={check.status} tone={check.status === 'PASS' ? 'good' : check.status === 'WARN' ? 'warn' : 'bad'} />
+                              </div>
+                              <p className="mt-1 text-slate-400">
+                                actual {check.actual.toFixed(2)} {check.unit} | expected {check.expectedMin.toFixed(2)}-{check.expectedMax.toFixed(2)} {check.unit}
+                              </p>
+                              <p className="mt-1 text-slate-500">{check.rationale}</p>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          {benchmarkValidation.validation.notes.map((note) => (
+                            <p key={note}>{note}</p>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">Benchmark calibration appears once trajectory, dose, comm, and conjunction metrics have been solved.</p>
+                    )}
                   </DashboardCard>
 
                   <DashboardCard title="Crew EVA & Flight Review" icon={ShieldAlert} provenance={flightReview ? 'formula' : 'preset'}>
@@ -4986,8 +5219,42 @@ export default function App() {
                             <MetricBadge label="Burn" value={maneuverTargeting.targeting.burnDurationS.toFixed(1)} unit="s" />
                             <MetricBadge label="Closing V" value={maneuverTargeting.targeting.closingVelocityKmS.toFixed(4)} unit="km/s" />
                             <MetricBadge label="Arrival Error" value={maneuverTargeting.targeting.estimatedArrivalErrorKm.toFixed(2)} unit="km" tone={maneuverTargeting.targeting.estimatedArrivalErrorKm < 5 ? 'good' : 'warn'} />
+                            <MetricBadge label="Propellant" value={maneuverTargeting.targeting.propellantConsumedKg.toFixed(1)} unit={`kg | ${maneuverTargeting.targeting.propellantFractionPct.toFixed(2)}%`} />
+                            <MetricBadge label="Time Error" value={maneuverTargeting.targeting.estimatedArrivalTimeErrorS.toFixed(1)} unit="s" tone={maneuverTargeting.targeting.estimatedArrivalTimeErrorS < 10 ? 'good' : 'warn'} />
+                            <MetricBadge label="Ignition Accel" value={maneuverTargeting.targeting.ignitionAccelerationMs2.toFixed(3)} unit="m/s²" />
+                            <MetricBadge label="Burnout Accel" value={maneuverTargeting.targeting.burnoutAccelerationMs2.toFixed(3)} unit="m/s²" />
                           </div>
                           <p className="mt-2 text-xs text-slate-500">Vector: {maneuverTargeting.targeting.deltaVVectorKmS.map((item) => item.toFixed(5)).join(', ')} km/s</p>
+                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                            <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
+                              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Finite-Burn Arc</p>
+                              <div className="mt-2 space-y-1 text-xs text-slate-300">
+                                {maneuverTargeting.targeting.finiteBurnSamples.map((sample) => (
+                                  <div key={sample.timeS} className="flex items-center justify-between rounded border border-slate-800 px-2 py-1">
+                                    <span>{sample.timeS.toFixed(1)} s</span>
+                                    <span>Δv {sample.cumulativeDeltaVKmS.toFixed(4)} km/s</span>
+                                    <span>{sample.massKg.toFixed(0)} kg</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
+                              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Dispersion Envelope</p>
+                              <div className="mt-2 space-y-2 text-xs text-slate-300">
+                                {maneuverTargeting.targeting.dispersionCases.map((caseItem) => (
+                                  <div key={caseItem.label} className="rounded border border-slate-800 px-3 py-2">
+                                    <div className="flex items-center justify-between">
+                                      <span>{caseItem.label.replace('_', ' ')}</span>
+                                      <span className="text-sky-200">{caseItem.estimatedMissDistanceKm.toFixed(2)} km miss</span>
+                                    </div>
+                                    <p className="mt-1 text-slate-500">
+                                      thrust x{caseItem.thrustScale.toFixed(3)} | point {caseItem.pointingErrorDeg.toFixed(2)} deg | offset {caseItem.timingOffsetS.toFixed(1)} s
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       ) : null}
                     </div>
@@ -5467,7 +5734,7 @@ export default function App() {
                   </DashboardCard>
                 </motion.div>
               ) : null}
-            </AnimatePresence>
+            </>
           </aside>
         </main>
       </div>

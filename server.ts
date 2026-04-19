@@ -53,6 +53,7 @@ import {
   solveLambertUniversal,
   solveLaunchWindowsWithConstraints,
 } from "./src/lib/trajectoryDesign.ts";
+import { validateMissionAgainstBenchmarks } from "./src/lib/validation.ts";
 import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webgeocalc.ts";
 import type { PennyLaneRequest, PennyLaneResult } from "./src/lib/pennylane.ts";
 
@@ -791,6 +792,10 @@ async function startServer() {
           timeToGoHours: Number(req.body?.timeToGoHours ?? 6),
           thrustN: Number(req.body?.thrustN ?? 100000),
           massKg: Number(req.body?.massKg ?? 25000),
+          ispS: Number(req.body?.ispS ?? 452),
+          thrustDispersionPct: Number(req.body?.thrustDispersionPct ?? 3),
+          pointingSigmaDeg: Number(req.body?.pointingSigmaDeg ?? 0.35),
+          timingSigmaS: Number(req.body?.timingSigmaS ?? 2.5),
         }),
         source: 'FORMULA-DRIVEN · Maneuver design and targeting',
       });
@@ -901,6 +906,26 @@ async function startServer() {
       });
     } catch (error: any) {
       res.status(400).json({ error: error?.message || 'Timeline solve failed' });
+    }
+  });
+
+  app.post("/api/validation/benchmarks", (req, res) => {
+    try {
+      res.json({
+        validation: validateMissionAgainstBenchmarks({
+          launchBodyId: String(req.body?.launchBodyId || 'earth'),
+          targetBodyId: String(req.body?.targetBodyId || 'moon'),
+          transferDays: Number(req.body?.transferDays ?? 0),
+          totalDeltaVKmS: Number(req.body?.totalDeltaVKmS ?? 0),
+          totalDoseMsv: Number(req.body?.totalDoseMsv ?? 0),
+          peakDoseRateMsvHr: Number(req.body?.peakDoseRateMsvHr ?? 0),
+          commCoverageFraction: Number(req.body?.commCoverageFraction ?? 0),
+          conjunctionCount: Number(req.body?.conjunctionCount ?? 0),
+        }),
+        source: 'FORMULA-DRIVEN · Benchmark validation and calibration',
+      });
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || 'Benchmark validation failed' });
     }
   });
 
