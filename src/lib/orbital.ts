@@ -259,10 +259,15 @@ export function buildEarthMoonTransferTrajectory(
   }
 
   const stayS = stayDays * 86400;
-  const returnEpoch = new Date(arrival.getTime() + stayS * 1000);
-  const moonReturn = moonGeocentricPositionKm(returnEpoch);
-  const r2r = Math.hypot(moonReturn[0], moonReturn[1], moonReturn[2]);
-  const moonHatR = normalize3(moonReturn);
+  // Anchor the return ellipse to the Moon position at arrival (same point
+  // outbound ends on) instead of at the return epoch. Otherwise the ~3-day
+  // lunar advance (~39°, ~256 000 km chord) creates a long straight gap
+  // between outbound's end and inbound's start that reads as a triangle's
+  // long side. The "Moon now" ghost sphere already shows the lunar drift
+  // during the stay, so the return arc starting from moonHat is the right
+  // visual continuity choice.
+  const moonHatR = moonHat;
+  const r2r = r2;
 
   // Real Hohmann return: planar ellipse with apoapsis at the Moon (along
   // +moonHatR at distance r2r) and periapsis on the opposite side of Earth
