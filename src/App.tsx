@@ -951,6 +951,59 @@ const MISSION_SCENARIOS = [
   { id: 'venus-orbit', name: 'Venus Orbital Insertion', target: 'venus', mode: 'orbital', fuel: 'RP-1', date: '2026-10-10', mass: 18000, thrust: 95000 },
 ];
 
+const LANGUAGES = [
+  { label: 'English', code: 'en' },
+  { label: 'Spanish', code: 'es' },
+  { label: 'French', code: 'fr' },
+  { label: 'German', code: 'de' },
+  { label: 'Japanese', code: 'ja' },
+  { label: 'Chinese', code: 'zh-CN' },
+  { label: 'Russian', code: 'ru' },
+  { label: 'Portuguese', code: 'pt' },
+  { label: 'Hindi', code: 'hi' },
+];
+
+const LanguageSelector = () => {
+  const handleLanguageChange = (langCode: string) => {
+    // Update HTML lang attribute to prevent Google from thinking the detection is wrong
+    document.documentElement.lang = langCode;
+
+    // 1. Update the hidden Google Translate combo
+    const select = document.querySelector('.goog-te-combo') as HTMLSelectElement;
+    if (select) {
+      select.value = langCode;
+      select.dispatchEvent(new Event('change'));
+      return;
+    }
+
+    // 2. Fallback: If the selector isn't ready yet, we can try to find the simple layout link
+    const simpleLayoutLink = document.querySelector(`.goog-te-menu-value`) as HTMLElement;
+    if (simpleLayoutLink) {
+      // This is more complex as it involves clicking the menu then the item.
+      // Usually, the .goog-te-combo exists in the background for most layouts.
+    }
+    
+    // 3. Last resort: Cookies (how Google Translate natively stores it)
+    document.cookie = `googtrans=/en/${langCode}; path=/`;
+    location.reload();
+  };
+
+  return (
+    <select
+      className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] skiptranslate"
+      onChange={(e) => handleLanguageChange(e.target.value)}
+      defaultValue="en"
+    >
+      <option value="en">Language</option>
+      {LANGUAGES.map((lang) => (
+        <option key={lang.code} value={lang.code}>
+          {lang.label}
+        </option>
+      ))}
+    </select>
+  );
+};
+
 const DEFAULT_TIMELINE_TASKS: TimelineTaskInput[] = [
   { id: 'launch_prep', name: 'Launch Prep', durationHours: 18, earliestStartHour: 0, latestFinishHour: 24, resource: 'ground' },
   { id: 'ascent', name: 'Ascent / Parking Orbit', durationHours: 4, dependencies: ['launch_prep'], resource: 'vehicle' },
@@ -4378,19 +4431,20 @@ export default function App() {
         }}
       />
       <div className="relative z-10 mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-4">
-        <header className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
-          <div>
+        <header className="mb-4 flex flex-col gap-4 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <img
                 src="/logo.png"
                 alt="ARTEMIS-Q logo"
                 className="h-12 w-12 rounded-lg border border-slate-700 bg-slate-950/70 object-contain p-1 shadow-[0_8px_30px_rgba(0,0,0,0.35)]"
               />
-              <div>
+              <div className="skiptranslate">
                 <h1 className="text-xl font-bold uppercase tracking-[0.28em]">ARTEMIS-Q</h1>
                 <p className="text-sm text-slate-400">Physics-informed mission analysis with explicit provenance and STL-driven ascent optimization.</p>
               </div>
             </div>
+            <LanguageSelector />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {TAB_OPTIONS.map((tab) => (
@@ -4398,7 +4452,7 @@ export default function App() {
                 {tab.label}
               </button>
             ))}
-            <select className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
+            <select className="max-w-[120px] rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
               <option value="">Scenarios</option>
               {MISSION_SCENARIOS.map((scenario) => (
                 <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
