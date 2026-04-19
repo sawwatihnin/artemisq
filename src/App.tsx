@@ -1,16 +1,19 @@
-import type { ChangeEvent, ReactNode, RefObject } from 'react';
+import type { ChangeEvent, CSSProperties, ReactNode, RefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   AlertTriangle,
   Atom,
+  BookOpen,
   ChevronRight,
   Gauge,
   Globe,
+  Palette,
   Rocket,
   ShieldAlert,
   Thermometer,
+  Type,
   Upload,
   Wind,
 } from 'lucide-react';
@@ -86,11 +89,12 @@ function formatMoney(value: number) {
 
 type MissionType = 'lunar' | 'orbital' | 'rover';
 type FuelType = 'RP-1' | 'LH2' | 'Methane';
-type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum';
+type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum' | 'resources';
 type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
 type PolicyProfile = 'CREW_FIRST' | 'BALANCED' | 'COST_FIRST';
 type ScenarioType = 'NOMINAL' | 'SOLAR_STORM' | 'COMM_BLACKOUT' | 'PROPULSION_ANOMALY' | 'DELAYED_LAUNCH';
 type VisualizerViewMode = 'fit' | 'launch' | 'target' | 'reset';
+type ThemeMode = 'dark' | 'light' | 'ocean' | 'high-contrast';
 
 interface ExternalConjunctionThreat {
   objectA: string;
@@ -991,6 +995,199 @@ const GENERIC_FLIGHT_SEQUENCE_TEMPLATE: FlightSequenceTemplateEntry[] = [
   { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal recovery uses residual reserves and site geometry to complete the mission.' },
 ];
 
+const APP_STORAGE_KEYS = {
+  theme: 'artemisq-accessibility-theme',
+  fontScale: 'artemisq-accessibility-font-scale',
+} as const;
+
+const TAB_OPTIONS: Array<{ id: Tab; label: string }> = [
+  { id: 'mission', label: 'mission' },
+  { id: 'physics', label: 'physics' },
+  { id: 'vehicle', label: 'vehicle' },
+  { id: 'quantum', label: 'quantum' },
+  { id: 'resources', label: 'resources' },
+];
+
+const THEME_OPTIONS: Array<{ id: ThemeMode; label: string; description: string; colorScheme: 'light' | 'dark'; vars: Record<string, string> }> = [
+  {
+    id: 'dark',
+    label: 'Dark',
+    description: 'Original dark cockpit look.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#050810',
+      '--color-app-surface': '#0d1224',
+      '--color-app-panel': '#020617',
+      '--color-app-panel-soft': 'rgba(2, 6, 23, 0.78)',
+      '--color-app-overlay': 'rgba(0, 0, 0, 0.4)',
+      '--color-app-border': '#1e293b',
+      '--color-app-border-strong': '#334155',
+      '--color-text-primary': '#f1f5f9',
+      '--color-text-secondary': '#cbd5e1',
+      '--color-text-muted': '#94a3b8',
+      '--color-text-faint': '#64748b',
+      '--color-app-accent': '#4B9CD3',
+      '--color-app-accent-soft': 'rgba(75, 156, 211, 0.15)',
+      '--color-app-good': '#86efac',
+      '--color-app-good-soft': 'rgba(34, 197, 94, 0.08)',
+      '--color-app-warn': '#fcd34d',
+      '--color-app-warn-soft': 'rgba(245, 158, 11, 0.08)',
+      '--color-app-bad': '#fca5a5',
+      '--color-app-bad-soft': 'rgba(239, 68, 68, 0.08)',
+      '--color-app-input': '#0f172a',
+      '--color-app-visualizer': 'rgba(0, 0, 0, 0.4)',
+    },
+  },
+  {
+    id: 'light',
+    label: 'Light',
+    description: 'Bright, high-readability daylight theme.',
+    colorScheme: 'light',
+    vars: {
+      '--color-app-bg': '#edf4fb',
+      '--color-app-surface': '#ffffff',
+      '--color-app-panel': '#f8fbff',
+      '--color-app-panel-soft': 'rgba(241, 245, 249, 0.96)',
+      '--color-app-overlay': 'rgba(255, 255, 255, 0.84)',
+      '--color-app-border': '#cbd5e1',
+      '--color-app-border-strong': '#94a3b8',
+      '--color-text-primary': '#0f172a',
+      '--color-text-secondary': '#1e293b',
+      '--color-text-muted': '#475569',
+      '--color-text-faint': '#64748b',
+      '--color-app-accent': '#0f6cbd',
+      '--color-app-accent-soft': 'rgba(15, 108, 189, 0.12)',
+      '--color-app-good': '#166534',
+      '--color-app-good-soft': 'rgba(22, 101, 52, 0.08)',
+      '--color-app-warn': '#b45309',
+      '--color-app-warn-soft': 'rgba(180, 83, 9, 0.08)',
+      '--color-app-bad': '#b91c1c',
+      '--color-app-bad-soft': 'rgba(185, 28, 28, 0.08)',
+      '--color-app-input': '#ffffff',
+      '--color-app-visualizer': 'rgba(255, 255, 255, 0.84)',
+    },
+  },
+  {
+    id: 'ocean',
+    label: 'Ocean',
+    description: 'Blue-green palette with softer contrast.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#06141b',
+      '--color-app-surface': '#0c2530',
+      '--color-app-panel': '#102f3b',
+      '--color-app-panel-soft': 'rgba(7, 27, 36, 0.84)',
+      '--color-app-overlay': 'rgba(6, 20, 27, 0.55)',
+      '--color-app-border': '#1f4958',
+      '--color-app-border-strong': '#2d667a',
+      '--color-text-primary': '#e6fbff',
+      '--color-text-secondary': '#c6ecf5',
+      '--color-text-muted': '#97c6d3',
+      '--color-text-faint': '#6ea0af',
+      '--color-app-accent': '#4cc9f0',
+      '--color-app-accent-soft': 'rgba(76, 201, 240, 0.16)',
+      '--color-app-good': '#6ee7b7',
+      '--color-app-good-soft': 'rgba(16, 185, 129, 0.09)',
+      '--color-app-warn': '#fbbf24',
+      '--color-app-warn-soft': 'rgba(245, 158, 11, 0.09)',
+      '--color-app-bad': '#fda4af',
+      '--color-app-bad-soft': 'rgba(244, 63, 94, 0.1)',
+      '--color-app-input': '#0b1f29',
+      '--color-app-visualizer': 'rgba(4, 16, 22, 0.52)',
+    },
+  },
+  {
+    id: 'high-contrast',
+    label: 'High Contrast',
+    description: 'Extra separation for text, borders, and focus.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#000000',
+      '--color-app-surface': '#111111',
+      '--color-app-panel': '#181818',
+      '--color-app-panel-soft': 'rgba(0, 0, 0, 0.92)',
+      '--color-app-overlay': 'rgba(0, 0, 0, 0.88)',
+      '--color-app-border': '#ffffff',
+      '--color-app-border-strong': '#ffffff',
+      '--color-text-primary': '#ffffff',
+      '--color-text-secondary': '#f5f5f5',
+      '--color-text-muted': '#ebebeb',
+      '--color-text-faint': '#d4d4d4',
+      '--color-app-accent': '#00e5ff',
+      '--color-app-accent-soft': 'rgba(0, 229, 255, 0.18)',
+      '--color-app-good': '#7CFFB2',
+      '--color-app-good-soft': 'rgba(124, 255, 178, 0.14)',
+      '--color-app-warn': '#FFE072',
+      '--color-app-warn-soft': 'rgba(255, 224, 114, 0.16)',
+      '--color-app-bad': '#FF9C9C',
+      '--color-app-bad-soft': 'rgba(255, 156, 156, 0.16)',
+      '--color-app-input': '#050505',
+      '--color-app-visualizer': 'rgba(0, 0, 0, 0.92)',
+    },
+  },
+];
+
+const QUANTUM_RESOURCE_LINKS = [
+  {
+    title: 'NASA Artemis Program',
+    href: 'https://www.nasa.gov/artemis',
+    summary: 'Mission context for the lunar exploration goals this planner is modeling.',
+  },
+  {
+    title: 'NASA QuAIL',
+    href: 'https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/nasa-quail/',
+    summary: 'NASA’s Quantum Artificial Intelligence Laboratory and its work on optimization, planning, and mission-relevant research.',
+  },
+  {
+    title: 'PennyLane Documentation',
+    href: 'https://docs.pennylane.ai/',
+    summary: 'Reference docs for the variational quantum machine-learning framework already connected to this app.',
+  },
+  {
+    title: 'IBM QAOA Tutorial',
+    href: 'https://qiskit.qotlabs.org/docs/tutorials/quantum-approximate-optimization-algorithm',
+    summary: 'A practical walkthrough of the algorithm family this app simulates in the Quantum tab.',
+  },
+  {
+    title: 'IBM Quantum Platform',
+    href: 'https://quantum.cloud.ibm.com/',
+    summary: 'Learning hub for quantum computing basics, execution models, and current tooling.',
+  },
+];
+
+const FORMULA_EXPLANATIONS = [
+  {
+    title: 'Hohmann transfer',
+    math: 'Two major burns move a spacecraft from one orbit to another as fuel-efficiently as possible.',
+    plainLanguage: 'Think of it as taking the calmest two-step route between circular lanes in space: one push to leave, one push to settle into the new lane.',
+    whereUsed: 'Mission and Physics tabs for transfer timing, delta-v, and route comparisons.',
+  },
+  {
+    title: 'Tsiolkovsky rocket equation',
+    math: 'Relates engine efficiency and the ratio of starting mass to ending mass to the speed change a rocket can produce.',
+    plainLanguage: 'The more propellant you can throw out efficiently, the more speed you can buy, but extra fuel also makes the vehicle heavier at liftoff.',
+    whereUsed: 'Vehicle tab for ascent delta-v and staging tradeoffs.',
+  },
+  {
+    title: 'J2 drift',
+    math: 'Accounts for the fact that Earth is slightly squashed, so an orbit’s plane slowly twists over time.',
+    plainLanguage: 'Earth is not a perfect sphere, so gravity tugs a little unevenly and gradually rotates the orbit’s orientation.',
+    whereUsed: 'Physics tab for orbital drift and long-duration orbit behavior.',
+  },
+  {
+    title: 'Radiation risk and Van Allen exposure',
+    math: 'Combines trajectory geometry with radiation-zone severity to estimate cumulative exposure.',
+    plainLanguage: 'It asks how long the mission spends in rough radiation neighborhoods and how intense those neighborhoods are.',
+    whereUsed: 'Mission tab for crew risk, shielding, and route comparisons.',
+  },
+  {
+    title: 'QAOA and quantum scoring',
+    math: 'Builds a simplified cost Hamiltonian and samples candidate states to find promising low-cost mission paths.',
+    plainLanguage: 'Instead of checking one route at a time, the model uses a quantum-style scoring process to highlight combinations that look promising, then compares them with classical baselines.',
+    whereUsed: 'Quantum tab for simulated optimization layers, state distributions, and diagnostics.',
+  },
+];
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -1251,10 +1448,10 @@ function DashboardCard({
   className?: string;
 }) {
   return (
-    <section className={cn('rounded-xl border border-slate-800 bg-[#0d1224]/95 shadow-[0_20px_60px_rgba(0,0,0,0.28)]', className)}>
+    <section className={cn('rounded-xl border border-slate-800 bg-slate-950/95 shadow-[0_20px_60px_rgba(0,0,0,0.28)]', className)}>
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-2">
-          <Icon className="h-4 w-4" style={{ color: CB }} />
+          <Icon className="h-4 w-4" style={{ color: 'var(--color-app-accent)' }} />
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">{title}</h2>
         </div>
         {provenance ? <ProvenancePill kind={provenance} /> : null}
@@ -2617,6 +2814,16 @@ function GroundRangeOverlay({ analysis }: { analysis: GroundConstraintFeed['anal
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'dark';
+    const stored = window.localStorage.getItem(APP_STORAGE_KEYS.theme);
+    return THEME_OPTIONS.some((option) => option.id === stored) ? (stored as ThemeMode) : 'dark';
+  });
+  const [fontScale, setFontScale] = useState<number>(() => {
+    if (typeof window === 'undefined') return 100;
+    const stored = Number(window.localStorage.getItem(APP_STORAGE_KEYS.fontScale));
+    return Number.isFinite(stored) ? clamp(stored, 100, 145) : 100;
+  });
   const [missionType, setMissionType] = useState<MissionType>('lunar');
   const [fuelType, setFuelType] = useState<FuelType>('LH2');
   const [targetPlanet, setTargetPlanet] = useState('moon');
@@ -4138,13 +4345,38 @@ export default function App() {
     pair: `Z${index}Z${index + 1}`,
     correlation: zz,
   })) ?? [];
+  const activeTheme = THEME_OPTIONS.find((option) => option.id === themeMode) ?? THEME_OPTIONS[0];
+  const appShellStyle = activeTheme.vars as CSSProperties;
+  const fontScaleLabel = `${Math.round(((fontScale - 100) / 45) * 100)}% larger`;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(APP_STORAGE_KEYS.theme, themeMode);
+    window.localStorage.setItem(APP_STORAGE_KEYS.fontScale, String(fontScale));
+    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.style.fontSize = `${fontScale}%`;
+    document.documentElement.style.colorScheme = activeTheme.colorScheme;
+    document.documentElement.style.setProperty('--app-page-bg', activeTheme.vars['--color-app-bg']);
+    document.documentElement.style.setProperty('--app-page-text', activeTheme.vars['--color-text-primary']);
+    document.body.style.backgroundColor = activeTheme.vars['--color-app-bg'];
+    document.body.style.color = activeTheme.vars['--color-text-primary'];
+  }, [activeTheme, fontScale, themeMode]);
+
   const visualizerTitle = activeTab === 'vehicle'
     ? 'STL Aerodynamics Visualizer'
+    : activeTab === 'resources'
+      ? 'Accessibility & Learning Hub'
     : `${launchBody.name} to ${targetBody.name} Mission Visualizer`;
 
   return (
-    <div className="min-h-screen bg-[#050810] text-slate-100">
-      <div className="pointer-events-none fixed inset-0 opacity-[0.05]" style={{ backgroundImage: 'linear-gradient(to right, rgba(75,156,211,0.2) 1px, transparent 1px), linear-gradient(to bottom, rgba(75,156,211,0.2) 1px, transparent 1px)', backgroundSize: '42px 42px' }} />
+    <div className="app-shell min-h-screen text-slate-100" data-theme={themeMode} style={appShellStyle}>
+      <div
+        className="pointer-events-none fixed inset-0 opacity-[0.08]"
+        style={{
+          backgroundImage: 'linear-gradient(to right, color-mix(in srgb, var(--color-app-accent) 28%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--color-app-accent) 28%, transparent) 1px, transparent 1px)',
+          backgroundSize: '42px 42px',
+        }}
+      />
       <div className="relative z-10 mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-4">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
           <div>
@@ -4161,9 +4393,9 @@ export default function App() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {(['mission', 'physics', 'vehicle', 'quantum'] as const).map((tab) => (
-              <button key={tab} className={cn('rounded-md border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]', activeTab === tab ? 'border-sky-400/60 bg-sky-400/15 text-sky-200' : 'border-slate-700 bg-slate-950/60 text-slate-300')} onClick={() => setActiveTab(tab)}>
-                {tab}
+            {TAB_OPTIONS.map((tab) => (
+              <button key={tab.id} className={cn('rounded-md border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]', activeTab === tab.id ? 'border-sky-400/60 bg-sky-400/15 text-sky-200' : 'border-slate-700 bg-slate-950/60 text-slate-300')} onClick={() => setActiveTab(tab.id)}>
+                {tab.label}
               </button>
             ))}
             <select className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
@@ -4172,6 +4404,39 @@ export default function App() {
                 <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
               ))}
             </select>
+            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300">
+              <Palette className="h-3.5 w-3.5" />
+              <span className="sr-only">Color mode</span>
+              <select
+                aria-label="Color mode"
+                className="bg-transparent text-[11px] uppercase tracking-[0.14em] outline-none"
+                value={themeMode}
+                onChange={(event) => setThemeMode(event.target.value as ThemeMode)}
+              >
+                {THEME_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id} className="text-slate-950">
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300">
+              <Type className="h-3.5 w-3.5" />
+              <span>Font</span>
+              <input
+                aria-label="Increase font size"
+                className="w-24"
+                type="range"
+                min={100}
+                max={145}
+                step={5}
+                value={fontScale}
+                onChange={(event) => setFontScale(Math.max(100, Number(event.target.value)))}
+              />
+              <span className="min-w-[5.5rem] text-right text-[10px] normal-case tracking-normal text-slate-400">
+                {fontScale === 100 ? 'Smallest' : fontScaleLabel}
+              </span>
+            </label>
           </div>
         </header>
 
@@ -4179,11 +4444,51 @@ export default function App() {
           <section className="flex min-h-0 flex-col gap-4">
             <DashboardCard
               title={visualizerTitle}
-              icon={activeTab === 'vehicle' ? Wind : Globe}
-              provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
+              icon={activeTab === 'vehicle' ? Wind : activeTab === 'resources' ? BookOpen : Globe}
+              provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : activeTab === 'resources' ? 'heuristic' : importedGraph ? 'formula' : 'preset'}
               className="flex-1"
             >
-              {activeTab === 'vehicle' ? (
+              {activeTab === 'resources' ? (
+                <div className="flex h-[420px] flex-col justify-between rounded-xl border border-slate-800 bg-black/40 p-6">
+                  <div className="max-w-3xl space-y-4">
+                    <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/40 bg-sky-400/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200">
+                      <BookOpen className="h-3.5 w-3.5" />
+                      Accessibility and learning
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold text-slate-100">Readable across tabs, with learning support built into the app.</h2>
+                      <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
+                        Color modes and font scaling are now driven by shared app-level settings instead of one-off tab styling. Use the header controls or the Resources tab cards to switch themes, keep the current size as the minimum, and explore the quantum background behind the project.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Current theme</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">{activeTheme.label}</p>
+                        <p className="mt-2 text-sm text-slate-400">{activeTheme.description}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Font size</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">{fontScale === 100 ? 'Smallest' : `${fontScale}%`}</p>
+                        <p className="mt-2 text-sm text-slate-400">The slider only increases from the current baseline, so text never drops below today’s size.</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Resources tab</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">Quantum explainers</p>
+                        <p className="mt-2 text-sm text-slate-400">Real links and plain-language formula notes live in the right-side panel for quick study.</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="rounded-lg border border-sky-400/60 bg-sky-400/15 px-4 py-2 text-sm font-semibold text-sky-100" onClick={() => setThemeMode(themeMode === 'light' ? 'dark' : 'light')}>
+                      Toggle light/dark
+                    </button>
+                    <button type="button" className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-sm font-semibold text-slate-200" onClick={() => setFontScale((current) => clamp(current + 5, 100, 145))}>
+                      Increase font size
+                    </button>
+                  </div>
+                </div>
+              ) : activeTab === 'vehicle' ? (
                 stlAnalysis ? (
                   <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
                 ) : (
@@ -4300,6 +4605,8 @@ export default function App() {
               )}
             </DashboardCard>
 
+            {activeTab !== 'resources' ? (
+            <>
             <div className="grid gap-4 lg:grid-cols-3">
               <DashboardCard title="Mission Metrics" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
                 <div className="grid grid-cols-2 gap-2">
@@ -4389,8 +4696,61 @@ export default function App() {
                 ))}
               </div>
             </DashboardCard>
+            </>
+            ) : (
+            <div className="grid gap-4 lg:grid-cols-3">
+              <DashboardCard title="Display Settings" icon={Palette} provenance="heuristic">
+                <div className="space-y-4 text-sm text-slate-300">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">Color mode</span>
+                    <select
+                      className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                      value={themeMode}
+                      onChange={(event) => setThemeMode(event.target.value as ThemeMode)}
+                    >
+                      {THEME_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} - {option.description}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                      <span>Font scale</span>
+                      <span>{fontScale === 100 ? 'Smallest' : `${fontScale}%`}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min={100}
+                      max={145}
+                      step={5}
+                      value={fontScale}
+                      onChange={(event) => setFontScale(Math.max(100, Number(event.target.value)))}
+                    />
+                  </label>
+                  <p className="text-xs text-slate-400">These settings persist in local storage and follow you across every tab.</p>
+                </div>
+              </DashboardCard>
 
-            {displayedCrewHealth && optResult ? (
+              <DashboardCard title="Why It Helps" icon={Type} provenance="heuristic">
+                <div className="space-y-3 text-sm text-slate-300">
+                  <p>Color modes are driven by shared theme variables, so the visual system stays consistent when you switch tabs.</p>
+                  <p>The font slider starts at the current baseline and only scales upward, which protects readability.</p>
+                  <p>Focus outlines and link styling are also boosted globally so keyboard navigation stays visible in every mode.</p>
+                </div>
+              </DashboardCard>
+
+              <DashboardCard title="Learning Focus" icon={BookOpen} provenance="heuristic">
+                <div className="space-y-3 text-sm text-slate-300">
+                  <p>The links on this tab point to NASA, IBM, and PennyLane sources that map to the mission-analysis and quantum pieces already in the app.</p>
+                  <p>The formula notes below explain the core ideas in plain language before someone needs to interpret the equations.</p>
+                </div>
+              </DashboardCard>
+            </div>
+            )}
+
+            {activeTab !== 'resources' && displayedCrewHealth && optResult ? (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <DashboardCard title="Crew Health Panel" icon={ShieldAlert} provenance="formula">
@@ -5832,6 +6192,54 @@ export default function App() {
                         <li>QAOA remains a classical simulation of a reduced Hamiltonian, not quantum-hardware execution.</li>
                         <li>PennyLane here is a simulated quantum variational surrogate, not direct quantum-hardware inference or a certified mission-ops model.</li>
                       </ul>
+                    </div>
+                  </DashboardCard>
+                </motion.div>
+              ) : null}
+
+              {activeTab === 'resources' ? (
+                <motion.div key="resources" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Quantum Resources" icon={BookOpen} provenance="heuristic">
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>These are real external references for understanding the mission context, the quantum tooling, and the optimization ideas reflected in ARTEMIS-Q.</p>
+                      <div className="space-y-3">
+                        {QUANTUM_RESOURCE_LINKS.map((resource) => (
+                          <a
+                            key={resource.href}
+                            className="block rounded-lg border border-slate-800 bg-slate-950/60 p-3 transition hover:border-slate-600"
+                            href={resource.href}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <p className="font-semibold text-sky-200">{resource.title}</p>
+                            <p className="mt-1 text-xs text-slate-400">{resource.summary}</p>
+                            <p className="mt-2 text-[11px] text-slate-500">{resource.href}</p>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Formula Explanations" icon={Atom} provenance="heuristic">
+                    <div className="space-y-3">
+                      {FORMULA_EXPLANATIONS.map((item) => (
+                        <div key={item.title} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <h3 className="text-sm font-semibold text-slate-100">{item.title}</h3>
+                            <span className="rounded-full border border-slate-700 px-2 py-1 text-[9px] uppercase tracking-[0.14em] text-slate-400">{item.whereUsed}</span>
+                          </div>
+                          <p className="mt-2 text-xs text-slate-300">{item.math}</p>
+                          <p className="mt-2 text-xs leading-relaxed text-slate-400">{item.plainLanguage}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Project Fit" icon={Rocket} provenance="heuristic">
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>In this project, quantum methods are being used as decision-support layers, not as magic replacements for orbital mechanics.</p>
+                      <p>The mission, physics, and vehicle tabs still rely on classical models for transfer, staging, atmosphere, and risk. The quantum layer helps rank candidate paths, tradeoffs, and surrogate decisions on top of that physics base.</p>
+                      <p className="text-xs text-slate-400">That means the most practical learning path is: understand the mission physics first, then look at how quantum optimization or QML can help search or score the option space more efficiently.</p>
                     </div>
                   </DashboardCard>
                 </motion.div>
