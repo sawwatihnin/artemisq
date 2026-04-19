@@ -267,12 +267,16 @@ Implemented in:
 - classical simulated annealing route search
 - QUBO construction
 - simulated QAOA diagnostics
+- PennyLane variational quantum machine learning
+- local quantum simulation with `default.qubit` and `lightning.qubit`
 - circuit visualization
 - state distribution view
 
 Core implementation:
 
 - [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
+- [python/pennylane_worker.py](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/python/pennylane_worker.py)
+- [src/lib/pennylane.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/pennylane.ts)
 
 ## Live Data Integrations
 
@@ -373,12 +377,25 @@ Vehicle panels include:
 - Ascent Trace
 - Stability & AI Summary
 
+Quantum panels include:
+
+- Quantum Layer
+- PennyLane QML
+- Quantum Circuit
+- State Distribution
+- Layer Diagnostics
+- Qubit Marginals
+- ZZ Correlations
+- Annealing History
+- Reality Boundary
+
 ## Backend Routes
 
 ### Core
 
 - `POST /api/optimize`
 - `POST /api/qaoa`
+- `POST /api/qml/pennylane`
 - `POST /api/simulate`
 
 ### Ephemerides / astronomy
@@ -459,6 +476,7 @@ Vehicle panels include:
 - Express
 - TypeScript
 - Vite-integrated dev server flow through [server.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/server.ts)
+- Python PennyLane worker for quantum ML inference through [python/pennylane_worker.py](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/python/pennylane_worker.py)
 
 ### Key Libraries
 
@@ -512,11 +530,66 @@ What remains modeled rather than flight-certified:
 - maneuver targeting is impulsive/reduced-order, not a full finite-burn targeting suite
 - structural/aero estimates from STL are engineering approximations, not CFD or FEA
 - surface environment and range scheduling are physically informed but not mission-authority systems
-- quantum routing remains simulated, not hardware execution
+- QAOA remains classically simulated
+- PennyLane QML uses local quantum simulation, not hardware execution
+- Amazon Braket / QPU execution is not part of the supported runtime path in this application build
 
 ## Environment Variables
 
 Create a `.env` file in the project root as needed.
+
+Common variables:
+
+- `TELEMETRY_ACCESS_TOKEN`
+  Optional bearer token for telemetry read/write routes.
+
+- `SOLAR_SYSTEM_OPENDATA_TOKEN`
+  Optional bearer token for Solar System OpenData.
+
+Python runtime notes:
+
+- PennyLane integration is provided by the packages listed in [requirements.txt](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/requirements.txt)
+- the current supported quantum path is local simulation via PennyLane
+- the Quantum tab will use the local Python environment and expose simulation-backed inference results when PennyLane is installed
+
+## Quantum Execution Model
+
+ARTEMIS-Q currently supports two quantum-style execution layers:
+
+- `Simulated QAOA`
+  Implemented in TypeScript in [src/lib/optimizer.ts](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/src/lib/optimizer.ts)
+  This is a classical statevector-style simulation used for route-analysis diagnostics.
+
+- `PennyLane QML`
+  Implemented in [python/pennylane_worker.py](/Users/mohammadaghamohammadi/Desktop/Projects/artemisq/python/pennylane_worker.py)
+  This trains a small variational circuit on mission features such as:
+  - crew risk
+  - cost pressure
+  - comm penalty
+  - delta-v pressure
+  - uncertainty
+  - radiation pressure
+  - schedule pressure
+  - confidence gap
+
+  It returns:
+  - a utility score
+  - `CONTINUE / REPLAN / ABORT` recommendation
+  - class probabilities
+  - fit score
+  - feature sensitivities
+
+Supported PennyLane backends in this build:
+
+- `default.qubit`
+- `lightning.qubit`
+
+Not supported in the current runtime policy:
+
+- AWS Braket / remote QPU execution
+- direct quantum-hardware execution from the app
+
+This means the app is quantum-simulation-enabled, not quantum-hardware-backed.
 
 Useful variables:
 
