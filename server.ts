@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
 import { spawn } from "child_process";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import { SimulatedAnnealer } from "./src/lib/optimizer.ts";
@@ -172,6 +171,7 @@ async function runPennyLaneWorker(payload: PennyLaneRequest): Promise<PennyLaneR
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 5000);
+  const isProduction = process.env.NODE_ENV === "production";
   app.use(express.json());
 
   // ── JPL Horizons ───────────────────────────────────────────────────────────
@@ -1336,17 +1336,27 @@ async function startServer() {
     }
   });
 
-  // ── Vite Dev Server ─────────────────────────────────────────────────────────
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: "spa",
-    root: __dirname,
-  });
-  app.use(vite.middlewares);
-  app.use("*", (req, res, next) => {
-    if (req.originalUrl.startsWith("/api")) return next();
-    res.sendFile(path.resolve(__dirname, "index.html"));
-  });
+  // ── Frontend ────────────────────────────────────────────────────────────────
+  if (isProduction) {
+    const distDir = path.resolve(__dirname, "dist");
+    app.use(express.static(distDir));
+    app.use("*", (req, res, next) => {
+      if (req.originalUrl.startsWith("/api")) return next();
+      res.sendFile(path.resolve(distDir, "index.html"));
+    });
+  } else {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+      root: __dirname,
+    });
+    app.use(vite.middlewares);
+    app.use("*", (req, res, next) => {
+      if (req.originalUrl.startsWith("/api")) return next();
+      res.sendFile(path.resolve(__dirname, "index.html"));
+    });
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`ARTEMIS-Q server running → http://localhost:${PORT}`);
