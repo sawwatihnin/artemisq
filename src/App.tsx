@@ -1885,15 +1885,26 @@ function MissionGlobe({
       });
   }, [sceneDate, isCislunar, launchBodyId, externalBodies]);
 
+  // Anchor the Moon sphere to its position at the spacecraft's ARRIVAL epoch
+  // so the outbound trajectory line visually terminates at the Moon. The
+  // trajectory builder targets that arrival position; rendering the Moon at
+  // launch epoch would make the line miss the Moon sphere.
+  const arrivalDate = useMemo(() => {
+    const lastOutbound = outboundTrajectory[outboundTrajectory.length - 1];
+    if (lastOutbound?.time_s != null) {
+      return new Date(sceneDate.getTime() + lastOutbound.time_s * 1000);
+    }
+    return sceneDate;
+  }, [outboundTrajectory, sceneDate]);
   const moonScene = useMemo(() => {
-    const km = moonGeocentricPositionKm(sceneDate);
+    const km = moonGeocentricPositionKm(arrivalDate);
     const inv = 1 / cislunarKmPerUnit;
     const trueR = CELESTIAL_BODY_MAP.moon.radiusKm * inv;
     return {
       pos: [km[0] * inv, km[1] * inv, km[2] * inv] as [number, number, number],
       radius: Math.max(2.2, trueR * 2.4),
     };
-  }, [sceneDate, cislunarKmPerUnit]);
+  }, [arrivalDate, cislunarKmPerUnit]);
 
   const moonTexture = useMemo(() => createPlanetTexture('moon', '#c8ccd4'), []);
 

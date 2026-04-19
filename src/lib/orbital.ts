@@ -209,7 +209,7 @@ export function buildEarthMoonTransferTrajectory(
   launchDate: Date,
   keplerEl: KeplerianElements,
   segments = 96,
-  stayDays = 0.3,
+  stayDays = 3.0,
 ): TrajectoryPoint[] {
   const inv = 1 / CISLUNAR_VIS_KM_PER_UNIT;
   const toScene = (km: [number, number, number]): [number, number, number] =>
@@ -230,6 +230,19 @@ export function buildEarthMoonTransferTrajectory(
   const r2 = Math.hypot(moonVec[0], moonVec[1], moonVec[2]);
   const moonHat = normalize3(moonVec);
 
+  // Outbound transfer plane normal (orbital angular-momentum direction).
+  // Guard against degenerate cross product when leoHat ∥ moonHat by falling
+  // back to the ECI Z-axis so the inbound tilt remains well-defined.
+  const rawNormal: [number, number, number] = [
+    leoHat[1] * moonHat[2] - leoHat[2] * moonHat[1],
+    leoHat[2] * moonHat[0] - leoHat[0] * moonHat[2],
+    leoHat[0] * moonHat[1] - leoHat[1] * moonHat[0],
+  ];
+  const rawNormalMag = Math.hypot(rawNormal[0], rawNormal[1], rawNormal[2]);
+  const outboundNormal: [number, number, number] = rawNormalMag > 1e-6
+    ? normalize3(rawNormal)
+    : [0, 0, 1];
+
   const a = (r1 + r2) / 2;
   const e = (r2 - r1) / (r2 + r1);
   const p = a * (1 - e * e);
@@ -248,17 +261,46 @@ export function buildEarthMoonTransferTrajectory(
   const stayS = stayDays * 86400;
   const returnEpoch = new Date(arrival.getTime() + stayS * 1000);
   const moonReturn = moonGeocentricPositionKm(returnEpoch);
-  const moonHatR = normalize3(moonReturn);
   const r2r = Math.hypot(moonReturn[0], moonReturn[1], moonReturn[2]);
+  const moonHatR = normalize3(moonReturn);
+
+  // Re-entry direction: LEO unit vector advanced one parking-orbit phase.
+  // We approximate with leoHat rotated by π in the outbound plane so the
+  // return arc lands on the opposite side of Earth from the departure burn.
+  const reentryHat = normalize3([-leoHat[0], -leoHat[1], -leoHat[2]]);
+
   const aR = (r2r + r1) / 2;
   const eR = Math.abs(r2r - r1) / (r2r + r1);
   const pR = aR * (1 - eR * eR);
+
+  // Tilt the inbound arc out of the outbound plane so it is geometrically
+  // distinct from the outbound (TEI gives a different transfer plane than
+  // TLI because of the Moon's motion during the stay).
+  const inboundTiltRad = 0.18; // ~10° wedge for visual separation
+  const cosT = Math.cos(inboundTiltRad);
+  const sinT = Math.sin(inboundTiltRad);
+  const tilt = (v: [number, number, number]): [number, number, number] => {
+    // Rodrigues rotation around the outbound normal.
+    const k = outboundNormal;
+    const dotKV = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    const cross: [number, number, number] = [
+      k[1] * v[2] - k[2] * v[1],
+      k[2] * v[0] - k[0] * v[2],
+      k[0] * v[1] - k[1] * v[0],
+    ];
+    return [
+      v[0] * cosT + cross[0] * sinT + k[0] * dotKV * (1 - cosT),
+      v[1] * cosT + cross[1] * sinT + k[1] * dotKV * (1 - cosT),
+      v[2] * cosT + cross[2] * sinT + k[2] * dotKV * (1 - cosT),
+    ];
+  };
 
   const inbound: TrajectoryPoint[] = [];
   for (let i = 1; i <= segments; i++) {
     const nu = (i / segments) * Math.PI;
     const rKm = pR / (1 + eR * Math.cos(nu));
-    const dir = slerpUnitVectors(moonHatR, leoHat, nu / Math.PI);
+    const baseDir = slerpUnitVectors(moonHatR, reentryHat, nu / Math.PI);
+    const dir = tilt(baseDir);
     inbound.push({
       pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
       time_s: tofS + stayS + (i / segments) * tofS,
@@ -274,7 +316,9 @@ export function buildEarthMoonTransferTrajectory(
     { timeS: tliTimeS, label: 'Transfer Burn', step: 2 },
     { timeS: 0.5 * (tliTimeS + tofS), label: 'Translunar coast', step: 3 },
     { timeS: 0.92 * tofS, label: 'Lunar approach', step: 4 },
-    { timeS: tofS + 0.35 * stayS, label: 'Encounter', step: 5 },
+    // Anchor Encounter exactly at lunar arrival so the marker lands on the
+    // outbound arc end (Moon position) rather than drifting into the stay.
+    { timeS: tofS, label: 'Encounter', step: 5 },
     { timeS: tofS + stayS + 0.45 * tofS, label: 'Return coast', step: 6 },
     { timeS: totalTimeS - 0.04 * tofS, label: 'Entry', step: 7 },
     { timeS: totalTimeS, label: 'Landing', step: 8 },

@@ -44,3 +44,17 @@ See `.env.example` for optional configuration:
 - Target: autoscale
 - Build: `npm run build`
 - Run: `node --import tsx/esm server.ts`
+
+## Audit Notes (Apr 2026)
+Earth-Moon Mission Visualizer fixes applied to `src/lib/orbital.ts` and `src/lib/horizons.ts`:
+- Removed the duplicate-looking "extra blue line" by tilting the inbound arc ~10° out of the outbound plane (Rodrigues rotation about the orbital plane normal) and routing it to the opposite side of Earth (`reentryHat = -leoHat`).
+- Default crewed-stay duration increased from 0.3 days to 3.0 days (Apollo-class mission realism), so the Moon meaningfully advances along its orbit between TLI arrival and TEI.
+- Anchored the rendered Moon sphere to the spacecraft's *arrival* epoch (`sceneDate + lastOutbound.time_s`) so the outbound trajectory line visually terminates at the Moon.
+- "Encounter" Flight Sequence event now snaps to exactly `tofS` so the marker lands on the outbound arc end at the Moon (previously drifted into the stay period).
+- Added a numeric guard for degenerate cross product when `leoHat ∥ moonHat`.
+
+Verified live data flow:
+- Go/No-Go (`src/lib/cislunarOps.ts`) auto-updates from NOAA surface weather, NOAA SWPC space weather, near-Earth radiation environment, DSN visibility windows, and trajectory-derived eclipse/dose; wired through a memoized `cislunarMissionAnalysis` with full reactive deps in `App.tsx`.
+- Launch constraints (`src/lib/launchConstraints.ts`) auto-update from live weather and atmospheric scale height.
+- Quantum simulation: QAOA statevector simulation (`src/lib/optimizer.ts`) and PennyLane VQML worker (`python/pennylane_worker.py`) wired into the Quantum panel.
+- Physics core (Hohmann, Keplerian + J2, SGP4, Meeus lunar ephemeris) verified mathematically sound.

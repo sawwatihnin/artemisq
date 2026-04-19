@@ -374,7 +374,7 @@ export async function buildHorizonsTrajectory(params: {
       ? Math.hypot(initialMoon[0].x, initialMoon[0].y, initialMoon[0].z) - RE
       : 384400 - RE;
     const hoh = computeHohmann(leoAlt, Math.max(250_000, firstMoonRange));
-    const stayDays = 0.3;
+    const stayDays = 3.0;
     const arrivalDate = new Date(launchDate.getTime() + hoh.tof_s * 1000);
     const returnDate = new Date(arrivalDate.getTime() + stayDays * 86400 * 1000);
     const endDate = new Date(returnDate.getTime() + hoh.tof_s * 1000);
@@ -406,6 +406,34 @@ export async function buildHorizonsTrajectory(params: {
     const pR = aR * (1 - eR * eR);
     const segments = 96;
 
+    const rawNormal: [number, number, number] = [
+      leoHat[1] * moonHat[2] - leoHat[2] * moonHat[1],
+      leoHat[2] * moonHat[0] - leoHat[0] * moonHat[2],
+      leoHat[0] * moonHat[1] - leoHat[1] * moonHat[0],
+    ];
+    const rawNormalMag = Math.hypot(rawNormal[0], rawNormal[1], rawNormal[2]);
+    const outboundNormal: [number, number, number] = rawNormalMag > 1e-6
+      ? normalize3(rawNormal)
+      : [0, 0, 1];
+    const reentryHat = normalize3([-leoHat[0], -leoHat[1], -leoHat[2]]);
+    const inboundTiltRad = 0.18;
+    const cosT = Math.cos(inboundTiltRad);
+    const sinT = Math.sin(inboundTiltRad);
+    const tilt = (v: [number, number, number]): [number, number, number] => {
+      const k = outboundNormal;
+      const dotKV = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+      const cross: [number, number, number] = [
+        k[1] * v[2] - k[2] * v[1],
+        k[2] * v[0] - k[0] * v[2],
+        k[0] * v[1] - k[1] * v[0],
+      ];
+      return [
+        v[0] * cosT + cross[0] * sinT + k[0] * dotKV * (1 - cosT),
+        v[1] * cosT + cross[1] * sinT + k[1] * dotKV * (1 - cosT),
+        v[2] * cosT + cross[2] * sinT + k[2] * dotKV * (1 - cosT),
+      ];
+    };
+
     const outbound: TrajectoryPoint[] = [];
     for (let i = 0; i <= segments; i++) {
       const nu = (i / segments) * Math.PI;
@@ -422,7 +450,8 @@ export async function buildHorizonsTrajectory(params: {
     for (let i = 1; i <= segments; i++) {
       const nu = (i / segments) * Math.PI;
       const rKm = pR / (1 + eR * Math.cos(nu));
-      const dir = slerpUnitVectors(moonHatR, leoHat, nu / Math.PI);
+      const baseDir = slerpUnitVectors(moonHatR, reentryHat, nu / Math.PI);
+      const dir = tilt(baseDir);
       inbound.push({
         pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
         time_s: hoh.tof_s + stayS + (i / segments) * hoh.tof_s,
@@ -434,7 +463,7 @@ export async function buildHorizonsTrajectory(params: {
       { timeS: Math.min(Math.max(900, 0.08 * hoh.tof_s), 0.45 * hoh.tof_s), label: 'Transfer Burn', step: 2 },
       { timeS: 0.5 * hoh.tof_s, label: 'Translunar coast', step: 3 },
       { timeS: 0.92 * hoh.tof_s, label: 'Lunar approach', step: 4 },
-      { timeS: hoh.tof_s + 0.35 * stayS, label: 'Encounter', step: 5 },
+      { timeS: hoh.tof_s, label: 'Encounter', step: 5 },
       { timeS: hoh.tof_s + stayS + 0.45 * hoh.tof_s, label: 'Return coast', step: 6 },
       { timeS: 2 * hoh.tof_s + stayS - 0.04 * hoh.tof_s, label: 'Entry', step: 7 },
       { timeS: 2 * hoh.tof_s + stayS, label: 'Landing', step: 8 },
