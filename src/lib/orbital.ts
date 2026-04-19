@@ -296,9 +296,13 @@ export function buildEarthMoonTransferTrajectory(
   };
 
   const inbound: TrajectoryPoint[] = [];
+  // Anchor radius so ν=0 → apoapsis (Moon, r2r) and ν=π → periapsis (LEO, r1).
+  // Using `pR/(1 - eR·cos ν)` flips the conic so the return arc actually starts
+  // at the Moon and descends to LEO instead of starting at LEO radius in the
+  // Moon direction (which read as the line "bouncing off Earth").
   for (let i = 1; i <= segments; i++) {
     const nu = (i / segments) * Math.PI;
-    const rKm = pR / (1 + eR * Math.cos(nu));
+    const rKm = pR / (1 - eR * Math.cos(nu));
     const baseDir = slerpUnitVectors(moonHatR, reentryHat, nu / Math.PI);
     const dir = tilt(baseDir);
     inbound.push({
