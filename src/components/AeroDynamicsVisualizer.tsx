@@ -12,8 +12,50 @@ import {
   RHO0_SEA_LEVEL,
   speedOfSoundMs,
 } from '../lib/ascentDynamics';
-import type { STLAnalysis } from '../lib/stlAnalyzer';
+import type { AerodynamicHotspot, STLAnalysis } from '../lib/stlAnalyzer';
 import { useStlVizGeometry, windTunnelBodyEuler } from '../lib/useStlVizGeometry';
+
+function hotspotColour(severity: number): string {
+  if (severity > 0.66) return '#ef4444';
+  if (severity > 0.33) return '#f59e0b';
+  return '#facc15';
+}
+
+function HotspotMarkers({
+  hotspots,
+  meshBasis,
+}: {
+  hotspots: AerodynamicHotspot[];
+  meshBasis: { center: THREE.Vector3; scale: number };
+}) {
+  if (!hotspots.length) return null;
+  return (
+    <group scale={[meshBasis.scale, meshBasis.scale, meshBasis.scale]}>
+      {hotspots.map((spot, idx) => {
+        const x = spot.centroid[0] - meshBasis.center.x;
+        const y = spot.centroid[1] - meshBasis.center.y;
+        const z = spot.centroid[2] - meshBasis.center.z;
+        const colour = hotspotColour(spot.severity);
+        const radius = 0.35 + spot.severity * 0.55;
+        return (
+          <group key={idx} position={[x, y, z]}>
+            <mesh>
+              <sphereGeometry args={[radius, 18, 18]} />
+              <meshBasicMaterial color={colour} transparent opacity={0.95} />
+            </mesh>
+            <mesh>
+              <sphereGeometry args={[radius * 1.9, 18, 18]} />
+              <meshBasicMaterial color={colour} transparent opacity={0.18} depthWrite={false} />
+            </mesh>
+            <Text position={[0, radius * 2.6, 0]} fontSize={0.55} color={colour} anchorX="center" anchorY="bottom">
+              H{idx + 1} · Cp {spot.cp.toFixed(2)}
+            </Text>
+          </group>
+        );
+      })}
+    </group>
+  );
+}
 
 function WindSheets({ mach }: { mach: number }) {
   const group = useRef<THREE.Group>(null);
@@ -57,6 +99,7 @@ function AeroVehicleScene({
   cdBase,
   area,
   stlMatRef,
+  hotspots,
 }: {
   vizGeom: THREE.BufferGeometry | null;
   meshBasis: { center: THREE.Vector3; scale: number };
@@ -65,6 +108,7 @@ function AeroVehicleScene({
   cdBase: number;
   area: number;
   stlMatRef: RefObject<THREE.MeshStandardMaterial | null>;
+  hotspots: AerodynamicHotspot[];
 }) {
   const align = windTunnelBodyEuler(principalAxis);
   const qn = Math.min(1, mach / 3);
@@ -167,6 +211,10 @@ function AeroVehicleScene({
         </group>
       ) : null}
 
+      <group rotation={align}>
+        <HotspotMarkers hotspots={hotspots} meshBasis={meshBasis} />
+      </group>
+
       <Text position={[-45, 38, 0]} fontSize={5.5} color="#94a3b8" anchorX="left" anchorY="top">
         Flow +X · Cd,eff = {cdBase.toFixed(2)} × μ(M) = {cdEff.toFixed(3)}
       </Text>
@@ -191,6 +239,8 @@ export function AeroDynamicsVisualizer({
   const principalAxis = stlAnalysis?.principalAxis ?? 'y';
   const cdBase = stlAnalysis?.dragCoeff ?? 0.48;
   const area = stlAnalysis?.frontalArea ?? 18;
+  const hotspots = stlAnalysis?.aerodynamicHotspots ?? [];
+  const boundingArea = stlAnalysis?.boundingBoxFrontalArea ?? area;
 
   const vizGeom = useStlVizGeometry(stlGeometry, stlAnalysis?.stressConcentrations);
 
@@ -245,7 +295,9 @@ export function AeroDynamicsVisualizer({
         <p className="mb-1 text-sky-200/90">Sea-level wind-tunnel reference (ρ = {RHO0_SEA_LEVEL} kg/m³)</p>
         <p>q = ½ρV² = <span className="text-amber-200">{(qPa / 1000).toFixed(3)} kPa</span></p>
         <p>D = ½ρV² Cd,eff A = <span className="text-amber-200">{(dragN / 1000).toFixed(2)} kN</span></p>
-        <p className="mt-1 text-slate-500">Cd,eff uses the same piecewise Mach multiplier as the ascent solver.</p>
+        <p className="mt-1">A_proj (Σ cosθ·A over windward faces, exact silhouette for convex bodies) = <span className="text-amber-200">{area.toFixed(2)} m²</span> · A_box = <span className="text-slate-200">{boundingArea.toFixed(2)} m²</span></p>
+        <p>Cd₀ from Σ Cp·cosθ·dA over STL = <span className="text-amber-200">{cdBase.toFixed(3)}</span> · μ(M={mach.toFixed(2)}) = <span className="text-slate-200">{cdMachMultiplier(mach).toFixed(3)}</span></p>
+        <p className="mt-1 text-slate-500">Cp = 2·cos²θ (Newtonian impact); μ(M) is the same piecewise Mach multiplier as the ascent solver.</p>
       </div>
 
       <div className="grid gap-3 lg:grid-cols-[1fr_220px]">
@@ -264,6 +316,7 @@ export function AeroDynamicsVisualizer({
               cdBase={cdBase}
               area={area}
               stlMatRef={stlMatRef}
+              hotspots={hotspots}
             />
             <group position={[-32, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
               <mesh>
@@ -317,8 +370,54 @@ export function AeroDynamicsVisualizer({
         </ResponsiveContainer>
       </div>
 
+      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+        <div className="mb-2 flex items-baseline justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-200/90">
+            Non-aerodynamic hotspots
+          </p>
+          <p className="text-[10px] text-slate-500">
+            Newtonian Cp · cosθ · A screen (seed ≥ 18% of peak face) · {hotspots.length} flagged
+          </p>
+        </div>
+        {hotspots.length === 0 ? (
+          <p className="text-[11px] text-emerald-300/80">
+            No face carries ≥ 18% of the worst face's drag contribution — the geometry presents
+            no individually severe bluff feature along the principal flow axis.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {hotspots.map((spot, idx) => {
+              const colour = hotspotColour(spot.severity);
+              return (
+                <li
+                  key={idx}
+                  className="rounded-md border border-slate-800/70 bg-black/30 p-2 text-[11px] text-slate-200"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold text-slate-950"
+                      style={{ background: colour }}
+                    >
+                      H{idx + 1}
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-400">
+                      Cp {spot.cp.toFixed(2)} · A {spot.area.toFixed(2)} m² · {(spot.dragShare * 100).toFixed(1)}% drag · sev {(spot.severity * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-300">{spot.reason}</p>
+                  <p className="mt-1 text-[11px] text-emerald-200/85">→ {spot.recommendation}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
       <p className="text-[10px] leading-relaxed text-slate-500">
-        Same uploaded STL as ascent: frontal area and base Cd drive the curves; animated sheets approximate oncoming flow; faint cone marks a qualitative supersonic shock cue (not CFD).
+        Frontal area, Cd₀, and hotspots are integrated directly over the uploaded STL using
+        Newtonian impact theory (Cp = 2·cos²θ). Markers in 3D show cluster centroids; severity
+        ranks the share of total body drag each cluster contributes. The animated wind sheets
+        and faint Mach cone are qualitative cues, not CFD.
       </p>
     </div>
   );

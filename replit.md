@@ -58,3 +58,9 @@ Verified live data flow:
 - Launch constraints (`src/lib/launchConstraints.ts`) auto-update from live weather and atmospheric scale height.
 - Quantum simulation: QAOA statevector simulation (`src/lib/optimizer.ts`) and PennyLane VQML worker (`python/pennylane_worker.py`) wired into the Quantum panel.
 - Physics core (Hohmann, Keplerian + J2, SGP4, Meeus lunar ephemeris) verified mathematically sound.
+
+STL Aerodynamics Visualizer audit (Apr 2026):
+- Replaced bounding-box frontal area and the fineness-ratio Cd lookup with Newtonian impact aerodynamics integrated over the actual STL mesh: per-triangle Cp = 2·cos²θ, A_proj = Σ max(0, n̂·ŵ)·A_face (exact silhouette for convex bodies, conservative upper bound otherwise), Cd₀ = (1/A_proj)·Σ Cp·cosθ·A.
+- Added geometry-driven aerodynamic hotspot detection (`computeNewtonianAero` + `clusterHotspots` in `src/lib/stlAnalyzer.ts`): faces are ranked by Cp·cosθ·A, the top face (≥18% of peak) seeds a cluster within ~6% of the bounding-box diagonal, and each cluster reports centroid, area, dragShare, severity, plain-language reason, and engineering recommendation.
+- `AeroDynamicsVisualizer.tsx` renders hotspot markers (severity-coloured spheres + Cp labels) directly on the uploaded mesh and lists them in a sidebar.
+- `STLAnalysis` now exposes `boundingBoxFrontalArea`, `fillFactor`, `dragCoeffMethod` so all aero claims are auditable; the dynamic-pressure constant in `calculatePanelLoads` is a documented parameter (default 45 kPa).
