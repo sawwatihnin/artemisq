@@ -264,23 +264,35 @@ export function buildEarthMoonTransferTrajectory(
   const r2r = Math.hypot(moonReturn[0], moonReturn[1], moonReturn[2]);
   const moonHatR = normalize3(moonReturn);
 
-  // Re-entry direction: LEO unit vector advanced one parking-orbit phase.
-  // We approximate with leoHat rotated by π in the outbound plane so the
-  // return arc lands on the opposite side of Earth from the departure burn.
-  const reentryHat = normalize3([-leoHat[0], -leoHat[1], -leoHat[2]]);
-
+  // Real Hohmann return: planar ellipse with apoapsis at the Moon (along
+  // +moonHatR at distance r2r) and periapsis on the opposite side of Earth
+  // (along −moonHatR at distance r1). The arc sweeps 180° in the return
+  // plane, which is the outbound plane tilted ~10° about the outbound
+  // angular-momentum vector so the return reads as visually distinct.
   const aR = (r2r + r1) / 2;
   const eR = Math.abs(r2r - r1) / (r2r + r1);
   const pR = aR * (1 - eR * eR);
 
-  // Tilt the inbound arc out of the outbound plane so it is geometrically
-  // distinct from the outbound (TEI gives a different transfer plane than
-  // TLI because of the Moon's motion during the stay).
-  const inboundTiltRad = 0.18; // ~10° wedge for visual separation
+  // In-plane tangent direction at the Moon — perpendicular to moonHatR within
+  // the return plane (which uses outboundNormal as the plane normal). Built
+  // via Gram-Schmidt off the outbound normal so it is guaranteed in-plane.
+  const tangentRaw: [number, number, number] = [
+    outboundNormal[1] * moonHatR[2] - outboundNormal[2] * moonHatR[1],
+    outboundNormal[2] * moonHatR[0] - outboundNormal[0] * moonHatR[2],
+    outboundNormal[0] * moonHatR[1] - outboundNormal[1] * moonHatR[0],
+  ];
+  const tangentMag = Math.hypot(tangentRaw[0], tangentRaw[1], tangentRaw[2]);
+  const inPlaneTangent: [number, number, number] = tangentMag > 1e-6
+    ? [tangentRaw[0] / tangentMag, tangentRaw[1] / tangentMag, tangentRaw[2] / tangentMag]
+    : [0, 1, 0];
+
+  // Tilt the entire return plane ~10° about the outbound normal so the
+  // inbound arc is offset from the outbound (TEI plane differs from TLI plane
+  // because the Moon moves during the stay).
+  const inboundTiltRad = 0.18;
   const cosT = Math.cos(inboundTiltRad);
   const sinT = Math.sin(inboundTiltRad);
   const tilt = (v: [number, number, number]): [number, number, number] => {
-    // Rodrigues rotation around the outbound normal.
     const k = outboundNormal;
     const dotKV = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
     const cross: [number, number, number] = [
@@ -296,17 +308,23 @@ export function buildEarthMoonTransferTrajectory(
   };
 
   const inbound: TrajectoryPoint[] = [];
-  // Anchor radius so ν=0 → apoapsis (Moon, r2r) and ν=π → periapsis (LEO, r1).
-  // Using `pR/(1 - eR·cos ν)` flips the conic so the return arc actually starts
-  // at the Moon and descends to LEO instead of starting at LEO radius in the
-  // Moon direction (which read as the line "bouncing off Earth").
+  // Parameterize the ellipse with true anomaly ν measured from periapsis.
+  // ν = π → apoapsis (Moon, start of return); ν = 2π → periapsis (LEO).
   for (let i = 1; i <= segments; i++) {
-    const nu = (i / segments) * Math.PI;
-    const rKm = pR / (1 - eR * Math.cos(nu));
-    const baseDir = slerpUnitVectors(moonHatR, reentryHat, nu / Math.PI);
-    const dir = tilt(baseDir);
+    const nu = Math.PI + (i / segments) * Math.PI;
+    const rKm = pR / (1 + eR * Math.cos(nu));
+    // Position in the orbital plane: x along +moonHatR (apoapsis line),
+    // y along inPlaneTangent. Then tilt the whole plane.
+    const cosNu = Math.cos(nu);
+    const sinNu = Math.sin(nu);
+    const planar: [number, number, number] = [
+      moonHatR[0] * cosNu * rKm + inPlaneTangent[0] * sinNu * rKm,
+      moonHatR[1] * cosNu * rKm + inPlaneTangent[1] * sinNu * rKm,
+      moonHatR[2] * cosNu * rKm + inPlaneTangent[2] * sinNu * rKm,
+    ];
+    const dir = tilt(planar);
     inbound.push({
-      pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
+      pos: toScene([dir[0], dir[1], dir[2]]),
       time_s: tofS + stayS + (i / segments) * tofS,
     });
   }
