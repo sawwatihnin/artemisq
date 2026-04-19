@@ -1789,27 +1789,26 @@ function StageCoordinatePopover({
     <Html
       position={[0, 3.4, 0]}
       center
-      distanceFactor={isCislunar ? 18 : 60}
       style={{ pointerEvents: 'auto' }}
     >
       <div
-        className="rounded-lg border border-slate-700 bg-slate-950/95 px-3 py-2 shadow-2xl backdrop-blur-sm"
-        style={{ minWidth: 230, fontFamily: 'ui-monospace, monospace' }}
+        className="rounded-lg border border-slate-700 bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
+        style={{ minWidth: 320, fontFamily: 'ui-monospace, monospace' }}
       >
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-slate-400">Stage {stage.sequence}</div>
-            <div className="text-sm font-semibold" style={{ color: stage.color }}>{stage.label}</div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">Stage {stage.sequence}</div>
+            <div className="text-base font-semibold" style={{ color: stage.color }}>{stage.label}</div>
           </div>
           <button
             type="button"
             onClick={(event) => { event.stopPropagation(); onClose(); }}
             className="text-slate-500 hover:text-slate-200"
             aria-label="Close"
-            style={{ fontSize: 14, lineHeight: 1 }}
+            style={{ fontSize: 20, lineHeight: 1 }}
           >×</button>
         </div>
-        <div className="mt-1.5 space-y-0.5 text-[11px] leading-snug text-slate-200">
+        <div className="mt-2 space-y-1 text-[13px] leading-snug text-slate-200">
           <div>
             <span className="text-slate-400">UTC </span>
             {stageDate.toISOString().replace('T', ' ').slice(0, 19)}Z
@@ -2065,7 +2064,11 @@ function MissionGlobe({
     const inbound = encounterIndex < trajectory.length - 1 ? trajectory.slice(encounterIndex) : [];
     return { outboundTrajectory: outbound, returnTrajectory: inbound };
   }, [trajectory, stageList]);
-  const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
+  // Use the same epoch as `calculateArtemisTrajectory(new Date(launchDate))`
+  // so the rendered Moon (anchored to arrival epoch via lunar ephemeris) lines
+  // up exactly with the trajectory's terminal point. A previous +12 h offset
+  // caused the Moon to drift ~6.5° (~43 000 km) off the line end.
+  const sceneDate = useMemo(() => new Date(launchDate), [launchDate]);
   const heliocentricEarthRadiusScene = RE / VIS_SCENE_KM_PER_UNIT;
   const earthRadiusScene = isCislunar ? RE / CISLUNAR_VIS_KM_PER_UNIT : heliocentricEarthRadiusScene;
   const cislunarKmPerUnit = CISLUNAR_VIS_KM_PER_UNIT;
@@ -2302,7 +2305,11 @@ function MissionGlobe({
         );
       })}
       <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.8 : 2.5} transparent opacity={0.96} />
-      {hasReturnPhase && returnTrajectory.length >= 2 ? (
+      {/* Return polyline (TEI → Earth re-entry). Tilted out of the outbound
+          plane (Rodrigues rotation in the trajectory builder) so it reads as
+          a distinct return path rather than overlapping the outbound. Needed
+          for return-flight planning and stage inspection. */}
+      {returnTrajectory.length >= 2 ? (
         <DreiLine points={returnTrajectory.map((point) => point.pos)} color="#38bdf8" lineWidth={isCislunar ? 3.2 : 2.2} transparent opacity={0.88} />
       ) : null}
       {projectedNodes.map((node) => {
@@ -2881,6 +2888,75 @@ export default function App() {
   const handleOptimize = async () => {
     setOptimizing(true);
     try {
+      // Fold live planet/ephemeris signals into the scalar radiation
+      // multiplier so the QUBO's safety/radiation penalty (rad·radiation² +
+      // safety·radiationPenalty²) reacts to actual gravity perturbations and
+      // radiation-zone intensities encountered along the trajectory. We use
+      // the maximum across sources because the optimizer treats it as a
+      // worst-case hazard scaling.
+      const peakTidalMs2 = (gravityInfluence?.assessments ?? [])
+        .filter((item) => item.willInfluence)
+        .reduce((max, item) => Math.max(max, item.maxTidalAccelerationMs2), 0);
+      // 1 µm/s² of tidal pull ≈ 1% extra hazard scaling; capped at +0.4.
+      const gravityHazardScale = Math.min(0.4, peakTidalMs2 * 1e6 * 0.01);
+      const peakRadZone = (nearEarthRadiation?.environment?.zones ?? [])
+        .reduce((max, zone) => Math.max(max, zone.severity ?? 0), 0);
+      const radiationIndex = Math.max(
+        nasaWeather?.radiationIndex || 1.0,
+        nearEarthRadiation?.environment?.aggregateIndex || 1.0,
+        radiationIntersection?.assessment?.normalizedRiskIndex || 1.0,
+        peakRadZone || 1.0,
+      ) + gravityHazardScale;
+
+      const targetBodyData = CELESTIAL_BODY_MAP[targetPlanet];
+      const launchBodyData = CELESTIAL_BODY_MAP[launchBodyId];
+      const escapeVelocityMs = targetBodyData
+        ? Math.sqrt((2 * targetBodyData.muKm3s2 * 1e9) / (targetBodyData.radiusKm * 1000))
+        : 0;
+      const surfaceGravityMs2 = targetBodyData?.standardGravity ?? 0;
+      const bodyContext = {
+        target: targetBodyData ? {
+          id: targetBodyData.id,
+          name: targetBodyData.name,
+          radiusKm: targetBodyData.radiusKm,
+          muKm3s2: targetBodyData.muKm3s2,
+          surfaceGravityMs2,
+          escapeVelocityMs,
+          atmosphereScaleHeightKm: targetBodyData.atmosphereScaleHeightKm ?? null,
+          rotationPeriodHours: targetBodyData.rotationPeriodHours,
+        } : null,
+        launch: launchBodyData ? {
+          id: launchBodyData.id,
+          name: launchBodyData.name,
+          radiusKm: launchBodyData.radiusKm,
+          muKm3s2: launchBodyData.muKm3s2,
+          surfaceGravityMs2: launchBodyData.standardGravity,
+          atmosphereScaleHeightKm: launchBodyData.atmosphereScaleHeightKm ?? null,
+        } : null,
+        gravityPerturbations: (gravityInfluence?.assessments ?? []).map((item) => ({
+          bodyId: item.bodyId,
+          bodyName: item.bodyName,
+          closestApproachKm: item.closestApproachKm,
+          sphereOfInfluenceKm: item.sphereOfInfluenceKm,
+          influenceRatio: item.influenceRatio,
+          maxTidalAccelerationMs2: item.maxTidalAccelerationMs2,
+          willInfluence: item.willInfluence,
+        })),
+        radiationZones: (nearEarthRadiation?.environment?.zones ?? []).map((zone: any) => ({
+          name: zone.name,
+          outerRadiusKm: zone.outerRadiusKm,
+          intensityIndex: zone.intensityIndex,
+          severity: zone.severity,
+        })),
+        ephemeris: (systemEphemeris?.bodies ?? []).map((body) => ({
+          id: body.id,
+          posKm: [body.x, body.y, body.z],
+        })),
+        peakTidalAccelerationMs2: peakTidalMs2,
+        gravityHazardScale,
+        peakRadiationZoneIntensity: peakRadZone,
+      };
+
       const response = await fetch('/api/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2892,17 +2968,14 @@ export default function App() {
           end: missionGraph.nodes[missionGraph.nodes.length - 1]?.id ?? preset.end,
           steps: Math.max(2, missionGraph.nodes.length),
           date: launchDate,
-          radiationIndex: Math.max(
-            nasaWeather?.radiationIndex || 1.0,
-            nearEarthRadiation?.environment?.aggregateIndex || 1.0,
-            radiationIntersection?.assessment?.normalizedRiskIndex || 1.0,
-          ),
+          radiationIndex,
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
           targetPlanet,
           launchBodyId,
           keplerEl,
+          bodyContext,
           missionProfile: {
             launchOffsetHours,
             launchWindowOffsetsHours: [0, 6, 12, 24, 36],
@@ -2912,13 +2985,14 @@ export default function App() {
             scenarioType,
             inverseTargetRisk: targetRisk,
             inverseTargetCost: targetCostM * 1_000_000,
+            bodyContext,
           },
         }),
       });
       const data = await response.json();
       setOptResult(data);
       addLog(`Mission optimization complete: ${data.qaoa.layers.length} QAOA layers`);
-      addLog(`Mission graph costs are now conditioned on live radiation, comm, and transfer design inputs`);
+      addLog(`Cost surface includes target body μ=${targetBodyData?.muKm3s2.toExponential(3) ?? '?'} km³/s², peak tidal ${peakTidalMs2.toExponential(2)} m/s², radiation zones ×${(nearEarthRadiation?.environment?.zones?.length ?? 0)}`);
     } catch (error) {
       addLog('Mission optimization failed');
     } finally {
