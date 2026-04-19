@@ -1,5 +1,5 @@
 import type { ChangeEvent, ReactNode, RefObject } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { motion } from 'motion/react';
 import {
@@ -1316,6 +1316,39 @@ function MetricBadge({
       {unit ? <p className="text-[10px] text-slate-500">{unit}</p> : null}
     </div>
   );
+}
+
+class RenderBoundary extends Component<
+  { label: string; children: ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { label: string; children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidUpdate(prevProps: { label: string }) {
+    if (prevProps.label !== this.props.label && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-100">
+          <p className="font-semibold uppercase tracking-[0.14em]">Panel Render Error</p>
+          <p className="mt-2">{this.props.label} failed to render.</p>
+          <p className="mt-2 text-xs text-rose-200/80">{this.state.error.message}</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function ProvenancePill({ kind }: { kind: Provenance }) {
@@ -4467,9 +4500,10 @@ export default function App() {
           </section>
 
           <aside className="flex max-h-[calc(100vh-130px)] flex-col gap-4 overflow-y-auto pb-8">
-            <>
+            <RenderBoundary label={`${activeTab} tab`}>
+              <>
               {activeTab === 'mission' ? (
-                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
                   <DashboardCard title="Mission Controls" icon={Globe} provenance={importedGraph ? 'formula' : 'preset'}>
                     <div className="grid gap-3">
                       <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
@@ -5105,7 +5139,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'physics' ? (
-                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
                   <DashboardCard title="Keplerian Controls" icon={Gauge} provenance="formula">
                     <div className="space-y-3">
                       {([
@@ -5267,7 +5301,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'vehicle' ? (
-                <motion.div key="vehicle" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                <motion.div key="vehicle" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
                   <DashboardCard title="Vehicle Inputs" icon={Upload} provenance={stlAnalysis ? 'formula' : 'preset'}>
                     <div className="space-y-3">
                       <label className="block">
@@ -5486,7 +5520,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'quantum' ? (
-                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
                   <DashboardCard title="Quantum Layer" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
                     <div className="space-y-3 text-sm text-slate-300">
                       <p>The quantum path now runs a simulated QAOA statevector evolution on a reduced mission cost Hamiltonian. It is still not hardware, but the amplitudes, phase evolution, and reported state distribution now come from an actual deterministic quantum simulation rather than a display-only heuristic.</p>
@@ -5734,7 +5768,8 @@ export default function App() {
                   </DashboardCard>
                 </motion.div>
               ) : null}
-            </>
+              </>
+            </RenderBoundary>
           </aside>
         </main>
       </div>
