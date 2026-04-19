@@ -308,19 +308,20 @@ export function buildEarthMoonTransferTrajectory(
   };
 
   const inbound: TrajectoryPoint[] = [];
-  // Parameterize the ellipse with true anomaly ν measured from periapsis.
-  // ν = π → apoapsis (Moon, start of return); ν = 2π → periapsis (LEO).
+  // Perifocal frame: x-axis points to PERIAPSIS (which is opposite the Moon
+  // along the major axis), y-axis along the in-plane tangent. True anomaly
+  // ν is measured from periapsis, so ν = π → apoapsis (Moon, start of
+  // return) and ν = 2π → periapsis (LEO on far side of Earth).
+  const periapsisHat: [number, number, number] = [-moonHatR[0], -moonHatR[1], -moonHatR[2]];
   for (let i = 1; i <= segments; i++) {
     const nu = Math.PI + (i / segments) * Math.PI;
     const rKm = pR / (1 + eR * Math.cos(nu));
-    // Position in the orbital plane: x along +moonHatR (apoapsis line),
-    // y along inPlaneTangent. Then tilt the whole plane.
     const cosNu = Math.cos(nu);
     const sinNu = Math.sin(nu);
     const planar: [number, number, number] = [
-      moonHatR[0] * cosNu * rKm + inPlaneTangent[0] * sinNu * rKm,
-      moonHatR[1] * cosNu * rKm + inPlaneTangent[1] * sinNu * rKm,
-      moonHatR[2] * cosNu * rKm + inPlaneTangent[2] * sinNu * rKm,
+      periapsisHat[0] * cosNu * rKm + inPlaneTangent[0] * sinNu * rKm,
+      periapsisHat[1] * cosNu * rKm + inPlaneTangent[1] * sinNu * rKm,
+      periapsisHat[2] * cosNu * rKm + inPlaneTangent[2] * sinNu * rKm,
     ];
     const dir = tilt(planar);
     inbound.push({
