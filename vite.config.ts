@@ -26,8 +26,15 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
-      'es-toolkit/compat': path.resolve(__dirname, 'node_modules/es-toolkit/dist/compat'),
-      zustand: path.resolve(__dirname, 'node_modules/zustand/index.js'),
+      'es-toolkit/compat/sortBy': path.resolve(
+        __dirname,
+        'node_modules/es-toolkit/dist/compat/array/sortBy.js',
+      ),
+      'es-toolkit/compat/throttle': path.resolve(
+        __dirname,
+        'node_modules/es-toolkit/dist/compat/function/throttle.js',
+      ),
+      zustand: path.resolve(__dirname, 'node_modules/zustand'),
       'zustand/shallow': path.resolve(__dirname, 'node_modules/zustand/shallow.js'),
       'zustand/traditional': path.resolve(__dirname, 'node_modules/zustand/traditional.js'),
     },
