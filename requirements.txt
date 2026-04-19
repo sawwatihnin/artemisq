@@ -7,3 +7,6 @@ numpy
 scipy
 pydantic
 python-multipart
+pennylane
+pennylane-lightning
+amazon-braket-pennylane-plugin

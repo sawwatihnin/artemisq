@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
+import { spawn } from "child_process";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -53,6 +54,7 @@ import {
   solveLaunchWindowsWithConstraints,
 } from "./src/lib/trajectoryDesign.ts";
 import { fetchWebGeoCalcMetadata, submitWebGeoCalcRequest } from "./src/lib/webgeocalc.ts";
+import type { PennyLaneRequest, PennyLaneResult } from "./src/lib/pennylane.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -123,6 +125,47 @@ function validateTelemetryFrame(body: any): string | null {
     }
   }
   return null;
+}
+
+async function runPennyLaneWorker(payload: PennyLaneRequest): Promise<PennyLaneResult> {
+  return await new Promise((resolve, reject) => {
+    const workerPath = path.join(__dirname, "python", "pennylane_worker.py");
+    const child = spawn("python3", [workerPath], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        MPLCONFIGDIR: path.join("/tmp", "artemisq-mpl"),
+        XDG_CACHE_HOME: path.join("/tmp", "artemisq-cache"),
+        NUMBA_CACHE_DIR: path.join("/tmp", "artemisq-numba"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0 && !stdout.trim()) {
+        reject(new Error(stderr.trim() || `PennyLane worker exited with code ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim() || "{}") as PennyLaneResult);
+      } catch (error) {
+        reject(new Error(`Unable to parse PennyLane worker output: ${stdout || stderr || String(error)}`));
+      }
+    });
+
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
 }
 
 async function startServer() {
@@ -1186,6 +1229,32 @@ async function startServer() {
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || "QAOA re-run failed" });
+    }
+  });
+
+  app.post("/api/qml/pennylane", async (req, res) => {
+    try {
+      const features = Array.isArray(req.body?.features) ? req.body.features : [];
+      if (!features.length) {
+        return res.status(400).json({ error: "features are required" });
+      }
+      const result = await runPennyLaneWorker({
+        missionName: typeof req.body?.missionName === "string" ? req.body.missionName : undefined,
+        features,
+        epochs: clampInteger(req.body?.epochs, 36, 8, 120),
+        learningRate: Number.isFinite(Number(req.body?.learningRate)) ? Number(req.body.learningRate) : 0.18,
+        backendMode: typeof req.body?.backendMode === "string" ? req.body.backendMode : "lightning-sim",
+        deviceArn: typeof req.body?.deviceArn === "string" && req.body.deviceArn.trim() ? req.body.deviceArn.trim() : undefined,
+        shots: clampInteger(req.body?.shots, 256, 16, 4096),
+      });
+      res.json(result);
+    } catch (error: any) {
+      res.status(502).json({
+        installed: false,
+        available: false,
+        source: "LOCAL · PennyLane worker failed",
+        error: error?.message || "PennyLane analysis failed",
+      });
     }
   });
 

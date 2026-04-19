@@ -60,6 +60,7 @@ import {
 import { assessConjunction, buildMissionGraphFromImportedConfig, type GeneratedMissionNode, type ImportedMissionConfig } from './lib/missionPlanner';
 import { generateMissionReport } from './lib/report';
 import { analyzeCrewedCislunarMissionOps } from './lib/cislunarOps';
+import type { PennyLaneResult } from './lib/pennylane';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -2402,6 +2403,10 @@ export default function App() {
   });
   const [qaoaDepth, setQaoaDepth] = useState(3);
   const [qaoaRefreshing, setQaoaRefreshing] = useState(false);
+  const [pennylaneResult, setPennylaneResult] = useState<PennyLaneResult | null>(null);
+  const [pennylaneLoading, setPennylaneLoading] = useState(false);
+  const [quantumBackendMode, setQuantumBackendMode] = useState<'local-sim' | 'lightning-sim'>('lightning-sim');
+  const [quantumShots, setQuantumShots] = useState(256);
   const [shieldingMassKg, setShieldingMassKg] = useState(180);
   const [launchOffsetHours, setLaunchOffsetHours] = useState(0);
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('BALANCED');
@@ -3684,6 +3689,62 @@ export default function App() {
     }
     return optResult?.missionDecision ?? null;
   }, [launchBodyId, targetPlanet, cislunarMissionAnalysis, displayedCrewHealth, optResult?.missionDecision]);
+  const pennylaneFeatures = useMemo(() => {
+    if (!optResult) return [];
+    const expectedCost = optResult.stochastic?.expectedCost ?? optResult.totalCost;
+    const uncertaintyVariance = optResult.uncertaintySummary?.cost.variance ?? 0;
+    const dsnCoverageFallback = (dsnVisibility?.windows?.reduce((sum, window) => sum + window.durationMinutes, 0) ?? (0.72 * 72 * 60)) / (72 * 60);
+    const commCoverage = cislunarMissionAnalysis?.consumables.commCoverageFraction ?? dsnCoverageFallback;
+    const doseBasis = displayedCrewHealth?.unitLabel === 'mSv'
+      ? clamp((displayedCrewHealth?.cumulativeDose ?? 0) / 80, 0, 1)
+      : clamp((optResult.radiationExposure ?? 0) / 40, 0, 1);
+    return [
+      { name: 'crew_risk', value: clamp((displayedCrewHealth?.riskScore ?? optResult.crewRisk?.riskScore ?? 0.45) / 1.5, 0, 1) },
+      { name: 'cost_pressure', value: clamp(expectedCost / 400_000_000, 0, 1) },
+      { name: 'comm_penalty', value: clamp(1 - commCoverage, 0, 1) },
+      { name: 'delta_v_pressure', value: clamp((optResult.totalDeltaV_ms ?? 0) / 15000, 0, 1) },
+      { name: 'uncertainty', value: clamp(uncertaintyVariance / Math.max(expectedCost ** 2, 1), 0, 1) },
+      { name: 'radiation_pressure', value: doseBasis },
+      { name: 'schedule_pressure', value: clamp((optResult.physics.transferTime_days ?? 0) / 365, 0, 1) },
+      { name: 'confidence_gap', value: clamp(1 - (optResult.missionConfidence?.confidenceScore ?? 0.58), 0, 1) },
+    ];
+  }, [optResult, displayedCrewHealth, cislunarMissionAnalysis, dsnVisibility]);
+
+  useEffect(() => {
+    const runPennyLane = async () => {
+      if (!optResult || !pennylaneFeatures.length) {
+        setPennylaneResult(null);
+        return;
+      }
+      setPennylaneLoading(true);
+      try {
+        const response = await fetch('/api/qml/pennylane', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            missionName: `${launchBodyId}→${targetPlanet}`,
+            features: pennylaneFeatures,
+            epochs: 36,
+            learningRate: 0.18,
+            backendMode: quantumBackendMode,
+            shots: quantumShots,
+          }),
+        });
+        const data = await response.json() as PennyLaneResult;
+        setPennylaneResult(data);
+      } catch {
+        setPennylaneResult({
+          installed: false,
+          available: false,
+          source: 'LOCAL · PennyLane unavailable',
+          error: 'Unable to reach the PennyLane route',
+        });
+      } finally {
+        setPennylaneLoading(false);
+      }
+    };
+    runPennyLane();
+  }, [optResult, pennylaneFeatures, launchBodyId, targetPlanet, quantumBackendMode, quantumShots]);
 
   const ascentChartData = simResult?.best.steps.map((step) => ({
     time: step.time,
@@ -5203,6 +5264,92 @@ export default function App() {
                     </div>
                   </DashboardCard>
 
+                  <DashboardCard title="PennyLane QML" icon={Atom} provenance={pennylaneResult?.installed ? 'formula' : 'preset'}>
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>PennyLane runs as a local Python variational-learning worker and uses local quantum simulation for inference in this environment.</p>
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">Backend</span>
+                            <select
+                              className="rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-sm text-slate-200"
+                              value={quantumBackendMode}
+                              onChange={(event) => setQuantumBackendMode(event.target.value as 'local-sim' | 'lightning-sim')}
+                            >
+                              <option value="local-sim">PennyLane default.qubit</option>
+                              <option value="lightning-sim">PennyLane lightning.qubit</option>
+                            </select>
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">Shots</span>
+                            <input
+                              className="rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-sm text-slate-200"
+                              type="number"
+                              min={16}
+                              max={4096}
+                              step={16}
+                              value={quantumShots}
+                              onChange={(event) => setQuantumShots(Math.max(16, Math.min(4096, Number(event.target.value) || 256)))}
+                            />
+                          </label>
+                          <div className="rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-[0.14em] text-slate-500">Execution Path</p>
+                            <p className="mt-1 text-slate-300">
+                              {quantumBackendMode === 'lightning-sim'
+                                ? 'PennyLane Lightning statevector simulation'
+                                : 'PennyLane default.qubit simulation'}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      {pennylaneLoading ? (
+                        <p className="text-sm text-slate-400">Running PennyLane analysis…</p>
+                      ) : pennylaneResult?.available ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            <MetricBadge label="Recommendation" value={pennylaneResult.recommendation ?? '--'} tone={pennylaneResult.recommendation === 'CONTINUE' ? 'good' : pennylaneResult.recommendation === 'REPLAN' ? 'warn' : 'bad'} />
+                            <MetricBadge label="Utility" value={pennylaneResult.utilityScore?.toFixed(3) ?? '--'} unit="0..1" />
+                            <MetricBadge label="Confidence" value={pennylaneResult.confidence ? `${(pennylaneResult.confidence * 100).toFixed(1)}%` : '--'} />
+                            <MetricBadge label="Fit Score" value={pennylaneResult.fitScore?.toFixed(3) ?? '--'} unit="local surrogate" />
+                            <MetricBadge label="Backend" value={pennylaneResult.backend ?? '--'} unit={`${pennylaneResult.wires ?? '--'} wires`} tone="good" />
+                            <MetricBadge label="Training Loss" value={pennylaneResult.trainingLoss?.toFixed(4) ?? '--'} unit={`${pennylaneResult.epochs ?? '--'} epochs`} />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <MetricBadge label="Execution" value={(pennylaneResult.executionMode ?? 'simulator').replace('-', ' ')} tone="good" />
+                            <MetricBadge label="Mode" value="SIMULATION" tone="good" />
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <MetricBadge label="Continue" value={pennylaneResult.probabilities ? `${(pennylaneResult.probabilities.continue * 100).toFixed(1)}%` : '--'} tone="good" />
+                            <MetricBadge label="Replan" value={pennylaneResult.probabilities ? `${(pennylaneResult.probabilities.replan * 100).toFixed(1)}%` : '--'} tone="warn" />
+                            <MetricBadge label="Abort" value={pennylaneResult.probabilities ? `${(pennylaneResult.probabilities.abort * 100).toFixed(1)}%` : '--'} tone="bad" />
+                          </div>
+                          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                            {pennylaneResult.explanation?.map((line, index) => (
+                              <p key={index} className={index > 0 ? 'mt-1' : undefined}>{line}</p>
+                            ))}
+                          </div>
+                          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                            <p className="mb-2 text-[10px] uppercase tracking-[0.14em] text-slate-500">Most Sensitive Features</p>
+                            <div className="space-y-1">
+                              {pennylaneResult.featureImportance?.map((feature) => (
+                                <p key={feature.name}>
+                                  {feature.name}: <span className={Math.abs(feature.sensitivity) > 0.02 ? 'text-amber-300' : 'text-slate-300'}>
+                                    {feature.sensitivity >= 0 ? '+' : ''}{feature.sensitivity.toFixed(3)}
+                                  </span>
+                                </p>
+                              )) ?? <p>No feature sensitivities available.</p>}
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                          <p>{pennylaneResult?.error ?? 'PennyLane analysis becomes available after mission optimization.'}</p>
+                          {pennylaneResult?.installHint ? <p className="mt-2">{pennylaneResult.installHint}</p> : null}
+                        </div>
+                      )}
+                    </div>
+                  </DashboardCard>
+
                   <DashboardCard title="Quantum Circuit" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
                     <QuantumCircuit gates={optResult?.circuitMap ?? []} />
                   </DashboardCard>
@@ -5307,12 +5454,14 @@ export default function App() {
                         <li>Mission graph node and edge values are now conditioned on live radiation, comm coverage, transfer design, and mission-distance data.</li>
                         <li>Conjunction analysis uses propagated state vectors for imported objects and live CelesTrak screening when available.</li>
                         <li>The quantum view uses a simulated QAOA statevector backend with rerunnable layer depth, not a display-only placeholder.</li>
+                        <li>PennyLane QML runs over live mission features using local quantum simulation when the Python package is installed.</li>
                       </ul>
                       <p>What is still not NASA-grade:</p>
                       <ul className="list-disc pl-5 text-slate-400">
                         <li>Mission graph topology is still curated unless you import external mission objects or a custom graph.</li>
                         <li>Conjunction workflow is reduced-order propagation, not a certified operational CDM/TCA pipeline.</li>
                         <li>QAOA remains a classical simulation of a reduced Hamiltonian, not quantum-hardware execution.</li>
+                        <li>PennyLane here is a simulated quantum variational surrogate, not direct quantum-hardware inference or a certified mission-ops model.</li>
                       </ul>
                     </div>
                   </DashboardCard>
