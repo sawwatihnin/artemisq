@@ -7,9 +7,49 @@
     <link rel="icon" type="image/png" href="/logo.png" />
     <link rel="apple-touch-icon" href="/logo.png" />
     <title>ARTEMIS-Q</title>
+    <style>
+      /* Hide the default Google Translate banner and internal elements */
+      .goog-te-banner-frame.skiptranslate, .goog-te-gadget-icon, .goog-te-gadget-simple span, .goog-te-menu-value span {
+        display: none !important;
+      }
+      .goog-te-banner-frame {
+        display: none !important;
+      }
+      .goog-tooltip {
+        display: none !important;
+      }
+      .goog-tooltip:hover {
+        display: none !important;
+      }
+      .goog-text-highlight {
+        background-color: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+      }
+      body {
+        top: 0px !important;
+      }
+      /* Ensure the logo and header remain untranslated if needed */
+      header h1, .skiptranslate {
+        notranslate: yes;
+      }
+    </style>
+    <script type="text/javascript">
+      function googleTranslateElementInit() {
+        new google.translate.TranslateElement({
+          pageLanguage: 'en',
+          // Use a layout that is more likely to keep the .goog-te-combo in the DOM
+          layout: google.translate.TranslateElement.InlineLayout.HORIZONTAL,
+          autoDisplay: false
+        }, 'google_translate_element');
+      }
+    </script>
+    <script type="text/javascript" src="https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Hidden element for Google Translate to attach to -->
+    <div id="google_translate_element" style="display:none"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

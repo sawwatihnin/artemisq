@@ -209,7 +209,7 @@ export function buildEarthMoonTransferTrajectory(
   launchDate: Date,
   keplerEl: KeplerianElements,
   segments = 96,
-  stayDays = 0.3,
+  stayDays = 3.0,
 ): TrajectoryPoint[] {
   const inv = 1 / CISLUNAR_VIS_KM_PER_UNIT;
   const toScene = (km: [number, number, number]): [number, number, number] =>
@@ -230,6 +230,19 @@ export function buildEarthMoonTransferTrajectory(
   const r2 = Math.hypot(moonVec[0], moonVec[1], moonVec[2]);
   const moonHat = normalize3(moonVec);
 
+  // Outbound transfer plane normal (orbital angular-momentum direction).
+  // Guard against degenerate cross product when leoHat ∥ moonHat by falling
+  // back to the ECI Z-axis so the inbound tilt remains well-defined.
+  const rawNormal: [number, number, number] = [
+    leoHat[1] * moonHat[2] - leoHat[2] * moonHat[1],
+    leoHat[2] * moonHat[0] - leoHat[0] * moonHat[2],
+    leoHat[0] * moonHat[1] - leoHat[1] * moonHat[0],
+  ];
+  const rawNormalMag = Math.hypot(rawNormal[0], rawNormal[1], rawNormal[2]);
+  const outboundNormal: [number, number, number] = rawNormalMag > 1e-6
+    ? normalize3(rawNormal)
+    : [0, 0, 1];
+
   const a = (r1 + r2) / 2;
   const e = (r2 - r1) / (r2 + r1);
   const p = a * (1 - e * e);
@@ -246,21 +259,78 @@ export function buildEarthMoonTransferTrajectory(
   }
 
   const stayS = stayDays * 86400;
-  const returnEpoch = new Date(arrival.getTime() + stayS * 1000);
-  const moonReturn = moonGeocentricPositionKm(returnEpoch);
-  const moonHatR = normalize3(moonReturn);
-  const r2r = Math.hypot(moonReturn[0], moonReturn[1], moonReturn[2]);
+  // Anchor the return ellipse to the Moon position at arrival (same point
+  // outbound ends on) instead of at the return epoch. Otherwise the ~3-day
+  // lunar advance (~39°, ~256 000 km chord) creates a long straight gap
+  // between outbound's end and inbound's start that reads as a triangle's
+  // long side. The "Moon now" ghost sphere already shows the lunar drift
+  // during the stay, so the return arc starting from moonHat is the right
+  // visual continuity choice.
+  const moonHatR = moonHat;
+  const r2r = r2;
+
+  // Real Hohmann return: planar ellipse with apoapsis at the Moon (along
+  // +moonHatR at distance r2r) and periapsis on the opposite side of Earth
+  // (along −moonHatR at distance r1). The arc sweeps 180° in the return
+  // plane, which is the outbound plane tilted ~10° about the outbound
+  // angular-momentum vector so the return reads as visually distinct.
   const aR = (r2r + r1) / 2;
   const eR = Math.abs(r2r - r1) / (r2r + r1);
   const pR = aR * (1 - eR * eR);
 
+  // In-plane tangent direction at the Moon — perpendicular to moonHatR within
+  // the return plane (which uses outboundNormal as the plane normal). Built
+  // via Gram-Schmidt off the outbound normal so it is guaranteed in-plane.
+  const tangentRaw: [number, number, number] = [
+    outboundNormal[1] * moonHatR[2] - outboundNormal[2] * moonHatR[1],
+    outboundNormal[2] * moonHatR[0] - outboundNormal[0] * moonHatR[2],
+    outboundNormal[0] * moonHatR[1] - outboundNormal[1] * moonHatR[0],
+  ];
+  const tangentMag = Math.hypot(tangentRaw[0], tangentRaw[1], tangentRaw[2]);
+  const inPlaneTangent: [number, number, number] = tangentMag > 1e-6
+    ? [tangentRaw[0] / tangentMag, tangentRaw[1] / tangentMag, tangentRaw[2] / tangentMag]
+    : [0, 1, 0];
+
+  // Tilt the entire return plane ~10° about the outbound normal so the
+  // inbound arc is offset from the outbound (TEI plane differs from TLI plane
+  // because the Moon moves during the stay).
+  const inboundTiltRad = 0.18;
+  const cosT = Math.cos(inboundTiltRad);
+  const sinT = Math.sin(inboundTiltRad);
+  const tilt = (v: [number, number, number]): [number, number, number] => {
+    const k = outboundNormal;
+    const dotKV = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    const cross: [number, number, number] = [
+      k[1] * v[2] - k[2] * v[1],
+      k[2] * v[0] - k[0] * v[2],
+      k[0] * v[1] - k[1] * v[0],
+    ];
+    return [
+      v[0] * cosT + cross[0] * sinT + k[0] * dotKV * (1 - cosT),
+      v[1] * cosT + cross[1] * sinT + k[1] * dotKV * (1 - cosT),
+      v[2] * cosT + cross[2] * sinT + k[2] * dotKV * (1 - cosT),
+    ];
+  };
+
   const inbound: TrajectoryPoint[] = [];
+  // Perifocal frame: x-axis points to PERIAPSIS (which is opposite the Moon
+  // along the major axis), y-axis along the in-plane tangent. True anomaly
+  // ν is measured from periapsis, so ν = π → apoapsis (Moon, start of
+  // return) and ν = 2π → periapsis (LEO on far side of Earth).
+  const periapsisHat: [number, number, number] = [-moonHatR[0], -moonHatR[1], -moonHatR[2]];
   for (let i = 1; i <= segments; i++) {
-    const nu = (i / segments) * Math.PI;
+    const nu = Math.PI + (i / segments) * Math.PI;
     const rKm = pR / (1 + eR * Math.cos(nu));
-    const dir = slerpUnitVectors(moonHatR, leoHat, nu / Math.PI);
+    const cosNu = Math.cos(nu);
+    const sinNu = Math.sin(nu);
+    const planar: [number, number, number] = [
+      periapsisHat[0] * cosNu * rKm + inPlaneTangent[0] * sinNu * rKm,
+      periapsisHat[1] * cosNu * rKm + inPlaneTangent[1] * sinNu * rKm,
+      periapsisHat[2] * cosNu * rKm + inPlaneTangent[2] * sinNu * rKm,
+    ];
+    const dir = tilt(planar);
     inbound.push({
-      pos: toScene([dir[0] * rKm, dir[1] * rKm, dir[2] * rKm]),
+      pos: toScene([dir[0], dir[1], dir[2]]),
       time_s: tofS + stayS + (i / segments) * tofS,
     });
   }
@@ -274,7 +344,9 @@ export function buildEarthMoonTransferTrajectory(
     { timeS: tliTimeS, label: 'Transfer Burn', step: 2 },
     { timeS: 0.5 * (tliTimeS + tofS), label: 'Translunar coast', step: 3 },
     { timeS: 0.92 * tofS, label: 'Lunar approach', step: 4 },
-    { timeS: tofS + 0.35 * stayS, label: 'Encounter', step: 5 },
+    // Anchor Encounter exactly at lunar arrival so the marker lands on the
+    // outbound arc end (Moon position) rather than drifting into the stay.
+    { timeS: tofS, label: 'Encounter', step: 5 },
     { timeS: tofS + stayS + 0.45 * tofS, label: 'Return coast', step: 6 },
     { timeS: totalTimeS - 0.04 * tofS, label: 'Entry', step: 7 },
     { timeS: totalTimeS, label: 'Landing', step: 8 },

@@ -1,16 +1,20 @@
-import type { ChangeEvent, ReactNode, RefObject } from 'react';
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, CSSProperties, ReactNode, RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   AlertTriangle,
   Atom,
+  BookOpen,
   ChevronRight,
   Gauge,
   Globe,
+  Languages,
+  Palette,
   Rocket,
   ShieldAlert,
   Thermometer,
+  Type,
   Upload,
   Wind,
 } from 'lucide-react';
@@ -28,7 +32,20 @@ import {
   YAxis,
 } from 'recharts';
 import { Canvas, useThree } from '@react-three/fiber';
-import { Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
+import { Html, Line as DreiLine, OrbitControls, PerspectiveCamera, Stars, Text } from '@react-three/drei';
+import {
+  eciToGeodetic,
+  eciToRaDec,
+  formatDecDMS,
+  formatLat,
+  formatLon,
+  formatRaHMS,
+  gmstRad,
+  localMeanSolarTimeHours,
+  obliquityOfEclipticDeg,
+  sceneToEciKm,
+  sunDirectionEci,
+} from './lib/celestialCoords';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -73,11 +90,12 @@ function formatMoney(value: number) {
 
 type MissionType = 'lunar' | 'orbital' | 'rover';
 type FuelType = 'RP-1' | 'LH2' | 'Methane';
-type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum';
+type Tab = 'mission' | 'physics' | 'vehicle' | 'quantum' | 'resources';
 type Provenance = 'live-api' | 'formula' | 'preset' | 'heuristic';
 type PolicyProfile = 'CREW_FIRST' | 'BALANCED' | 'COST_FIRST';
 type ScenarioType = 'NOMINAL' | 'SOLAR_STORM' | 'COMM_BLACKOUT' | 'PROPULSION_ANOMALY' | 'DELAYED_LAUNCH';
 type VisualizerViewMode = 'fit' | 'launch' | 'target' | 'reset';
+type ThemeMode = 'dark' | 'light' | 'ocean' | 'high-contrast';
 
 interface ExternalConjunctionThreat {
   objectA: string;
@@ -461,27 +479,8 @@ interface ManeuverTargetingFeed {
     deltaVVectorKmS: [number, number, number];
     deltaVMagnitudeKmS: number;
     burnDurationS: number;
-    propellantConsumedKg: number;
-    propellantFractionPct: number;
-    ignitionAccelerationMs2: number;
-    burnoutAccelerationMs2: number;
     closingVelocityKmS: number;
     estimatedArrivalErrorKm: number;
-    estimatedArrivalTimeErrorS: number;
-    finiteBurnSamples: Array<{
-      timeS: number;
-      cumulativeDeltaVKmS: number;
-      massKg: number;
-      accelerationMs2: number;
-    }>;
-    dispersionCases: Array<{
-      label: 'LOW_SIGMA' | 'NOMINAL' | 'HIGH_SIGMA';
-      thrustScale: number;
-      pointingErrorDeg: number;
-      timingOffsetS: number;
-      deltaVDeliveredKmS: number;
-      estimatedMissDistanceKm: number;
-    }>;
     targetingQuality: 'GOOD' | 'WATCH' | 'POOR';
     source: string;
   };
@@ -509,28 +508,6 @@ interface FlightReviewFeed {
     findings: string[];
     actions: string[];
     provenance: string[];
-  };
-  source: string;
-}
-
-interface ValidationFeed {
-  validation: {
-    benchmarkId: string;
-    benchmarkName: string;
-    missionClass: string;
-    overallStatus: 'PASS' | 'WARN' | 'FAIL';
-    score: number;
-    checks: Array<{
-      metric: string;
-      actual: number;
-      expectedMin: number;
-      expectedMax: number;
-      unit: string;
-      status: 'PASS' | 'WARN' | 'FAIL';
-      rationale: string;
-    }>;
-    notes: string[];
-    source: string;
   };
   source: string;
 }
@@ -975,6 +952,63 @@ const MISSION_SCENARIOS = [
   { id: 'venus-orbit', name: 'Venus Orbital Insertion', target: 'venus', mode: 'orbital', fuel: 'RP-1', date: '2026-10-10', mass: 18000, thrust: 95000 },
 ];
 
+const LANGUAGES = [
+  { label: 'English', code: 'en' },
+  { label: 'Spanish', code: 'es' },
+  { label: 'French', code: 'fr' },
+  { label: 'German', code: 'de' },
+  { label: 'Japanese', code: 'ja' },
+  { label: 'Chinese', code: 'zh-CN' },
+  { label: 'Russian', code: 'ru' },
+  { label: 'Portuguese', code: 'pt' },
+  { label: 'Hindi', code: 'hi' },
+];
+
+const LanguageSelector = () => {
+  const handleLanguageChange = (langCode: string) => {
+    // Update HTML lang attribute to prevent Google from thinking the detection is wrong
+    document.documentElement.lang = langCode;
+
+    // 1. Update the hidden Google Translate combo
+    const select = document.querySelector('.goog-te-combo') as HTMLSelectElement;
+    if (select) {
+      select.value = langCode;
+      select.dispatchEvent(new Event('change'));
+      return;
+    }
+
+    // 2. Fallback: If the selector isn't ready yet, we can try to find the simple layout link
+    const simpleLayoutLink = document.querySelector(`.goog-te-menu-value`) as HTMLElement;
+    if (simpleLayoutLink) {
+      // This is more complex as it involves clicking the menu then the item.
+      // Usually, the .goog-te-combo exists in the background for most layouts.
+    }
+    
+    // 3. Last resort: Cookies (how Google Translate natively stores it)
+    document.cookie = `googtrans=/en/${langCode}; path=/`;
+    location.reload();
+  };
+
+  return (
+    <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300 skiptranslate">
+      <Languages className="h-3.5 w-3.5" />
+      <span className="sr-only">Language</span>
+      <select
+        className="bg-transparent text-[11px] uppercase tracking-[0.14em] outline-none"
+        onChange={(e) => handleLanguageChange(e.target.value)}
+        defaultValue="en"
+      >
+        <option value="en" className="text-slate-950">Language</option>
+        {LANGUAGES.map((lang) => (
+          <option key={lang.code} value={lang.code} className="text-slate-950">
+            {lang.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+};
+
 const DEFAULT_TIMELINE_TASKS: TimelineTaskInput[] = [
   { id: 'launch_prep', name: 'Launch Prep', durationHours: 18, earliestStartHour: 0, latestFinishHour: 24, resource: 'ground' },
   { id: 'ascent', name: 'Ascent / Parking Orbit', durationHours: 4, dependencies: ['launch_prep'], resource: 'vehicle' },
@@ -1017,6 +1051,199 @@ const GENERIC_FLIGHT_SEQUENCE_TEMPLATE: FlightSequenceTemplateEntry[] = [
   { label: 'Return coast', phase: 'Return phase', progress: 0.76, driver: 'Return leg is shaped by transfer geometry and reserve maneuvers.' },
   { label: 'Entry', phase: 'Recovery phase', progress: 0.92, driver: 'Entry corridor and deceleration constraints dominate the return to the origin body.' },
   { label: 'Landing', phase: 'Recovery phase', progress: 0.985, driver: 'Terminal recovery uses residual reserves and site geometry to complete the mission.' },
+];
+
+const APP_STORAGE_KEYS = {
+  theme: 'artemisq-accessibility-theme',
+  fontScale: 'artemisq-accessibility-font-scale',
+} as const;
+
+const TAB_OPTIONS: Array<{ id: Tab; label: string }> = [
+  { id: 'mission', label: 'mission' },
+  { id: 'physics', label: 'physics' },
+  { id: 'vehicle', label: 'vehicle' },
+  { id: 'quantum', label: 'quantum' },
+  { id: 'resources', label: 'resources' },
+];
+
+const THEME_OPTIONS: Array<{ id: ThemeMode; label: string; description: string; colorScheme: 'light' | 'dark'; vars: Record<string, string> }> = [
+  {
+    id: 'dark',
+    label: 'Dark',
+    description: 'Original dark cockpit look.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#050810',
+      '--color-app-surface': '#0d1224',
+      '--color-app-panel': '#020617',
+      '--color-app-panel-soft': 'rgba(2, 6, 23, 0.78)',
+      '--color-app-overlay': 'rgba(0, 0, 0, 0.4)',
+      '--color-app-border': '#1e293b',
+      '--color-app-border-strong': '#334155',
+      '--color-text-primary': '#f1f5f9',
+      '--color-text-secondary': '#cbd5e1',
+      '--color-text-muted': '#94a3b8',
+      '--color-text-faint': '#64748b',
+      '--color-app-accent': '#4B9CD3',
+      '--color-app-accent-soft': 'rgba(75, 156, 211, 0.15)',
+      '--color-app-good': '#86efac',
+      '--color-app-good-soft': 'rgba(34, 197, 94, 0.08)',
+      '--color-app-warn': '#fcd34d',
+      '--color-app-warn-soft': 'rgba(245, 158, 11, 0.08)',
+      '--color-app-bad': '#fca5a5',
+      '--color-app-bad-soft': 'rgba(239, 68, 68, 0.08)',
+      '--color-app-input': '#0f172a',
+      '--color-app-visualizer': 'rgba(0, 0, 0, 0.4)',
+    },
+  },
+  {
+    id: 'light',
+    label: 'Light',
+    description: 'Bright, high-readability daylight theme.',
+    colorScheme: 'light',
+    vars: {
+      '--color-app-bg': '#edf4fb',
+      '--color-app-surface': '#ffffff',
+      '--color-app-panel': '#f8fbff',
+      '--color-app-panel-soft': 'rgba(241, 245, 249, 0.96)',
+      '--color-app-overlay': 'rgba(255, 255, 255, 0.84)',
+      '--color-app-border': '#cbd5e1',
+      '--color-app-border-strong': '#94a3b8',
+      '--color-text-primary': '#0f172a',
+      '--color-text-secondary': '#1e293b',
+      '--color-text-muted': '#475569',
+      '--color-text-faint': '#64748b',
+      '--color-app-accent': '#0f6cbd',
+      '--color-app-accent-soft': 'rgba(15, 108, 189, 0.12)',
+      '--color-app-good': '#166534',
+      '--color-app-good-soft': 'rgba(22, 101, 52, 0.08)',
+      '--color-app-warn': '#b45309',
+      '--color-app-warn-soft': 'rgba(180, 83, 9, 0.08)',
+      '--color-app-bad': '#b91c1c',
+      '--color-app-bad-soft': 'rgba(185, 28, 28, 0.08)',
+      '--color-app-input': '#ffffff',
+      '--color-app-visualizer': 'rgba(255, 255, 255, 0.84)',
+    },
+  },
+  {
+    id: 'ocean',
+    label: 'Ocean',
+    description: 'Blue-green palette with softer contrast.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#06141b',
+      '--color-app-surface': '#0c2530',
+      '--color-app-panel': '#102f3b',
+      '--color-app-panel-soft': 'rgba(7, 27, 36, 0.84)',
+      '--color-app-overlay': 'rgba(6, 20, 27, 0.55)',
+      '--color-app-border': '#1f4958',
+      '--color-app-border-strong': '#2d667a',
+      '--color-text-primary': '#e6fbff',
+      '--color-text-secondary': '#c6ecf5',
+      '--color-text-muted': '#97c6d3',
+      '--color-text-faint': '#6ea0af',
+      '--color-app-accent': '#4cc9f0',
+      '--color-app-accent-soft': 'rgba(76, 201, 240, 0.16)',
+      '--color-app-good': '#6ee7b7',
+      '--color-app-good-soft': 'rgba(16, 185, 129, 0.09)',
+      '--color-app-warn': '#fbbf24',
+      '--color-app-warn-soft': 'rgba(245, 158, 11, 0.09)',
+      '--color-app-bad': '#fda4af',
+      '--color-app-bad-soft': 'rgba(244, 63, 94, 0.1)',
+      '--color-app-input': '#0b1f29',
+      '--color-app-visualizer': 'rgba(4, 16, 22, 0.52)',
+    },
+  },
+  {
+    id: 'high-contrast',
+    label: 'High Contrast',
+    description: 'Extra separation for text, borders, and focus.',
+    colorScheme: 'dark',
+    vars: {
+      '--color-app-bg': '#000000',
+      '--color-app-surface': '#111111',
+      '--color-app-panel': '#181818',
+      '--color-app-panel-soft': 'rgba(0, 0, 0, 0.92)',
+      '--color-app-overlay': 'rgba(0, 0, 0, 0.88)',
+      '--color-app-border': '#ffffff',
+      '--color-app-border-strong': '#ffffff',
+      '--color-text-primary': '#ffffff',
+      '--color-text-secondary': '#f5f5f5',
+      '--color-text-muted': '#ebebeb',
+      '--color-text-faint': '#d4d4d4',
+      '--color-app-accent': '#00e5ff',
+      '--color-app-accent-soft': 'rgba(0, 229, 255, 0.18)',
+      '--color-app-good': '#7CFFB2',
+      '--color-app-good-soft': 'rgba(124, 255, 178, 0.14)',
+      '--color-app-warn': '#FFE072',
+      '--color-app-warn-soft': 'rgba(255, 224, 114, 0.16)',
+      '--color-app-bad': '#FF9C9C',
+      '--color-app-bad-soft': 'rgba(255, 156, 156, 0.16)',
+      '--color-app-input': '#050505',
+      '--color-app-visualizer': 'rgba(0, 0, 0, 0.92)',
+    },
+  },
+];
+
+const QUANTUM_RESOURCE_LINKS = [
+  {
+    title: 'NASA Artemis Program',
+    href: 'https://www.nasa.gov/artemis',
+    summary: 'Mission context for the lunar exploration goals this planner is modeling.',
+  },
+  {
+    title: 'NASA QuAIL',
+    href: 'https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/nasa-quail/',
+    summary: 'NASA’s Quantum Artificial Intelligence Laboratory and its work on optimization, planning, and mission-relevant research.',
+  },
+  {
+    title: 'PennyLane Documentation',
+    href: 'https://docs.pennylane.ai/',
+    summary: 'Reference docs for the variational quantum machine-learning framework already connected to this app.',
+  },
+  {
+    title: 'IBM QAOA Tutorial',
+    href: 'https://qiskit.qotlabs.org/docs/tutorials/quantum-approximate-optimization-algorithm',
+    summary: 'A practical walkthrough of the algorithm family this app simulates in the Quantum tab.',
+  },
+  {
+    title: 'IBM Quantum Platform',
+    href: 'https://quantum.cloud.ibm.com/',
+    summary: 'Learning hub for quantum computing basics, execution models, and current tooling.',
+  },
+];
+
+const FORMULA_EXPLANATIONS = [
+  {
+    title: 'Hohmann transfer',
+    math: 'Two major burns move a spacecraft from one orbit to another as fuel-efficiently as possible.',
+    plainLanguage: 'Think of it as taking the calmest two-step route between circular lanes in space: one push to leave, one push to settle into the new lane.',
+    whereUsed: 'Mission and Physics tabs for transfer timing, delta-v, and route comparisons.',
+  },
+  {
+    title: 'Tsiolkovsky rocket equation',
+    math: 'Relates engine efficiency and the ratio of starting mass to ending mass to the speed change a rocket can produce.',
+    plainLanguage: 'The more propellant you can throw out efficiently, the more speed you can buy, but extra fuel also makes the vehicle heavier at liftoff.',
+    whereUsed: 'Vehicle tab for ascent delta-v and staging tradeoffs.',
+  },
+  {
+    title: 'J2 drift',
+    math: 'Accounts for the fact that Earth is slightly squashed, so an orbit’s plane slowly twists over time.',
+    plainLanguage: 'Earth is not a perfect sphere, so gravity tugs a little unevenly and gradually rotates the orbit’s orientation.',
+    whereUsed: 'Physics tab for orbital drift and long-duration orbit behavior.',
+  },
+  {
+    title: 'Radiation risk and Van Allen exposure',
+    math: 'Combines trajectory geometry with radiation-zone severity to estimate cumulative exposure.',
+    plainLanguage: 'It asks how long the mission spends in rough radiation neighborhoods and how intense those neighborhoods are.',
+    whereUsed: 'Mission tab for crew risk, shielding, and route comparisons.',
+  },
+  {
+    title: 'QAOA and quantum scoring',
+    math: 'Builds a simplified cost Hamiltonian and samples candidate states to find promising low-cost mission paths.',
+    plainLanguage: 'Instead of checking one route at a time, the model uses a quantum-style scoring process to highlight combinations that look promising, then compares them with classical baselines.',
+    whereUsed: 'Quantum tab for simulated optimization layers, state distributions, and diagnostics.',
+  },
 ];
 
 function clamp(value: number, min: number, max: number): number {
@@ -1279,10 +1506,10 @@ function DashboardCard({
   className?: string;
 }) {
   return (
-    <section className={cn('rounded-xl border border-slate-800 bg-[#0d1224]/95 shadow-[0_20px_60px_rgba(0,0,0,0.28)]', className)}>
+    <section className={cn('rounded-xl border border-slate-800 bg-slate-950/95 shadow-[0_20px_60px_rgba(0,0,0,0.28)]', className)}>
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-2">
-          <Icon className="h-4 w-4" style={{ color: CB }} />
+          <Icon className="h-4 w-4" style={{ color: 'var(--color-app-accent)' }} />
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">{title}</h2>
         </div>
         {provenance ? <ProvenancePill kind={provenance} /> : null}
@@ -1316,39 +1543,6 @@ function MetricBadge({
       {unit ? <p className="text-[10px] text-slate-500">{unit}</p> : null}
     </div>
   );
-}
-
-class RenderBoundary extends Component<
-  { label: string; children: ReactNode },
-  { error: Error | null }
-> {
-  constructor(props: { label: string; children: ReactNode }) {
-    super(props);
-    this.state = { error: null };
-  }
-
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-
-  componentDidUpdate(prevProps: { label: string }) {
-    if (prevProps.label !== this.props.label && this.state.error) {
-      this.setState({ error: null });
-    }
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-100">
-          <p className="font-semibold uppercase tracking-[0.14em]">Panel Render Error</p>
-          <p className="mt-2">{this.props.label} failed to render.</p>
-          <p className="mt-2 text-xs text-rose-200/80">{this.state.error.message}</p>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
 }
 
 function ProvenancePill({ kind }: { kind: Provenance }) {
@@ -1678,23 +1872,66 @@ function createPlanetTexture(bodyId: string, baseColor: string) {
   return texture;
 }
 
-function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: string; radius: number }) {
+/**
+ * Axial tilt (rotation about scene-X) for inertial-frame planets, matched to
+ * the J2000 obliquity of the body. Earth uses the date-dependent obliquity of
+ * the ecliptic; other bodies use static IAU-recommended pole tilts.
+ */
+function bodyAxialTiltRad(bodyId: string, date: Date): number {
+  switch (bodyId) {
+    case 'earth':
+      return (obliquityOfEclipticDeg(date) * Math.PI) / 180;
+    case 'mars':
+      return (25.19 * Math.PI) / 180;
+    case 'jupiter':
+      return (3.13 * Math.PI) / 180;
+    case 'saturn':
+      return (26.73 * Math.PI) / 180;
+    case 'uranus':
+      return (97.77 * Math.PI) / 180;
+    case 'neptune':
+      return (28.32 * Math.PI) / 180;
+    case 'mercury':
+      return (0.034 * Math.PI) / 180;
+    case 'venus':
+      return (177.36 * Math.PI) / 180;
+    default:
+      return 0;
+  }
+}
+
+function PrimaryBody3D({
+  bodyId,
+  color,
+  radius,
+  date,
+  spinRad = 0,
+}: {
+  bodyId: string;
+  color: string;
+  radius: number;
+  date?: Date;
+  spinRad?: number;
+}) {
   const texture = useMemo(() => createPlanetTexture(bodyId, color), [bodyId, color]);
+  const tilt = useMemo(() => (date ? bodyAxialTiltRad(bodyId, date) : 0), [bodyId, date]);
   return (
-    <group>
-      <mesh>
-        <sphereGeometry args={[radius, 80, 80]} />
-        <meshPhysicalMaterial
-          map={texture ?? undefined}
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.12}
-          metalness={0.04}
-          roughness={0.84}
-          clearcoat={0.22}
-          clearcoatRoughness={0.78}
-        />
-      </mesh>
+    <group rotation={[tilt, 0, 0]}>
+      <group rotation={[0, spinRad, 0]}>
+        <mesh>
+          <sphereGeometry args={[radius, 80, 80]} />
+          <meshPhysicalMaterial
+            map={texture ?? undefined}
+            color={color}
+            emissive={color}
+            emissiveIntensity={0.12}
+            metalness={0.04}
+            roughness={0.84}
+            clearcoat={0.22}
+            clearcoatRoughness={0.78}
+          />
+        </mesh>
+      </group>
       <mesh scale={1.035}>
         <sphereGeometry args={[radius, 80, 80]} />
         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.16} transparent opacity={0.12} side={THREE.BackSide} />
@@ -1704,6 +1941,165 @@ function PrimaryBody3D({ bodyId, color, radius }: { bodyId: string; color: strin
         <meshBasicMaterial color={color} transparent opacity={0.05} side={THREE.BackSide} />
       </mesh>
     </group>
+  );
+}
+
+/**
+ * Textured planet/moon mesh for the heliocentric scene. Applies axial tilt
+ * (about scene-X) so the rotation axis matches the body's IAU pole, and
+ * renders a halo for visual recognition. Lighting is provided by the scene's
+ * directional Sun light, so the day-side faces the actual ephemeris Sun
+ * direction.
+ */
+function SystemBodyMesh({
+  bodyId,
+  name: _name,
+  color,
+  radius,
+  position,
+  isTarget,
+  atmosphereScaleHeightKm,
+  date,
+  label,
+}: {
+  bodyId: string;
+  name: string;
+  color: string;
+  radius: number;
+  position: [number, number, number];
+  isTarget: boolean;
+  atmosphereScaleHeightKm?: number;
+  date: Date;
+  label: string;
+}) {
+  const texture = useMemo(() => createPlanetTexture(bodyId, color), [bodyId, color]);
+  const tilt = useMemo(() => bodyAxialTiltRad(bodyId, date), [bodyId, date]);
+  return (
+    <group position={position}>
+      <group rotation={[tilt, 0, 0]}>
+        <mesh>
+          <sphereGeometry args={[radius, 56, 56]} />
+          <meshPhysicalMaterial
+            map={texture ?? undefined}
+            color={color}
+            roughness={0.8}
+            metalness={0.04}
+            emissive={color}
+            emissiveIntensity={isTarget ? 0.18 : 0.1}
+            clearcoat={0.18}
+            clearcoatRoughness={0.8}
+          />
+        </mesh>
+      </group>
+      <mesh scale={1.05}>
+        <sphereGeometry args={[radius, 40, 40]} />
+        <meshBasicMaterial color={color} transparent opacity={isTarget ? 0.08 : 0.045} side={THREE.BackSide} />
+      </mesh>
+      <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={atmosphereScaleHeightKm} isPrimary={isTarget} />
+      <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
+        {label}
+      </Text>
+    </group>
+  );
+}
+
+/**
+ * Floating coordinate panel for a clicked Flight-Sequence stage. Renders
+ * inertial RA/Dec (J2000 equatorial), range, and — for surface stages on
+ * Earth — geodetic latitude/longitude plus local mean solar time. Inputs are
+ * the visualizer's scene point (units = km / `kmPerUnit`) and the launch
+ * epoch; the marker's UTC time is derived as `sceneEpoch + stage.timeS`.
+ */
+function StageCoordinatePopover({
+  stage,
+  scenePoint,
+  sceneEpoch,
+  isCislunar,
+  kmPerUnit,
+  primaryRadiusKm,
+  onClose,
+}: {
+  stage: StageDisplay;
+  scenePoint: [number, number, number];
+  sceneEpoch: Date;
+  isCislunar: boolean;
+  kmPerUnit: number;
+  primaryRadiusKm: number;
+  onClose: () => void;
+}) {
+  const stageDate = useMemo(
+    () => new Date(sceneEpoch.getTime() + (stage.timeS ?? 0) * 1000),
+    [sceneEpoch, stage.timeS],
+  );
+  const [ex, ey, ez] = sceneToEciKm(scenePoint, isCislunar, kmPerUnit);
+  const { raHours, decDeg, rangeKm } = eciToRaDec(ex, ey, ez);
+  const altKmCenter = rangeKm - primaryRadiusKm;
+  const isSurface = isCislunar && /launch|landing|pre-flight|entry/i.test(stage.label);
+  const geo = isSurface ? eciToGeodetic(ex, ey, ez, stageDate) : null;
+  const lst = geo ? localMeanSolarTimeHours(stageDate, geo.lonDeg) : null;
+  const lstStr = lst != null
+    ? `${Math.floor(lst).toString().padStart(2, '0')}:${Math.floor((lst % 1) * 60).toString().padStart(2, '0')} LST`
+    : null;
+  return (
+    <Html
+      position={[0, 3.4, 0]}
+      center
+      style={{ pointerEvents: 'auto' }}
+    >
+      <div
+        className="rounded-lg border border-slate-700 bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
+        style={{ minWidth: 320, fontFamily: 'ui-monospace, monospace' }}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">Stage {stage.sequence}</div>
+            <div className="text-base font-semibold" style={{ color: stage.color }}>{stage.label}</div>
+          </div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onClose(); }}
+            className="text-slate-500 hover:text-slate-200"
+            aria-label="Close"
+            style={{ fontSize: 20, lineHeight: 1 }}
+          >×</button>
+        </div>
+        <div className="mt-2 space-y-1 text-[13px] leading-snug text-slate-200">
+          <div>
+            <span className="text-slate-400">UTC </span>
+            {stageDate.toISOString().replace('T', ' ').slice(0, 19)}Z
+          </div>
+          <div>
+            <span className="text-slate-400">T+ </span>
+            {((stage.timeS ?? 0) >= 3600
+              ? `${((stage.timeS ?? 0) / 3600).toFixed(2)} h`
+              : `${(stage.timeS ?? 0).toFixed(0)} s`)}
+          </div>
+          <div>
+            <span className="text-slate-400">Range </span>
+            {rangeKm > 1000 ? `${(rangeKm / 1000).toFixed(2)} × 10³ km` : `${rangeKm.toFixed(1)} km`}
+          </div>
+          <div>
+            <span className="text-slate-400">Alt </span>
+            {altKmCenter >= 0 ? `${altKmCenter.toFixed(1)} km` : 'on surface'}
+          </div>
+          <div className="pt-1 border-t border-slate-800/80">
+            <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">
+              {isCislunar ? 'Geocentric Equatorial (J2000)' : 'Heliocentric Equatorial (J2000)'}
+            </div>
+            <div><span className="text-slate-400">RA </span>{formatRaHMS(raHours)}</div>
+            <div><span className="text-slate-400">Dec </span>{formatDecDMS(decDeg)}</div>
+          </div>
+          {geo ? (
+            <div className="pt-1 border-t border-slate-800/80">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Geodetic (WGS-84)</div>
+              <div><span className="text-slate-400">Lat </span>{formatLat(geo.latDeg)}</div>
+              <div><span className="text-slate-400">Lon </span>{formatLon(geo.lonDeg)}</div>
+              {lstStr ? <div><span className="text-slate-400">Sun </span>{lstStr}</div> : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Html>
   );
 }
 
@@ -1923,7 +2319,11 @@ function MissionGlobe({
     const inbound = encounterIndex < trajectory.length - 1 ? trajectory.slice(encounterIndex) : [];
     return { outboundTrajectory: outbound, returnTrajectory: inbound };
   }, [trajectory, stageList]);
-  const sceneDate = useMemo(() => new Date(launchDate + 'T12:00:00Z'), [launchDate]);
+  // Use the same epoch as `calculateArtemisTrajectory(new Date(launchDate))`
+  // so the rendered Moon (anchored to arrival epoch via lunar ephemeris) lines
+  // up exactly with the trajectory's terminal point. A previous +12 h offset
+  // caused the Moon to drift ~6.5° (~43 000 km) off the line end.
+  const sceneDate = useMemo(() => new Date(launchDate), [launchDate]);
   const heliocentricEarthRadiusScene = RE / VIS_SCENE_KM_PER_UNIT;
   const earthRadiusScene = isCislunar ? RE / CISLUNAR_VIS_KM_PER_UNIT : heliocentricEarthRadiusScene;
   const cislunarKmPerUnit = CISLUNAR_VIS_KM_PER_UNIT;
@@ -1959,15 +2359,26 @@ function MissionGlobe({
       });
   }, [sceneDate, isCislunar, launchBodyId, externalBodies]);
 
+  // Anchor the Moon sphere to its position at the spacecraft's ARRIVAL epoch
+  // so the outbound trajectory line visually terminates at the Moon. The
+  // trajectory builder targets that arrival position; rendering the Moon at
+  // launch epoch would make the line miss the Moon sphere.
+  const arrivalDate = useMemo(() => {
+    const lastOutbound = outboundTrajectory[outboundTrajectory.length - 1];
+    if (lastOutbound?.time_s != null) {
+      return new Date(sceneDate.getTime() + lastOutbound.time_s * 1000);
+    }
+    return sceneDate;
+  }, [outboundTrajectory, sceneDate]);
   const moonScene = useMemo(() => {
-    const km = moonGeocentricPositionKm(sceneDate);
+    const km = moonGeocentricPositionKm(arrivalDate);
     const inv = 1 / cislunarKmPerUnit;
     const trueR = CELESTIAL_BODY_MAP.moon.radiusKm * inv;
     return {
       pos: [km[0] * inv, km[1] * inv, km[2] * inv] as [number, number, number],
       radius: Math.max(2.2, trueR * 2.4),
     };
-  }, [sceneDate, cislunarKmPerUnit]);
+  }, [arrivalDate, cislunarKmPerUnit]);
 
   const moonTexture = useMemo(() => createPlanetTexture('moon', '#c8ccd4'), []);
 
@@ -2039,9 +2450,53 @@ function MissionGlobe({
   });
   const hasReturnPhase = stageList.some((stage) => stage.label === 'Return coast' || stage.label === 'Entry' || stage.label === 'Landing');
 
+  // Earth axial spin = GMST (rad). Other bodies spin at a constant
+  // approximation so they don't appear frozen — non-Earth angles are not
+  // physically calibrated and exist only to break visual symmetry.
+  const primarySpinRad = useMemo(() => {
+    if (launchBody.id !== 'earth') return 0;
+    return gmstRad(sceneDate);
+  }, [launchBody.id, sceneDate]);
+
+  // Apparent Sun direction in J2000 ECI — drives the day/night terminator.
+  // Scene axes match ECI for cislunar; for the heliocentric scene we apply
+  // the same [x, z, y] swap used by `heliocentricHorizonsKmToScene`.
+  const sunDirScene = useMemo<[number, number, number]>(() => {
+    const [sx, sy, sz] = sunDirectionEci(sceneDate);
+    return isCislunar ? [sx, sy, sz] : [sx, sz, sy];
+  }, [sceneDate, isCislunar]);
+  const sunLightPos: [number, number, number] = [
+    sunDirScene[0] * 600,
+    sunDirScene[1] * 600,
+    sunDirScene[2] * 600,
+  ];
+
+  // Live "Moon now" ghost — shows where the Moon actually is at the launch
+  // epoch, distinct from the arrival-anchored Moon sphere that the trajectory
+  // line terminates on. Hidden when the two positions overlap (TOF ≈ 0).
+  const moonNowScene = useMemo(() => {
+    if (!isCislunar) return null;
+    const km = moonGeocentricPositionKm(sceneDate);
+    const inv = 1 / cislunarKmPerUnit;
+    const pos: [number, number, number] = [km[0] * inv, km[1] * inv, km[2] * inv];
+    const dx = pos[0] - moonScene.pos[0];
+    const dy = pos[1] - moonScene.pos[1];
+    const dz = pos[2] - moonScene.pos[2];
+    const sep = Math.hypot(dx, dy, dz);
+    if (sep < moonScene.radius * 1.1) return null;
+    return { pos, radius: moonScene.radius * 0.78 };
+  }, [isCislunar, sceneDate, cislunarKmPerUnit, moonScene]);
+
   return (
     <group>
-      <PrimaryBody3D bodyId={launchBody.id} color={launchBody.color} radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)} />
+      <directionalLight position={sunLightPos} intensity={0.9} color="#fff4d6" />
+      <PrimaryBody3D
+        bodyId={launchBody.id}
+        color={launchBody.color}
+        radius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)}
+        date={sceneDate}
+        spinRad={primarySpinRad}
+      />
       <RadiationOverlay
         bodyRadius={launchBodyId === 'earth' ? earthRadiusScene : bodySceneRadiusFromKm(launchBody.radiusKm)}
         atmosphereScaleHeightKm={launchBody.atmosphereScaleHeightKm}
@@ -2054,43 +2509,62 @@ function MissionGlobe({
         kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
       />
       {isCislunar ? (
-        <group position={moonScene.pos}>
-          <mesh>
-            <sphereGeometry args={[moonScene.radius, 72, 72]} />
-            <meshPhysicalMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.88} metalness={0.03} emissive="#9ca3af" emissiveIntensity={0.08} clearcoat={0.12} clearcoatRoughness={0.82} />
-          </mesh>
-          <mesh scale={1.04}>
-            <sphereGeometry args={[moonScene.radius, 56, 56]} />
-            <meshBasicMaterial color="#e2e8f0" transparent opacity={0.05} side={THREE.BackSide} />
-          </mesh>
-          <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
-            Moon
-          </Text>
-        </group>
+        <>
+          <group position={moonScene.pos}>
+            <mesh>
+              <sphereGeometry args={[moonScene.radius, 72, 72]} />
+              <meshPhysicalMaterial map={moonTexture ?? undefined} color="#d4d8e0" roughness={0.88} metalness={0.03} emissive="#9ca3af" emissiveIntensity={0.08} clearcoat={0.12} clearcoatRoughness={0.82} />
+            </mesh>
+            <mesh scale={1.04}>
+              <sphereGeometry args={[moonScene.radius, 56, 56]} />
+              <meshBasicMaterial color="#e2e8f0" transparent opacity={0.05} side={THREE.BackSide} />
+            </mesh>
+            <Text position={[0, moonScene.radius + 2.2, 0]} fontSize={2.2} color="#e2e8f0" anchorX="center">
+              {moonNowScene ? 'Moon at arrival' : 'Moon'}
+            </Text>
+          </group>
+          {moonNowScene ? (
+            <group position={moonNowScene.pos}>
+              <mesh>
+                <sphereGeometry args={[moonNowScene.radius, 48, 48]} />
+                <meshBasicMaterial color="#94a3b8" transparent opacity={0.32} />
+              </mesh>
+              <mesh scale={1.18}>
+                <sphereGeometry args={[moonNowScene.radius, 36, 36]} />
+                <meshBasicMaterial color="#cbd5e1" transparent opacity={0.08} side={THREE.BackSide} />
+              </mesh>
+              <Text position={[0, moonNowScene.radius + 1.8, 0]} fontSize={1.7} color="#cbd5e1" anchorX="center">
+                Moon now
+              </Text>
+            </group>
+          ) : null}
+        </>
       ) : null}
       {systemBodies.map((body) => {
         const isTarget = body.id === targetBody.id;
         const radius = bodyDisplayRadiusKm(body.radiusKm);
         const bodyPos = (!isCislunar && isTarget && encounterMarker) ? encounterMarker : body.pos as [number, number, number];
         return (
-          <group key={body.id} position={bodyPos}>
-            <mesh>
-              <sphereGeometry args={[radius, 48, 48]} />
-              <meshPhysicalMaterial color={body.color} roughness={0.8} metalness={0.04} emissive={body.color} emissiveIntensity={isTarget ? 0.18 : 0.1} clearcoat={0.18} clearcoatRoughness={0.8} />
-            </mesh>
-            <mesh scale={1.05}>
-              <sphereGeometry args={[radius, 40, 40]} />
-              <meshBasicMaterial color={body.color} transparent opacity={isTarget ? 0.08 : 0.045} side={THREE.BackSide} />
-            </mesh>
-            <RadiationOverlay bodyRadius={radius} atmosphereScaleHeightKm={body.atmosphereScaleHeightKm} isPrimary={isTarget} />
-            <Text position={[0, radius + 3.5, 0]} fontSize={2.5} color={isTarget ? '#f8fafc' : '#94a3b8'} anchorX="center">
-              {isTarget && encounterMarker ? `${body.name} (encounter)` : body.name}
-            </Text>
-          </group>
+          <SystemBodyMesh
+            key={body.id}
+            bodyId={body.id}
+            name={body.name}
+            color={body.color}
+            radius={radius}
+            position={bodyPos}
+            isTarget={isTarget}
+            atmosphereScaleHeightKm={body.atmosphereScaleHeightKm}
+            date={sceneDate}
+            label={isTarget && encounterMarker ? `${body.name} (encounter)` : body.name}
+          />
         );
       })}
       <DreiLine points={outboundTrajectory.map((point) => point.pos)} color="#84cc16" lineWidth={isCislunar ? 3.8 : 2.5} transparent opacity={0.96} />
-      {hasReturnPhase && returnTrajectory.length >= 2 ? (
+      {/* Return polyline (TEI → Earth re-entry). Tilted out of the outbound
+          plane (Rodrigues rotation in the trajectory builder) so it reads as
+          a distinct return path rather than overlapping the outbound. Needed
+          for return-flight planning and stage inspection. */}
+      {returnTrajectory.length >= 2 ? (
         <DreiLine points={returnTrajectory.map((point) => point.pos)} color="#38bdf8" lineWidth={isCislunar ? 3.2 : 2.2} transparent opacity={0.88} />
       ) : null}
       {projectedNodes.map((node) => {
@@ -2143,6 +2617,15 @@ function MissionGlobe({
                 <Text position={[0, sr + 0.45, 0]} fontSize={tf} color={stage.color} anchorX="center">
                   {stage.label}
                 </Text>
+                <StageCoordinatePopover
+                  stage={stage}
+                  scenePoint={stage.point as [number, number, number]}
+                  sceneEpoch={sceneDate}
+                  isCislunar={isCislunar}
+                  kmPerUnit={isCislunar ? cislunarKmPerUnit : VIS_SCENE_KM_PER_UNIT}
+                  primaryRadiusKm={launchBody.radiusKm}
+                  onClose={() => setSelectedStageId(null)}
+                />
               </>
             ) : null}
           </group>
@@ -2389,6 +2872,16 @@ function GroundRangeOverlay({ analysis }: { analysis: GroundConstraintFeed['anal
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'dark';
+    const stored = window.localStorage.getItem(APP_STORAGE_KEYS.theme);
+    return THEME_OPTIONS.some((option) => option.id === stored) ? (stored as ThemeMode) : 'dark';
+  });
+  const [fontScale, setFontScale] = useState<number>(() => {
+    if (typeof window === 'undefined') return 100;
+    const stored = Number(window.localStorage.getItem(APP_STORAGE_KEYS.fontScale));
+    return Number.isFinite(stored) ? clamp(stored, 100, 145) : 100;
+  });
   const [missionType, setMissionType] = useState<MissionType>('lunar');
   const [fuelType, setFuelType] = useState<FuelType>('LH2');
   const [targetPlanet, setTargetPlanet] = useState('moon');
@@ -2435,7 +2928,6 @@ export default function App() {
   const [evaDurationHours, setEvaDurationHours] = useState(6);
   const [evaPlan, setEvaPlan] = useState<EvaPlanFeed | null>(null);
   const [flightReview, setFlightReview] = useState<FlightReviewFeed | null>(null);
-  const [benchmarkValidation, setBenchmarkValidation] = useState<ValidationFeed | null>(null);
   const [stageConfigs, setStageConfigs] = useState<StageConfig[]>(DEFAULT_STAGE_CONFIGS);
   const [multistageAssessment, setMultistageAssessment] = useState<MultiStageAssessment | null>(null);
   const [ccsdsImportText, setCcsdsImportText] = useState('');
@@ -2455,7 +2947,6 @@ export default function App() {
   const [stlVizGeometry, setStlVizGeometry] = useState<THREE.BufferGeometry | null>(null);
   const stlVizGeometryRef = useRef<THREE.BufferGeometry | null>(null);
   const [stlFilename, setStlFilename] = useState<string>('');
-  const [playbackPointIndex, setPlaybackPointIndex] = useState(0);
   useEffect(() => {
     stlVizGeometryRef.current = stlVizGeometry;
   }, [stlVizGeometry]);
@@ -2662,6 +3153,75 @@ export default function App() {
   const handleOptimize = async () => {
     setOptimizing(true);
     try {
+      // Fold live planet/ephemeris signals into the scalar radiation
+      // multiplier so the QUBO's safety/radiation penalty (rad·radiation² +
+      // safety·radiationPenalty²) reacts to actual gravity perturbations and
+      // radiation-zone intensities encountered along the trajectory. We use
+      // the maximum across sources because the optimizer treats it as a
+      // worst-case hazard scaling.
+      const peakTidalMs2 = (gravityInfluence?.assessments ?? [])
+        .filter((item) => item.willInfluence)
+        .reduce((max, item) => Math.max(max, item.maxTidalAccelerationMs2), 0);
+      // 1 µm/s² of tidal pull ≈ 1% extra hazard scaling; capped at +0.4.
+      const gravityHazardScale = Math.min(0.4, peakTidalMs2 * 1e6 * 0.01);
+      const peakRadZone = (nearEarthRadiation?.environment?.zones ?? [])
+        .reduce((max, zone) => Math.max(max, zone.severity ?? 0), 0);
+      const radiationIndex = Math.max(
+        nasaWeather?.radiationIndex || 1.0,
+        nearEarthRadiation?.environment?.aggregateIndex || 1.0,
+        radiationIntersection?.assessment?.normalizedRiskIndex || 1.0,
+        peakRadZone || 1.0,
+      ) + gravityHazardScale;
+
+      const targetBodyData = CELESTIAL_BODY_MAP[targetPlanet];
+      const launchBodyData = CELESTIAL_BODY_MAP[launchBodyId];
+      const escapeVelocityMs = targetBodyData
+        ? Math.sqrt((2 * targetBodyData.muKm3s2 * 1e9) / (targetBodyData.radiusKm * 1000))
+        : 0;
+      const surfaceGravityMs2 = targetBodyData?.standardGravity ?? 0;
+      const bodyContext = {
+        target: targetBodyData ? {
+          id: targetBodyData.id,
+          name: targetBodyData.name,
+          radiusKm: targetBodyData.radiusKm,
+          muKm3s2: targetBodyData.muKm3s2,
+          surfaceGravityMs2,
+          escapeVelocityMs,
+          atmosphereScaleHeightKm: targetBodyData.atmosphereScaleHeightKm ?? null,
+          rotationPeriodHours: targetBodyData.rotationPeriodHours,
+        } : null,
+        launch: launchBodyData ? {
+          id: launchBodyData.id,
+          name: launchBodyData.name,
+          radiusKm: launchBodyData.radiusKm,
+          muKm3s2: launchBodyData.muKm3s2,
+          surfaceGravityMs2: launchBodyData.standardGravity,
+          atmosphereScaleHeightKm: launchBodyData.atmosphereScaleHeightKm ?? null,
+        } : null,
+        gravityPerturbations: (gravityInfluence?.assessments ?? []).map((item) => ({
+          bodyId: item.bodyId,
+          bodyName: item.bodyName,
+          closestApproachKm: item.closestApproachKm,
+          sphereOfInfluenceKm: item.sphereOfInfluenceKm,
+          influenceRatio: item.influenceRatio,
+          maxTidalAccelerationMs2: item.maxTidalAccelerationMs2,
+          willInfluence: item.willInfluence,
+        })),
+        radiationZones: (nearEarthRadiation?.environment?.zones ?? []).map((zone: any) => ({
+          name: zone.name,
+          outerRadiusKm: zone.outerRadiusKm,
+          intensityIndex: zone.intensityIndex,
+          severity: zone.severity,
+        })),
+        ephemeris: (systemEphemeris?.bodies ?? []).map((body) => ({
+          id: body.id,
+          posKm: [body.x, body.y, body.z],
+        })),
+        peakTidalAccelerationMs2: peakTidalMs2,
+        gravityHazardScale,
+        peakRadiationZoneIntensity: peakRadZone,
+      };
+
       const response = await fetch('/api/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2673,17 +3233,14 @@ export default function App() {
           end: missionGraph.nodes[missionGraph.nodes.length - 1]?.id ?? preset.end,
           steps: Math.max(2, missionGraph.nodes.length),
           date: launchDate,
-          radiationIndex: Math.max(
-            nasaWeather?.radiationIndex || 1.0,
-            nearEarthRadiation?.environment?.aggregateIndex || 1.0,
-            radiationIntersection?.assessment?.normalizedRiskIndex || 1.0,
-          ),
+          radiationIndex,
           isp_s: PROPELLANTS[fuelType].isp_vac,
           spacecraft_mass_kg: spacecraftMass,
           qaoa_p: qaoaDepth,
           targetPlanet,
           launchBodyId,
           keplerEl,
+          bodyContext,
           missionProfile: {
             launchOffsetHours,
             launchWindowOffsetsHours: [0, 6, 12, 24, 36],
@@ -2693,13 +3250,14 @@ export default function App() {
             scenarioType,
             inverseTargetRisk: targetRisk,
             inverseTargetCost: targetCostM * 1_000_000,
+            bodyContext,
           },
         }),
       });
       const data = await response.json();
       setOptResult(data);
       addLog(`Mission optimization complete: ${data.qaoa.layers.length} QAOA layers`);
-      addLog(`Mission graph costs are now conditioned on live radiation, comm, and transfer design inputs`);
+      addLog(`Cost surface includes target body μ=${targetBodyData?.muKm3s2.toExponential(3) ?? '?'} km³/s², peak tidal ${peakTidalMs2.toExponential(2)} m/s², radiation zones ×${(nearEarthRadiation?.environment?.zones?.length ?? 0)}`);
     } catch (error) {
       addLog('Mission optimization failed');
     } finally {
@@ -3500,10 +4058,6 @@ export default function App() {
               timeToGoHours: Math.max(2, ((targetPoint.time_s ?? 0) / 3600) - 1),
               thrustN: spacecraftThrust,
               massKg: spacecraftMass,
-              ispS: PROPELLANTS[fuelType].isp_vac,
-              thrustDispersionPct: 3.5,
-              pointingSigmaDeg: 0.4,
-              timingSigmaS: 3,
             }),
           });
           const targetingData = await targetingResponse.json();
@@ -3537,7 +4091,7 @@ export default function App() {
       setManeuverTargeting(null);
       addLog('SGP4 analysis failed');
     }
-  }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass, fuelType]);
+  }, [tleInputText, observedStateText, launchDate, addLog, missionTrajectory, missionKmPerUnit, spacecraftThrust, spacecraftMass]);
 
   const sgp4AutoRunRef = useRef(false);
   useEffect(() => {
@@ -3691,48 +4245,6 @@ export default function App() {
     synthesizeFlightReview();
   }, [launchBodyId, targetPlanet, cislunarOps, launchConstraintAnalysis, trajectoryDesign, optResult, sgp4Conjunctions, celestrakTraffic, groundConstraints, opsConsole, weatherData, nasaWeather, dsnVisibility]);
   useEffect(() => {
-    const runBenchmarkValidation = async () => {
-      try {
-        const transferDays = Math.max(0, (missionTrajectory[missionTrajectory.length - 1]?.time_s ?? 0) / 86400);
-        const totalDeltaVKmS =
-          trajectoryDesign?.patchedConic?.totalDeltaVKmS ??
-          trajectoryDesign?.launchWindows?.[0]?.deltaVKmS ??
-          (optResult?.physics?.transferTime_days != null
-            ? Math.max(0, (optResult.physics.transferTime_days / Math.max(transferDays || 1, 1)) * 0.06)
-            : 0);
-        const totalDoseMsv = cislunarMissionAnalysis?.dose.cumulativeDoseMsv ?? 0;
-        const peakDoseRateMsvHr = cislunarMissionAnalysis?.dose.peakDoseRateMsvHr ?? 0;
-        const commCoverageFraction =
-          cislunarMissionAnalysis?.consumables.commCoverageFraction ??
-          clamp((dsnVisibility?.windows?.reduce((sum, window) => sum + window.durationMinutes, 0) ?? 0) / Math.max(transferDays * 24 * 60, 1), 0, 1);
-        const conjunctionCount = sgp4Conjunctions?.conjunctions?.length ?? celestrakTraffic?.conjunctions?.length ?? 0;
-        const response = await fetch('/api/validation/benchmarks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            launchBodyId,
-            targetBodyId: targetPlanet,
-            transferDays,
-            totalDeltaVKmS,
-            totalDoseMsv,
-            peakDoseRateMsvHr,
-            commCoverageFraction,
-            conjunctionCount,
-          }),
-        });
-        const data = await response.json();
-        setBenchmarkValidation(response.ok ? data : null);
-      } catch {
-        setBenchmarkValidation(null);
-      }
-    };
-    if (!missionTrajectory.length) {
-      setBenchmarkValidation(null);
-      return;
-    }
-    runBenchmarkValidation();
-  }, [launchBodyId, targetPlanet, missionTrajectory, trajectoryDesign, optResult, cislunarMissionAnalysis, dsnVisibility, sgp4Conjunctions, celestrakTraffic]);
-  useEffect(() => {
     if (importedMissionConfig?.tleObjects?.length) {
       const lines = importedMissionConfig.tleObjects.flatMap((item) => [item.name, item.tle1, item.tle2]).join('\n');
       setTleInputText(lines);
@@ -3752,54 +4264,6 @@ export default function App() {
           driver: stage.driver,
         }));
   }, [missionTrajectory, missionKmPerUnit, targetPlanet, launchBodyId]);
-  useEffect(() => {
-    setPlaybackPointIndex((current) => Math.min(current, Math.max(0, missionTrajectory.length - 1)));
-  }, [missionTrajectory.length]);
-  const missionPlayback = useMemo(() => {
-    if (!missionTrajectory.length) return [];
-    let cumulativeDistanceKm = 0;
-    return missionTrajectory.map((point, index) => {
-      if (index > 0) {
-        const previous = missionTrajectory[index - 1];
-        cumulativeDistanceKm += Math.hypot(
-          point.pos[0] - previous.pos[0],
-          point.pos[1] - previous.pos[1],
-          point.pos[2] - previous.pos[2],
-        ) * missionKmPerUnit;
-      }
-      const timeHour = (point.time_s ?? 0) / 3600;
-      const dt = index > 0 ? Math.max((point.time_s ?? 0) - (missionTrajectory[index - 1]?.time_s ?? 0), 1) : 1;
-      const inferredVelocityKmS = index > 0
-        ? cumulativeDistanceKm > 0
-          ? Math.hypot(
-              point.pos[0] - missionTrajectory[index - 1].pos[0],
-              point.pos[1] - missionTrajectory[index - 1].pos[1],
-              point.pos[2] - missionTrajectory[index - 1].pos[2],
-            ) * missionKmPerUnit / dt
-          : 0
-        : 0;
-      const speedKmS = point.vel ? Math.hypot(point.vel[0], point.vel[1], point.vel[2]) : inferredVelocityKmS;
-      const stage = [...missionStages].reverse().find((item) =>
-        item.timeS != null ? timeHour >= (item.timeS ?? 0) / 3600 : (index / Math.max(missionTrajectory.length - 1, 1)) >= item.progress,
-      ) ?? missionStages[0];
-      const activeTask = timelineSolution?.timeline.tasks.find((task) => timeHour >= task.scheduledStartHour && timeHour <= task.scheduledFinishHour) ?? null;
-      const radiusKm = Math.hypot(point.pos[0], point.pos[1], point.pos[2]) * missionKmPerUnit;
-      const zone = launchBodyId === 'earth'
-        ? nearEarthRadiation?.environment?.zones?.find((item) => radiusKm >= item.innerRadiusKm && radiusKm <= item.outerRadiusKm) ?? null
-        : null;
-      return {
-        index,
-        timeHour,
-        cumulativeDistanceKm,
-        speedKmS,
-        stage,
-        activeTask,
-        radiusKm,
-        zone,
-      };
-    });
-  }, [missionTrajectory, missionKmPerUnit, missionStages, timelineSolution, launchBodyId, nearEarthRadiation]);
-  const currentPlayback = missionPlayback[Math.min(playbackPointIndex, Math.max(0, missionPlayback.length - 1))] ?? null;
   const displayedCrewHealth = useMemo(() => {
     if (launchBodyId === 'earth' && targetPlanet === 'moon' && cislunarMissionAnalysis) {
       const dose = cislunarMissionAnalysis.dose;
@@ -3939,40 +4403,99 @@ export default function App() {
     pair: `Z${index}Z${index + 1}`,
     correlation: zz,
   })) ?? [];
+  const activeTheme = THEME_OPTIONS.find((option) => option.id === themeMode) ?? THEME_OPTIONS[0];
+  const appShellStyle = activeTheme.vars as CSSProperties;
+  const fontScaleLabel = `${Math.round(((fontScale - 100) / 45) * 100)}% larger`;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(APP_STORAGE_KEYS.theme, themeMode);
+    window.localStorage.setItem(APP_STORAGE_KEYS.fontScale, String(fontScale));
+    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.style.fontSize = `${fontScale}%`;
+    document.documentElement.style.colorScheme = activeTheme.colorScheme;
+    document.documentElement.style.setProperty('--app-page-bg', activeTheme.vars['--color-app-bg']);
+    document.documentElement.style.setProperty('--app-page-text', activeTheme.vars['--color-text-primary']);
+    document.body.style.backgroundColor = activeTheme.vars['--color-app-bg'];
+    document.body.style.color = activeTheme.vars['--color-text-primary'];
+  }, [activeTheme, fontScale, themeMode]);
+
   const visualizerTitle = activeTab === 'vehicle'
     ? 'STL Aerodynamics Visualizer'
+    : activeTab === 'resources'
+      ? 'Accessibility & Learning Hub'
     : `${launchBody.name} to ${targetBody.name} Mission Visualizer`;
 
   return (
-    <div className="min-h-screen bg-[#050810] text-slate-100">
-      <div className="pointer-events-none fixed inset-0 opacity-[0.05]" style={{ backgroundImage: 'linear-gradient(to right, rgba(75,156,211,0.2) 1px, transparent 1px), linear-gradient(to bottom, rgba(75,156,211,0.2) 1px, transparent 1px)', backgroundSize: '42px 42px' }} />
+    <div className="app-shell min-h-screen text-slate-100" data-theme={themeMode} style={appShellStyle}>
+      <div
+        className="pointer-events-none fixed inset-0 opacity-[0.08]"
+        style={{
+          backgroundImage: 'linear-gradient(to right, color-mix(in srgb, var(--color-app-accent) 28%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--color-app-accent) 28%, transparent) 1px, transparent 1px)',
+          backgroundSize: '42px 42px',
+        }}
+      />
       <div className="relative z-10 mx-auto flex min-h-screen max-w-[1600px] flex-col px-4 py-4">
-        <header className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
-          <div>
+        <header className="mb-4 flex flex-col gap-4 rounded-xl border border-slate-800 bg-black/40 px-5 py-4 backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <img
                 src="/logo.png"
                 alt="ARTEMIS-Q logo"
                 className="h-12 w-12 rounded-lg border border-slate-700 bg-slate-950/70 object-contain p-1 shadow-[0_8px_30px_rgba(0,0,0,0.35)]"
               />
-              <div>
+              <div className="skiptranslate">
                 <h1 className="text-xl font-bold uppercase tracking-[0.28em]">ARTEMIS-Q</h1>
                 <p className="text-sm text-slate-400">Physics-informed mission analysis with explicit provenance and STL-driven ascent optimization.</p>
               </div>
             </div>
+            <LanguageSelector />
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {(['mission', 'physics', 'vehicle', 'quantum'] as const).map((tab) => (
-              <button key={tab} className={cn('rounded-md border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]', activeTab === tab ? 'border-sky-400/60 bg-sky-400/15 text-sky-200' : 'border-slate-700 bg-slate-950/60 text-slate-300')} onClick={() => setActiveTab(tab)}>
-                {tab}
+            {TAB_OPTIONS.map((tab) => (
+              <button key={tab.id} className={cn('rounded-md border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]', activeTab === tab.id ? 'border-sky-400/60 bg-sky-400/15 text-sky-200' : 'border-slate-700 bg-slate-950/60 text-slate-300')} onClick={() => setActiveTab(tab.id)}>
+                {tab.label}
               </button>
             ))}
-            <select className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
+            <select className="max-w-[120px] rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em]" onChange={(event) => handleScenarioChange(event.target.value)} defaultValue="">
               <option value="">Scenarios</option>
               {MISSION_SCENARIOS.map((scenario) => (
                 <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
               ))}
             </select>
+            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300">
+              <Palette className="h-3.5 w-3.5" />
+              <span className="sr-only">Color mode</span>
+              <select
+                aria-label="Color mode"
+                className="bg-transparent text-[11px] uppercase tracking-[0.14em] outline-none"
+                value={themeMode}
+                onChange={(event) => setThemeMode(event.target.value as ThemeMode)}
+              >
+                {THEME_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id} className="text-slate-950">
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-300">
+              <Type className="h-3.5 w-3.5" />
+              <span>Font</span>
+              <input
+                aria-label="Increase font size"
+                className="w-24"
+                type="range"
+                min={100}
+                max={145}
+                step={5}
+                value={fontScale}
+                onChange={(event) => setFontScale(Math.max(100, Number(event.target.value)))}
+              />
+              <span className="min-w-[5.5rem] text-right text-[10px] normal-case tracking-normal text-slate-400">
+                {fontScale === 100 ? 'Smallest' : fontScaleLabel}
+              </span>
+            </label>
           </div>
         </header>
 
@@ -3980,11 +4503,51 @@ export default function App() {
           <section className="flex min-h-0 flex-col gap-4">
             <DashboardCard
               title={visualizerTitle}
-              icon={activeTab === 'vehicle' ? Wind : Globe}
-              provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : importedGraph ? 'formula' : 'preset'}
+              icon={activeTab === 'vehicle' ? Wind : activeTab === 'resources' ? BookOpen : Globe}
+              provenance={activeTab === 'vehicle' ? (stlAnalysis ? 'formula' : 'preset') : activeTab === 'resources' ? 'heuristic' : importedGraph ? 'formula' : 'preset'}
               className="flex-1"
             >
-              {activeTab === 'vehicle' ? (
+              {activeTab === 'resources' ? (
+                <div className="flex h-[420px] flex-col justify-between rounded-xl border border-slate-800 bg-black/40 p-6">
+                  <div className="max-w-3xl space-y-4">
+                    <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/40 bg-sky-400/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200">
+                      <BookOpen className="h-3.5 w-3.5" />
+                      Accessibility and learning
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold text-slate-100">Readable across tabs, with learning support built into the app.</h2>
+                      <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
+                        Color modes and font scaling are now driven by shared app-level settings instead of one-off tab styling. Use the header controls or the Resources tab cards to switch themes, keep the current size as the minimum, and explore the quantum background behind the project.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Current theme</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">{activeTheme.label}</p>
+                        <p className="mt-2 text-sm text-slate-400">{activeTheme.description}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Font size</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">{fontScale === 100 ? 'Smallest' : `${fontScale}%`}</p>
+                        <p className="mt-2 text-sm text-slate-400">The slider only increases from the current baseline, so text never drops below today’s size.</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Resources tab</p>
+                        <p className="mt-2 text-lg font-semibold text-slate-100">Quantum explainers</p>
+                        <p className="mt-2 text-sm text-slate-400">Real links and plain-language formula notes live in the right-side panel for quick study.</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="rounded-lg border border-sky-400/60 bg-sky-400/15 px-4 py-2 text-sm font-semibold text-sky-100" onClick={() => setThemeMode(themeMode === 'light' ? 'dark' : 'light')}>
+                      Toggle light/dark
+                    </button>
+                    <button type="button" className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-sm font-semibold text-slate-200" onClick={() => setFontScale((current) => clamp(current + 5, 100, 145))}>
+                      Increase font size
+                    </button>
+                  </div>
+                </div>
+              ) : activeTab === 'vehicle' ? (
                 stlAnalysis ? (
                   <AeroDynamicsVisualizer stlGeometry={stlVizGeometry} stlAnalysis={stlAnalysis} />
                 ) : (
@@ -4101,6 +4664,8 @@ export default function App() {
               )}
             </DashboardCard>
 
+            {activeTab !== 'resources' ? (
+            <>
             <div className="grid gap-4 lg:grid-cols-3">
               <DashboardCard title="Mission Metrics" icon={Gauge} provenance={optResult ? 'formula' : 'preset'}>
                 <div className="grid grid-cols-2 gap-2">
@@ -4190,8 +4755,61 @@ export default function App() {
                 ))}
               </div>
             </DashboardCard>
+            </>
+            ) : (
+            <div className="grid gap-4 lg:grid-cols-3">
+              <DashboardCard title="Display Settings" icon={Palette} provenance="heuristic">
+                <div className="space-y-4 text-sm text-slate-300">
+                  <label className="flex flex-col gap-2">
+                    <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">Color mode</span>
+                    <select
+                      className="rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                      value={themeMode}
+                      onChange={(event) => setThemeMode(event.target.value as ThemeMode)}
+                    >
+                      {THEME_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} - {option.description}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-2">
+                    <span className="flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                      <span>Font scale</span>
+                      <span>{fontScale === 100 ? 'Smallest' : `${fontScale}%`}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min={100}
+                      max={145}
+                      step={5}
+                      value={fontScale}
+                      onChange={(event) => setFontScale(Math.max(100, Number(event.target.value)))}
+                    />
+                  </label>
+                  <p className="text-xs text-slate-400">These settings persist in local storage and follow you across every tab.</p>
+                </div>
+              </DashboardCard>
 
-            {displayedCrewHealth && optResult ? (
+              <DashboardCard title="Why It Helps" icon={Type} provenance="heuristic">
+                <div className="space-y-3 text-sm text-slate-300">
+                  <p>Color modes are driven by shared theme variables, so the visual system stays consistent when you switch tabs.</p>
+                  <p>The font slider starts at the current baseline and only scales upward, which protects readability.</p>
+                  <p>Focus outlines and link styling are also boosted globally so keyboard navigation stays visible in every mode.</p>
+                </div>
+              </DashboardCard>
+
+              <DashboardCard title="Learning Focus" icon={BookOpen} provenance="heuristic">
+                <div className="space-y-3 text-sm text-slate-300">
+                  <p>The links on this tab point to NASA, IBM, and PennyLane sources that map to the mission-analysis and quantum pieces already in the app.</p>
+                  <p>The formula notes below explain the core ideas in plain language before someone needs to interpret the equations.</p>
+                </div>
+              </DashboardCard>
+            </div>
+            )}
+
+            {activeTab !== 'resources' && displayedCrewHealth && optResult ? (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <DashboardCard title="Crew Health Panel" icon={ShieldAlert} provenance="formula">
@@ -4500,10 +5118,9 @@ export default function App() {
           </section>
 
           <aside className="flex max-h-[calc(100vh-130px)] flex-col gap-4 overflow-y-auto pb-8">
-            <RenderBoundary label={`${activeTab} tab`}>
-              <>
+            <AnimatePresence mode="wait">
               {activeTab === 'mission' ? (
-                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                <motion.div key="mission" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
                   <DashboardCard title="Mission Controls" icon={Globe} provenance={importedGraph ? 'formula' : 'preset'}>
                     <div className="grid gap-3">
                       <label className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
@@ -4838,47 +5455,8 @@ export default function App() {
 
                   <DashboardCard title="Timeline Editor" icon={Gauge} provenance={timelineSolution ? 'formula' : 'preset'}>
                     <div className="space-y-3">
-                      {currentPlayback ? (
-                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                          <div className="mb-2 flex items-center justify-between">
-                            <p className="text-sm text-slate-100">Mission Playback</p>
-                            <span className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                              sample {currentPlayback.index + 1}/{missionPlayback.length}
-                            </span>
-                          </div>
-                          <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                            Playback Cursor
-                            <input
-                              className="mt-2 w-full"
-                              type="range"
-                              min={0}
-                              max={Math.max(0, missionPlayback.length - 1)}
-                              step={1}
-                              value={playbackPointIndex}
-                              onChange={(event) => setPlaybackPointIndex(Number(event.target.value))}
-                            />
-                          </label>
-                          <div className="mt-3 grid grid-cols-2 gap-2">
-                            <MetricBadge label="Mission Time" value={currentPlayback.timeHour.toFixed(1)} unit="h" />
-                            <MetricBadge label="Stage" value={currentPlayback.stage?.label ?? '--'} unit={currentPlayback.stage?.phase ?? 'mission phase'} tone="good" />
-                            <MetricBadge label="Distance" value={currentPlayback.cumulativeDistanceKm.toFixed(0)} unit="km cumulative" />
-                            <MetricBadge label="Speed" value={currentPlayback.speedKmS.toFixed(3)} unit="km/s" />
-                            <MetricBadge label="Radius" value={currentPlayback.radiusKm.toFixed(0)} unit="km from origin" />
-                            <MetricBadge
-                              label="Active Task"
-                              value={currentPlayback.activeTask?.name ?? 'coast'}
-                              unit={currentPlayback.activeTask ? `${formatHour(currentPlayback.activeTask.scheduledStartHour)} → ${formatHour(currentPlayback.activeTask.scheduledFinishHour)}` : 'no scheduled task'}
-                              tone={currentPlayback.activeTask?.critical ? 'warn' : 'default'}
-                            />
-                          </div>
-                          <p className="mt-2 text-xs text-slate-400">
-                            {currentPlayback.stage?.driver ?? 'Playback follows the current trajectory state.'}
-                            {currentPlayback.zone ? ` Current environment: ${currentPlayback.zone.label} belt shell.` : ''}
-                          </p>
-                        </div>
-                      ) : null}
                       {timelineTasks.map((task, index) => (
-                        <div key={task.id} className="grid grid-cols-1 gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3 md:grid-cols-[1.1fr_0.5fr_0.7fr_0.8fr_0.6fr_0.6fr]">
+                        <div key={task.id} className="grid grid-cols-[1.3fr_0.6fr_0.7fr] gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
                           <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
                             Task
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.name} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} />
@@ -4888,28 +5466,8 @@ export default function App() {
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.durationHours} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, durationHours: +event.target.value } : item))} />
                           </label>
                           <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                            Dependencies
-                            <input
-                              className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
-                              value={(task.dependencies ?? []).join(', ')}
-                              onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? {
-                                ...item,
-                                dependencies: event.target.value.split(',').map((value) => value.trim()).filter(Boolean),
-                              } : item))}
-                              placeholder="launch, loiter"
-                            />
-                          </label>
-                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
                             Resource
                             <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" value={task.resource ?? ''} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, resource: event.target.value } : item))} />
-                          </label>
-                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                            Earliest
-                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.earliestStartHour ?? 0} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, earliestStartHour: +event.target.value } : item))} />
-                          </label>
-                          <label className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                            Latest
-                            <input className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100" type="number" value={task.latestFinishHour ?? 0} onChange={(event) => setTimelineTasks((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, latestFinishHour: +event.target.value || undefined } : item))} />
                           </label>
                         </div>
                       ))}
@@ -5000,43 +5558,6 @@ export default function App() {
                         </div>
                       ) : null}
                     </div>
-                  </DashboardCard>
-
-                  <DashboardCard title="Benchmark Validation" icon={Gauge} provenance={benchmarkValidation ? 'formula' : 'preset'}>
-                    {benchmarkValidation?.validation ? (
-                      <div className="space-y-3">
-                        <div className="grid grid-cols-2 gap-2">
-                          <MetricBadge
-                            label="Benchmark"
-                            value={benchmarkValidation.validation.overallStatus}
-                            unit={benchmarkValidation.validation.benchmarkName}
-                            tone={benchmarkValidation.validation.overallStatus === 'PASS' ? 'good' : benchmarkValidation.validation.overallStatus === 'WARN' ? 'warn' : 'bad'}
-                          />
-                          <MetricBadge label="Calibration Score" value={(benchmarkValidation.validation.score * 100).toFixed(0)} unit="%" tone={benchmarkValidation.validation.score > 0.8 ? 'good' : benchmarkValidation.validation.score > 0.55 ? 'warn' : 'bad'} />
-                        </div>
-                        <div className="space-y-2 text-xs text-slate-300">
-                          {benchmarkValidation.validation.checks.map((check) => (
-                            <div key={check.metric} className="rounded border border-slate-800 bg-black/20 px-3 py-2">
-                              <div className="flex items-center justify-between">
-                                <span>{check.metric}</span>
-                                <StatusPill value={check.status} tone={check.status === 'PASS' ? 'good' : check.status === 'WARN' ? 'warn' : 'bad'} />
-                              </div>
-                              <p className="mt-1 text-slate-400">
-                                actual {check.actual.toFixed(2)} {check.unit} | expected {check.expectedMin.toFixed(2)}-{check.expectedMax.toFixed(2)} {check.unit}
-                              </p>
-                              <p className="mt-1 text-slate-500">{check.rationale}</p>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
-                          {benchmarkValidation.validation.notes.map((note) => (
-                            <p key={note}>{note}</p>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-400">Benchmark calibration appears once trajectory, dose, comm, and conjunction metrics have been solved.</p>
-                    )}
                   </DashboardCard>
 
                   <DashboardCard title="Crew EVA & Flight Review" icon={ShieldAlert} provenance={flightReview ? 'formula' : 'preset'}>
@@ -5139,7 +5660,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'physics' ? (
-                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                <motion.div key="physics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
                   <DashboardCard title="Keplerian Controls" icon={Gauge} provenance="formula">
                     <div className="space-y-3">
                       {([
@@ -5253,42 +5774,8 @@ export default function App() {
                             <MetricBadge label="Burn" value={maneuverTargeting.targeting.burnDurationS.toFixed(1)} unit="s" />
                             <MetricBadge label="Closing V" value={maneuverTargeting.targeting.closingVelocityKmS.toFixed(4)} unit="km/s" />
                             <MetricBadge label="Arrival Error" value={maneuverTargeting.targeting.estimatedArrivalErrorKm.toFixed(2)} unit="km" tone={maneuverTargeting.targeting.estimatedArrivalErrorKm < 5 ? 'good' : 'warn'} />
-                            <MetricBadge label="Propellant" value={maneuverTargeting.targeting.propellantConsumedKg.toFixed(1)} unit={`kg | ${maneuverTargeting.targeting.propellantFractionPct.toFixed(2)}%`} />
-                            <MetricBadge label="Time Error" value={maneuverTargeting.targeting.estimatedArrivalTimeErrorS.toFixed(1)} unit="s" tone={maneuverTargeting.targeting.estimatedArrivalTimeErrorS < 10 ? 'good' : 'warn'} />
-                            <MetricBadge label="Ignition Accel" value={maneuverTargeting.targeting.ignitionAccelerationMs2.toFixed(3)} unit="m/s²" />
-                            <MetricBadge label="Burnout Accel" value={maneuverTargeting.targeting.burnoutAccelerationMs2.toFixed(3)} unit="m/s²" />
                           </div>
                           <p className="mt-2 text-xs text-slate-500">Vector: {maneuverTargeting.targeting.deltaVVectorKmS.map((item) => item.toFixed(5)).join(', ')} km/s</p>
-                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                            <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
-                              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Finite-Burn Arc</p>
-                              <div className="mt-2 space-y-1 text-xs text-slate-300">
-                                {maneuverTargeting.targeting.finiteBurnSamples.map((sample) => (
-                                  <div key={sample.timeS} className="flex items-center justify-between rounded border border-slate-800 px-2 py-1">
-                                    <span>{sample.timeS.toFixed(1)} s</span>
-                                    <span>Δv {sample.cumulativeDeltaVKmS.toFixed(4)} km/s</span>
-                                    <span>{sample.massKg.toFixed(0)} kg</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                            <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
-                              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Dispersion Envelope</p>
-                              <div className="mt-2 space-y-2 text-xs text-slate-300">
-                                {maneuverTargeting.targeting.dispersionCases.map((caseItem) => (
-                                  <div key={caseItem.label} className="rounded border border-slate-800 px-3 py-2">
-                                    <div className="flex items-center justify-between">
-                                      <span>{caseItem.label.replace('_', ' ')}</span>
-                                      <span className="text-sky-200">{caseItem.estimatedMissDistanceKm.toFixed(2)} km miss</span>
-                                    </div>
-                                    <p className="mt-1 text-slate-500">
-                                      thrust x{caseItem.thrustScale.toFixed(3)} | point {caseItem.pointingErrorDeg.toFixed(2)} deg | offset {caseItem.timingOffsetS.toFixed(1)} s
-                                    </p>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
                         </div>
                       ) : null}
                     </div>
@@ -5301,7 +5788,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'vehicle' ? (
-                <motion.div key="vehicle" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                <motion.div key="vehicle" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
                   <DashboardCard title="Vehicle Inputs" icon={Upload} provenance={stlAnalysis ? 'formula' : 'preset'}>
                     <div className="space-y-3">
                       <label className="block">
@@ -5520,7 +6007,7 @@ export default function App() {
               ) : null}
 
               {activeTab === 'quantum' ? (
-                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                <motion.div key="quantum" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
                   <DashboardCard title="Quantum Layer" icon={Atom} provenance={optResult ? 'formula' : 'preset'}>
                     <div className="space-y-3 text-sm text-slate-300">
                       <p>The quantum path now runs a simulated QAOA statevector evolution on a reduced mission cost Hamiltonian. It is still not hardware, but the amplitudes, phase evolution, and reported state distribution now come from an actual deterministic quantum simulation rather than a display-only heuristic.</p>
@@ -5768,8 +6255,55 @@ export default function App() {
                   </DashboardCard>
                 </motion.div>
               ) : null}
-              </>
-            </RenderBoundary>
+
+              {activeTab === 'resources' ? (
+                <motion.div key="resources" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex flex-col gap-4">
+                  <DashboardCard title="Quantum Resources" icon={BookOpen} provenance="heuristic">
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>These are real external references for understanding the mission context, the quantum tooling, and the optimization ideas reflected in ARTEMIS-Q.</p>
+                      <div className="space-y-3">
+                        {QUANTUM_RESOURCE_LINKS.map((resource) => (
+                          <a
+                            key={resource.href}
+                            className="block rounded-lg border border-slate-800 bg-slate-950/60 p-3 transition hover:border-slate-600"
+                            href={resource.href}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <p className="font-semibold text-sky-200">{resource.title}</p>
+                            <p className="mt-1 text-xs text-slate-400">{resource.summary}</p>
+                            <p className="mt-2 text-[11px] text-slate-500">{resource.href}</p>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Formula Explanations" icon={Atom} provenance="heuristic">
+                    <div className="space-y-3">
+                      {FORMULA_EXPLANATIONS.map((item) => (
+                        <div key={item.title} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <h3 className="text-sm font-semibold text-slate-100">{item.title}</h3>
+                            <span className="rounded-full border border-slate-700 px-2 py-1 text-[9px] uppercase tracking-[0.14em] text-slate-400">{item.whereUsed}</span>
+                          </div>
+                          <p className="mt-2 text-xs text-slate-300">{item.math}</p>
+                          <p className="mt-2 text-xs leading-relaxed text-slate-400">{item.plainLanguage}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </DashboardCard>
+
+                  <DashboardCard title="Project Fit" icon={Rocket} provenance="heuristic">
+                    <div className="space-y-3 text-sm text-slate-300">
+                      <p>In this project, quantum methods are being used as decision-support layers, not as magic replacements for orbital mechanics.</p>
+                      <p>The mission, physics, and vehicle tabs still rely on classical models for transfer, staging, atmosphere, and risk. The quantum layer helps rank candidate paths, tradeoffs, and surrogate decisions on top of that physics base.</p>
+                      <p className="text-xs text-slate-400">That means the most practical learning path is: understand the mission physics first, then look at how quantum optimization or QML can help search or score the option space more efficiently.</p>
+                    </div>
+                  </DashboardCard>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
           </aside>
         </main>
       </div>
