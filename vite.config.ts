@@ -24,20 +24,63 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, '.'),
-      'es-toolkit/compat/sortBy': path.resolve(
-        __dirname,
-        'node_modules/es-toolkit/dist/compat/array/sortBy.js',
-      ),
-      'es-toolkit/compat/throttle': path.resolve(
-        __dirname,
-        'node_modules/es-toolkit/dist/compat/function/throttle.js',
-      ),
-      zustand: path.resolve(__dirname, 'node_modules/zustand'),
-      'zustand/shallow': path.resolve(__dirname, 'node_modules/zustand/shallow.js'),
-      'zustand/traditional': path.resolve(__dirname, 'node_modules/zustand/traditional.js'),
-    },
+    alias: [
+      {find: '@', replacement: path.resolve(__dirname, '.')},
+      {
+        find: 'es-toolkit/compat/get',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/get.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/isPlainObject',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/isPlainObject.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/last',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/last.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/maxBy',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/maxBy.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/minBy',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/minBy.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/omit',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/omit.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/range',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/range.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/sortBy',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/sortBy.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/sumBy',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/sumBy.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/throttle',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/throttle.ts'),
+      },
+      {
+        find: 'es-toolkit/compat/uniqBy',
+        replacement: path.resolve(__dirname, 'src/shims/es-toolkit-compat/uniqBy.ts'),
+      },
+      {find: /^framer-motion$/, replacement: path.resolve(__dirname, 'node_modules/framer-motion/dist/cjs/index.js')},
+      {find: /^zustand$/, replacement: path.resolve(__dirname, 'node_modules/zustand/index.js')},
+      {find: 'zustand/middleware', replacement: path.resolve(__dirname, 'node_modules/zustand/middleware.js')},
+      {find: 'zustand/react/shallow', replacement: path.resolve(__dirname, 'node_modules/zustand/shallow.js')},
+      {find: 'zustand/shallow', replacement: path.resolve(__dirname, 'node_modules/zustand/shallow.js')},
+      {
+        find: 'zustand/traditional',
+        replacement: path.resolve(__dirname, 'node_modules/zustand/traditional.js'),
+      },
+      {find: 'zustand/vanilla/shallow', replacement: path.resolve(__dirname, 'node_modules/zustand/shallow.js')},
+    ],
   },
   server: {
     host: '0.0.0.0',
